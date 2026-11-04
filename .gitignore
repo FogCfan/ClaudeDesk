@@ -1,0 +1,6 @@
+build/
+.cache/
+imgui.ini
+*.exe
+screenshots/
+.claude/settings.local.json

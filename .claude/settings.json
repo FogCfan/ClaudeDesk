@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build --preset debug:*)",
+      "Bash(cmake --preset debug:*)",
+      "Bash(ctest --preset debug:*)",
+      "Bash(build/debug/desk_tests.exe:*)",
+      "Bash(./build/debug/desk_tests.exe:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "PowerShell(cmake --build --preset debug:*)",
+      "PowerShell(ctest --preset debug:*)",
+      "PowerShell(git status:*)",
+      "PowerShell(git diff:*)",
+      "PowerShell(git log:*)"
+    ],
+    "deny": [
+      "Bash(cmake --build --preset release:*)",
+      "Bash(git push:*)",
+      "PowerShell(cmake --build --preset release:*)",
+      "PowerShell(git push:*)"
+    ]
+  }
+}
