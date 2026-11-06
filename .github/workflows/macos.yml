@@ -1,0 +1,19 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dépendances (Homebrew)
+        run: brew install ninja sdl3 nlohmann-json freetype
+      - name: Compilation Debug + tests
+        run: ./mac.sh build
+      - name: Compilation Release
+        run: ./mac.sh release build
