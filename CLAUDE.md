@@ -29,6 +29,11 @@ ctest --preset debug              # ou build/debug/desk_tests.exe
 ```
 `debug.bat build` fait les deux. Toujours compiler + tester après une modification.
 
+**macOS** : presets `mac-debug` / `mac-release`, script `./mac.sh [release] [build]` (Homebrew).
+Code spécifique isolé : `Process.cpp` (Win32) / `Process_posix.cpp`, `#ifdef _WIN32` dans
+`util/Paths.cpp`, `util/Strings.cpp`, `CommandLine.cpp` et les listes de polices de `App.cpp`.
+Le workflow `.github/workflows/macos.yml` compile et teste sur macOS à chaque push.
+
 ## ⚠ Auto-développement : ne pas casser l'outil en cours d'utilisation
 - **Ne jamais compiler la Release** (`release.bat`, `cmake --build --preset release`) pendant une
   session : l'exécutable est verrouillé et c'est lui qui fait tourner la conversation.

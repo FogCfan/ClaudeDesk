@@ -14,6 +14,7 @@ include(FetchContent)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Freetype REQUIRED)
+find_package(Threads REQUIRED)
 
 FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -62,7 +63,6 @@ endfunction()
 add_library(desk_core STATIC
     src/util/Strings.cpp
     src/util/Paths.cpp
-    src/claude/Process.cpp
     src/claude/CommandLine.cpp
     src/claude/SessionConfig.cpp
     src/claude/Transcript.cpp
@@ -72,8 +72,14 @@ add_library(desk_core STATIC
     src/claude/History.cpp
     src/workspace/Workspace.cpp
     src/app/Settings.cpp)
+# Processus enfant : Win32 ou POSIX (macOS, Linux).
+if(WIN32)
+    target_sources(desk_core PRIVATE src/claude/Process.cpp)
+else()
+    target_sources(desk_core PRIVATE src/claude/Process_posix.cpp)
+endif()
 target_include_directories(desk_core PUBLIC src)
-target_link_libraries(desk_core PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(desk_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
 desk_warnings(desk_core)
 
 # --- Application ---------------------------------------------------------------

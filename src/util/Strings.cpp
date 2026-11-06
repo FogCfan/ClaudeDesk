@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <random>
@@ -22,7 +23,23 @@ std::wstring widen(std::string_view utf8) {
     MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), out.data(), n);
     return out;
 #else
-    return std::wstring(utf8.begin(), utf8.end());
+    // wchar_t fait 32 bits hors Windows : décodage UTF-8 -> points de code.
+    std::wstring out;
+    out.reserve(utf8.size());
+    for (size_t i = 0; i < utf8.size();) {
+        unsigned char c = (unsigned char)utf8[i];
+        int len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+        if (len == 0 || i + len > utf8.size()) {
+            out += (wchar_t)0xFFFD;
+            ++i;
+            continue;
+        }
+        uint32_t cp = len == 1 ? c : c & (0xFF >> (len + 1));
+        for (int k = 1; k < len; ++k) cp = (cp << 6) | ((unsigned char)utf8[i + k] & 0x3F);
+        out += (wchar_t)cp;
+        i += len;
+    }
+    return out;
 #endif
 }
 
@@ -34,7 +51,24 @@ std::string narrow(std::wstring_view wide) {
     WideCharToMultiByte(CP_UTF8, 0, wide.data(), (int)wide.size(), out.data(), n, nullptr, nullptr);
     return out;
 #else
-    return std::string(wide.begin(), wide.end());
+    std::string out;
+    out.reserve(wide.size());
+    for (wchar_t wc : wide) {
+        uint32_t cp = (uint32_t)wc;
+        if (cp < 0x80) out += (char)cp;
+        else if (cp < 0x800) out += (char)(0xC0 | (cp >> 6)), out += (char)(0x80 | (cp & 0x3F));
+        else if (cp < 0x10000) {
+            out += (char)(0xE0 | (cp >> 12));
+            out += (char)(0x80 | ((cp >> 6) & 0x3F));
+            out += (char)(0x80 | (cp & 0x3F));
+        } else {
+            out += (char)(0xF0 | (cp >> 18));
+            out += (char)(0x80 | ((cp >> 12) & 0x3F));
+            out += (char)(0x80 | ((cp >> 6) & 0x3F));
+            out += (char)(0x80 | (cp & 0x3F));
+        }
+    }
+    return out;
 #endif
 }
 

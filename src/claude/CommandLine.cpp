@@ -2,6 +2,10 @@
 
 #include <cstdlib>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include "util/Paths.h"
 #include "util/Strings.h"
 
@@ -37,12 +41,11 @@ std::string buildCommandLine(const std::string& exe, const std::vector<std::stri
 
 std::string findClaudeExecutable() {
     std::vector<fs::path> dirs;
+    std::error_code ec;
 #ifdef _WIN32
     if (const wchar_t* p = _wgetenv(L"PATH"))
         for (auto& d : util::split(util::narrow(p), ';'))
             if (!d.empty()) dirs.push_back(util::pathFromUtf8(d));
-#endif
-    std::error_code ec;
     for (const auto& d : dirs)
         if (fs::exists(d / "claude.exe", ec)) return util::pathToUtf8(d / "claude.exe");
     for (const auto& d : dirs) {
@@ -54,6 +57,21 @@ std::string findClaudeExecutable() {
     }
     fs::path local = util::homeDir() / ".local" / "bin" / "claude.exe";
     if (fs::exists(local, ec)) return util::pathToUtf8(local);
+#else
+    // PATH (complété au démarrage par celui du shell de connexion, cf. util::importLoginShellPath),
+    // puis les emplacements d'installation habituels.
+    if (const char* p = std::getenv("PATH"))
+        for (auto& d : util::split(p, ':'))
+            if (!d.empty()) dirs.push_back(fs::path(d));
+    fs::path home = util::homeDir();
+    for (fs::path d : {home / ".local" / "bin", home / ".claude" / "local", home / ".npm-global" / "bin",
+                       home / ".bun" / "bin", fs::path("/opt/homebrew/bin"), fs::path("/usr/local/bin")})
+        dirs.push_back(d);
+    for (const auto& d : dirs) {
+        fs::path c = d / "claude";
+        if (fs::is_regular_file(c, ec) && ::access(c.c_str(), X_OK) == 0) return util::pathToUtf8(c);
+    }
+#endif
     return {};
 }
 

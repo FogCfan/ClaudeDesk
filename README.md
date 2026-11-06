@@ -18,6 +18,19 @@ Prérequis : MSYS2 UCRT64 avec `gcc cmake ninja sdl3 nlohmann-json freetype`
 nécessaires sont copiées à côté de l'exécutable à la compilation, et Claude Code
 installé (`claude.exe` est détecté automatiquement, sinon : Configuration › Application).
 
+### macOS
+
+```
+brew install cmake ninja sdl3 nlohmann-json freetype
+./mac.sh                  compile en Debug, lance les tests, puis l'application
+./mac.sh build            compile + tests seulement
+./mac.sh release          compile en Release puis lance → build/mac-release/ClaudeDesk
+```
+
+`claude` est cherché dans le PATH du shell de connexion (récupéré au démarrage, même lancé
+depuis le Finder), puis dans `~/.local/bin`, `/opt/homebrew/bin` et `/usr/local/bin`.
+Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/Documents/ClaudeDesk`.
+
 ## Fonctionnalités
 
 ### Éditeur

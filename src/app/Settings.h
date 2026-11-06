@@ -1,5 +1,6 @@
 #pragma once
-// Réglages de l'application, sauvegardés dans %APPDATA%\ClaudeDesk\settings.json.
+// Réglages de l'application, sauvegardés dans %APPDATA%\ClaudeDesk\settings.json
+// (macOS : ~/Library/Application Support/ClaudeDesk/settings.json).
 #include <string>
 #include <vector>
 

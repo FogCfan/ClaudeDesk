@@ -30,7 +30,9 @@ static int64_t fileTimeUnix(const fs::path& p) {
     std::error_code ec;
     auto ft = fs::last_write_time(p, ec);
     if (ec) return 0;
-    auto sys = std::chrono::clock_cast<std::chrono::system_clock>(ft);
+    // clock_cast n'existe pas encore dans la libc++ d'Apple : conversion par décalage.
+    auto sys = std::chrono::system_clock::now() +
+               std::chrono::duration_cast<std::chrono::system_clock::duration>(ft - fs::file_time_type::clock::now());
     return std::chrono::duration_cast<std::chrono::seconds>(sys.time_since_epoch()).count();
 }
 

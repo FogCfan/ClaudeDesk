@@ -1,8 +1,9 @@
 #pragma once
-// Processus enfant avec stdin/stdout/stderr redirigés (Win32).
+// Processus enfant avec stdin/stdout/stderr redirigés (Win32 : Process.cpp, POSIX : Process_posix.cpp).
 // Deux threads lisent stdout et stderr ligne par ligne et empilent les lignes
 // dans des files protégées : le thread UI les récupère avec poll().
 #include <atomic>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -42,13 +43,21 @@ public:
     std::vector<ProcessLine> poll();
 
 private:
-    void readerLoop(void* handle, bool isStderr);
+    void readerLoop(std::intptr_t handle, bool isStderr);
     void cleanupHandles();
 
+#ifdef _WIN32
     void* process_ = nullptr;
     void* stdinWrite_ = nullptr;
     void* stdoutRead_ = nullptr;
     void* stderrRead_ = nullptr;
+#else
+    int pid_ = -1;  // chef de son propre groupe de processus (arrêt de tout l'arbre)
+    mutable bool reaped_ = false;
+    int stdinFd_ = -1;
+    int stdoutFd_ = -1;
+    int stderrFd_ = -1;
+#endif
     std::thread outThread_, errThread_;
     std::mutex mutex_;
     std::deque<ProcessLine> lines_;

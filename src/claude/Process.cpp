@@ -56,12 +56,12 @@ bool Process::start(const std::string& exe, const std::vector<std::string>& args
     stdinWrite_ = inW;
     stdoutRead_ = outR;
     stderrRead_ = errR;
-    outThread_ = std::thread(&Process::readerLoop, this, stdoutRead_, false);
-    errThread_ = std::thread(&Process::readerLoop, this, stderrRead_, true);
+    outThread_ = std::thread(&Process::readerLoop, this, (std::intptr_t)stdoutRead_, false);
+    errThread_ = std::thread(&Process::readerLoop, this, (std::intptr_t)stderrRead_, true);
     return true;
 }
 
-void Process::readerLoop(void* handle, bool isStderr) {
+void Process::readerLoop(std::intptr_t handle, bool isStderr) {
     std::string pending;
     char buf[8192];
     DWORD n = 0;

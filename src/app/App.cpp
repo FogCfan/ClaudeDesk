@@ -275,31 +275,79 @@ void App::restartApp() {
     else toast("Relance impossible : redémarrez ClaudeDesk à la main.", true);
 }
 
+// Polices système par plateforme : premier fichier existant de chaque liste
+// (`index` = numéro de face dans un .ttc), plus des polices de secours fusionnées
+// pour les symboles et les écritures non latines.
+namespace {
+struct FontFile {
+    const char* path;
+    int index = 0;
+};
+#if defined(_WIN32)
+const FontFile kUi[] = {{"C:/Windows/Fonts/segoeui.ttf"}};
+const FontFile kBold[] = {{"C:/Windows/Fonts/segoeuib.ttf"}};
+const FontFile kItalic[] = {{"C:/Windows/Fonts/segoeuii.ttf"}};
+const FontFile kMono[] = {{"C:/Windows/Fonts/consola.ttf"}};
+const FontFile kFallbacks[] = {{"C:/Windows/Fonts/seguisym.ttf"}, {"C:/Windows/Fonts/seguiemj.ttf"},
+                               {"C:/Windows/Fonts/msyh.ttc"}};
+#elif defined(__APPLE__)
+// Arial : seule famille présente sur tous les macOS en fichiers séparés regular/gras/italique
+// (SF Pro est une police variable dont FreeType ne charge que la graisse par défaut).
+const FontFile kUi[] = {{"/System/Library/Fonts/Supplemental/Arial.ttf"}, {"/Library/Fonts/Arial.ttf"},
+                        {"/System/Library/Fonts/SFNS.ttf"}};
+const FontFile kBold[] = {{"/System/Library/Fonts/Supplemental/Arial Bold.ttf"}, {"/Library/Fonts/Arial Bold.ttf"}};
+const FontFile kItalic[] = {{"/System/Library/Fonts/Supplemental/Arial Italic.ttf"},
+                            {"/Library/Fonts/Arial Italic.ttf"}};
+const FontFile kMono[] = {{"/System/Library/Fonts/Menlo.ttc", 0}, {"/System/Library/Fonts/SFNSMono.ttf"},
+                          {"/System/Library/Fonts/Monaco.ttf"}};
+// Apple Color Emoji (bitmaps sbix à tailles fixes) n'est pas fusionnée : rendu non fiable.
+const FontFile kFallbacks[] = {{"/System/Library/Fonts/Apple Symbols.ttf"},
+                               {"/System/Library/Fonts/Supplemental/Arial Unicode.ttf"},
+                               {"/Library/Fonts/Arial Unicode.ttf"}};
+#else
+const FontFile kUi[] = {{"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"},
+                        {"/usr/share/fonts/TTF/DejaVuSans.ttf"}};
+const FontFile kBold[] = {{"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"},
+                          {"/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"}};
+const FontFile kItalic[] = {{"/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"},
+                            {"/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf"}};
+const FontFile kMono[] = {{"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"},
+                          {"/usr/share/fonts/TTF/DejaVuSansMono.ttf"}};
+const FontFile kFallbacks[] = {{"/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf"}};
+#endif
+}  // namespace
+
 FontSet App::loadFonts() {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
     applyFontLoader(false);
-    const char* fontsDir = "C:/Windows/Fonts/";
-    auto file = [&](const char* name) { return std::string(fontsDir) + name; };
-    auto exists = [](const std::string& p) {
+    auto exists = [](const char* p) {
         std::error_code ec;
         return fs::exists(util::pathFromUtf8(p), ec);
     };
-    auto addWithFallbacks = [&](const char* main) -> ImFont* {
+    auto addWithFallbacks = [&](auto& candidates) -> ImFont* {
         ImFont* f = nullptr;
-        if (exists(file(main))) f = io.Fonts->AddFontFromFileTTF(file(main).c_str(), settings_.fontSize);
+        for (const FontFile& c : candidates) {
+            if (!exists(c.path)) continue;
+            ImFontConfig cfg;
+            cfg.FontNo = c.index;
+            if ((f = io.Fonts->AddFontFromFileTTF(c.path, settings_.fontSize, &cfg))) break;
+        }
         if (!f) return io.Fonts->AddFontDefault();
-        ImFontConfig merge;
-        merge.MergeMode = true;
-        for (const char* fb : {"seguisym.ttf", "seguiemj.ttf", "msyh.ttc"})
-            if (exists(file(fb))) io.Fonts->AddFontFromFileTTF(file(fb).c_str(), settings_.fontSize, &merge);
+        for (const FontFile& fb : kFallbacks) {
+            if (!exists(fb.path)) continue;
+            ImFontConfig merge;
+            merge.MergeMode = true;
+            merge.FontNo = fb.index;
+            io.Fonts->AddFontFromFileTTF(fb.path, settings_.fontSize, &merge);
+        }
         return f;
     };
     FontSet set;
-    set.ui = addWithFallbacks("segoeui.ttf");
-    set.bold = addWithFallbacks("segoeuib.ttf");
-    set.mono = addWithFallbacks("consola.ttf");
-    set.italic = addWithFallbacks("segoeuii.ttf");
+    set.ui = addWithFallbacks(kUi);
+    set.bold = addWithFallbacks(kBold);
+    set.mono = addWithFallbacks(kMono);
+    set.italic = addWithFallbacks(kItalic);
     io.FontDefault = set.ui;
     return set;
 }

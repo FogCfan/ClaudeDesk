@@ -7,8 +7,8 @@ namespace fs = std::filesystem;
 
 namespace util {
 
-fs::path homeDir();          // %USERPROFILE%
-fs::path appDataDir();       // %APPDATA%\ClaudeDesk (créé si absent)
+fs::path homeDir();          // %USERPROFILE% (Windows), $HOME ailleurs
+fs::path appDataDir();       // %APPDATA%\ClaudeDesk, ~/Library/Application Support/ClaudeDesk (macOS), créé si absent
 fs::path documentsDir();     // %USERPROFILE%\Documents
 fs::path claudeConfigDir();  // %USERPROFILE%\.claude
 
@@ -27,5 +27,12 @@ void openInShell(const std::string& target);
 
 // Relance l'exécutable courant avec les mêmes arguments (l'appelant doit ensuite quitter).
 bool relaunchSelf();
+
+// Mémorise argc/argv (utilisés par relaunchSelf hors Windows). À appeler depuis main().
+void setLaunchArgs(int argc, char** argv);
+
+// macOS / Linux : remplace le PATH minimal hérité du Finder par celui du shell de connexion
+// (Homebrew, node, ~/.local/bin…), pour trouver `claude` et ce qu'il lance. Sans effet sous Windows.
+void importLoginShellPath();
 
 }  // namespace util
