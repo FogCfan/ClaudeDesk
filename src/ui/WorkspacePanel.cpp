@@ -399,6 +399,17 @@ void App::drawInspector() {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Synthétise les récaps des conversations du dossier (et sous-dossiers).\n"
                               "Elle est injectée dans le contexte des nouvelles conversations.");
+        if (f->isProject && f->name != "Divers") {
+            ImGui::SameLine();
+            if (ImGui::Button("Orchestrer…")) {
+                if (!orch_ || !orch_->running()) loadOrchestrator(f);
+                showOrchestrator_ = true;
+                ImGui::SetWindowFocus("Orchestrateur");
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Chaque thème du projet devient un agent ; une conversation « Orchestrateur »\n"
+                                  "leur délègue le travail et vérifie, jusqu'à atteindre l'objectif.");
+        }
         if (f->isProject) {
             ImGui::SeparatorText("Dossier de travail du projet");
             ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 6);

@@ -14,6 +14,7 @@
 #include "claude/ClaudeSession.h"
 #include "claude/History.h"
 #include "claude/OneShot.h"
+#include "claude/Orchestrator.h"
 #include "claude/UsageTracker.h"
 #include "ui/Markdown.h"
 #include "workspace/Workspace.h"
@@ -164,6 +165,7 @@ private:
     void drawDashboardCard(OpenConversation& oc, int index, float width, float height);
     void drawActivityFeed();
     void drawShortcutTables();                // AppMenus.cpp
+    void drawOrchestratorWindow();            // OrchestratorPanel.cpp
     void drawGuideWindow();                   // Tutorial.cpp
     void drawTour();                          // Tutorial.cpp
     void drawWelcomeModal();                  // Tutorial.cpp
@@ -178,14 +180,17 @@ private:
     void dashboardFrame();
 
     // --- Actions ---
-    OpenConversation* newConversation(ws::Folder* folder, const std::string& cwdOverride = {});
-    OpenConversation* openConversation(const std::string& id);
+    // `focus` = false : ouverte en arrière-plan, sans changer l'onglet actif (orchestrateur).
+    OpenConversation* newConversation(ws::Folder* folder, const std::string& cwdOverride = {}, bool focus = true);
+    OpenConversation* openConversation(const std::string& id, bool focus = true);
     OpenConversation* openImported(const claude::HistorySession& hs, ws::Folder* folder);
     void closeConversation(int index);
     void saveConversation(OpenConversation& oc);
     void saveAll();
     void sendDraft(OpenConversation& oc);
-    void sendText(OpenConversation& oc, const std::string& text, const std::vector<claude::ImageAttachment>& images = {});
+    // `remember` = false : ne pas ajouter le texte à l'historique des prompts (envois automatiques).
+    void sendText(OpenConversation& oc, const std::string& text, const std::vector<claude::ImageAttachment>& images = {},
+                  bool remember = true);
     void pushActivity(const OpenConversation& oc, ActivityKind kind, const std::string& text);
     void focusConversation(int index);  // affiche la conversation dans le cockpit
     void requestRecap(const std::string& convId);
@@ -203,6 +208,15 @@ private:
     void openFolderDialog(std::function<void(const std::string&)> cb, const std::string& start = {});
     void openFileDialog(std::function<void(const std::vector<std::string>&)> cb);
 
+    // --- Orchestrateur (OrchestratorPanel.cpp) ---
+    friend class AppOrchHost;
+    void tickOrchestrator();
+    bool loadOrchestrator(ws::Folder* project);
+    void saveOrchestrator();
+    bool orchestratorStart();
+    ws::Folder* orchProjectFolder();
+    int indexOfConversation(const std::string& id) const;
+
     // --- Données ---
     SDL_Window* window_ = nullptr;
     SDL_Renderer* renderer_ = nullptr;
@@ -210,6 +224,7 @@ private:
     std::string optDataDir_, optWorkspace_, optSend_, optScreenshot_, optCwd_;
     double optAfter_ = 3.0;
     std::string optPanel_;
+    std::string optOrchestrate_;   // --orchestrate "<objectif>" : lance l'orchestrateur sur le 1er projet
     bool optNoWait_ = false;
     ImGuiContext* mainCtx_ = nullptr;
     bool fontReloadPending_ = false;
@@ -269,6 +284,12 @@ private:
     int configTab_ = -1;           // onglet à sélectionner dans Configuration
     bool openNewProject_ = false;
     bool resetLayout_ = false;
+
+    // Orchestrateur : une seule orchestration à la fois
+    std::unique_ptr<claude::Orchestrator> orch_;
+    std::string orchProject_;      // chemin UTF-8 du projet piloté
+    bool showOrchestrator_ = false;
+    double orchLastSave_ = 0;
 
     // Nouveau projet
     std::string npName_, npCwd_, npFolders_ = "Code, Infra, Docs, Idées";

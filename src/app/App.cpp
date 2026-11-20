@@ -43,6 +43,7 @@ int App::run(int argc, char** argv) {
         else if (a == "--cwd") optCwd_ = next();
         else if (a == "--panel") optPanel_ = next();
         else if (a == "--nowait") optNoWait_ = true;
+        else if (a == "--orchestrate") optOrchestrate_ = next();
     }
     if (!init()) return 1;
     if (optPanel_ == "history") showHistory_ = true;
@@ -62,6 +63,19 @@ int App::run(int argc, char** argv) {
     }
     if (optPanel_ == "welcome") showWelcomeModal_ = true;
     if (optPanel_ == "example") createExampleProject();
+    if (optPanel_ == "orchestrator" || !optOrchestrate_.empty()) {
+        showOrchestrator_ = true;
+        for (auto& p : workspace_.projects())
+            if (p->name != "Divers" && !p->children.empty()) {
+                loadOrchestrator(p.get());
+                break;
+            }
+        if (orch_ && !optOrchestrate_.empty()) {
+            orch_->settings.objective = optOrchestrate_;
+            orch_->settings.maxCycles = std::min(orch_->settings.maxCycles, 4);
+            orchestratorStart();
+        }
+    }
     // Accueil des nouveaux utilisateurs : 1er lancement → le guide s'ouvre ; lancements 2 à 11 → un rappel
     // animé indique où le retrouver ; ensuite plus rien (sauf réinitialisation).
     settings_.launchCount++;
@@ -371,6 +385,7 @@ void App::shutdown() {
     bool detached = dash_ != nullptr;
     closeDashboardWindow();
     settings_.dashDetached = detached;
+    if (orch_) saveOrchestrator();
     saveAll();
     // Ferme toutes les entrées d'abord : les processus se terminent en parallèle.
     for (auto& oc : open_) oc->session->stop();
@@ -440,6 +455,7 @@ void App::frame() {
     }
     ImGui::PopStyleVar();  // fondu de page
     if (showHistory_) drawHistoryImport();
+    if (showOrchestrator_) drawOrchestratorWindow();
     if (showGuide_) drawGuideWindow();
     drawWelcomeModal();
     drawGuideReminder();
@@ -499,6 +515,7 @@ void App::frame() {
             if ((oc->session->state == claude::SessionState::Busy || oc->session->state == claude::SessionState::Starting) &&
                 oc->session->permissions.empty())
                 waiting = true;
+        if (orch_ && orch_->running() && orch_->state != claude::OrchState::UsagePause) waiting = true;
         if (now_ > optAfter_ && (optNoWait_ || !waiting || now_ > optAfter_ + 120)) {
             if (SDL_Surface* surf = SDL_RenderReadPixels(renderer_, nullptr)) {
                 SDL_SaveBMP(surf, optScreenshot_.c_str());
@@ -681,6 +698,7 @@ void App::processAsyncResults() {
         oc->wasBusy = busy;
         if (s.dirty && !s.entries.empty() && now_ - oc->lastSave > std::max(1, settings_.autosaveSeconds)) saveConversation(*oc);
     }
+    tickOrchestrator();
     for (auto& j : jobs_) j->update();
     jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [](auto& j) { return j->finished(); }), jobs_.end());
 
@@ -769,7 +787,7 @@ std::string App::contextFor(OpenConversation& oc) {
     return ctx;
 }
 
-OpenConversation* App::newConversation(ws::Folder* folder, const std::string& cwdOverride) {
+OpenConversation* App::newConversation(ws::Folder* folder, const std::string& cwdOverride, bool focus) {
     if (!folder) folder = workspace_.findFolderByPath(util::pathFromUtf8(selectedFolder_));
     if (!folder) folder = defaultFolder();
     auto oc = std::make_unique<OpenConversation>();
@@ -784,16 +802,18 @@ OpenConversation* App::newConversation(ws::Folder* folder, const std::string& cw
     oc->injectContext = settings_.injectContext;
     oc->meta.id = s.localId;
     open_.push_back(std::move(oc));
-    selectTab_ = (int)open_.size() - 1;
-    active_ = selectTab_;
+    if (focus || active_ < 0) {
+        selectTab_ = (int)open_.size() - 1;
+        active_ = selectTab_;
+    }
     settings_.pushRecentCwd(open_.back()->session->cwd);
     return open_.back().get();
 }
 
-OpenConversation* App::openConversation(const std::string& id) {
+OpenConversation* App::openConversation(const std::string& id, bool focus) {
     for (size_t i = 0; i < open_.size(); ++i)
         if (open_[i]->session->localId == id) {
-            selectTab_ = (int)i;
+            if (focus) selectTab_ = (int)i;
             return open_[i].get();
         }
     auto [folder, meta] = workspace_.findConversation(id);
@@ -814,7 +834,7 @@ OpenConversation* App::openConversation(const std::string& id) {
     oc->injectContext = j.value("injectContext", settings_.injectContext);
     oc->lastSave = now_;
     open_.push_back(std::move(oc));
-    selectTab_ = (int)open_.size() - 1;
+    if (focus || active_ < 0) selectTab_ = (int)open_.size() - 1;
     return open_.back().get();
 }
 
@@ -877,7 +897,8 @@ void App::saveAll() {
         if (oc->session->dirty) saveConversation(*oc);
 }
 
-void App::sendText(OpenConversation& oc, const std::string& text, const std::vector<claude::ImageAttachment>& images) {
+void App::sendText(OpenConversation& oc, const std::string& text, const std::vector<claude::ImageAttachment>& images,
+                   bool remember) {
     if (util::trim(text).empty() && images.empty()) return;
     auto& s = *oc.session;
     if (claudeExe_.empty()) {
@@ -886,7 +907,7 @@ void App::sendText(OpenConversation& oc, const std::string& text, const std::vec
     }
     s.claudeExe = claudeExe_;
     if (!s.processRunning()) s.extraContext = contextFor(oc);
-    settings_.pushPromptHistory(text);
+    if (remember) settings_.pushPromptHistory(text);
     s.send(text, images);
     oc.scrollToBottom = true;
     saveConversation(oc);
@@ -1131,6 +1152,10 @@ void App::handleGlobalShortcuts() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_2, g)) {
         if (dash_) SDL_RaiseWindow(dash_->window);
         else page_ = 1;
+    }
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_3, g)) {
+        showOrchestrator_ = !showOrchestrator_;
+        if (showOrchestrator_) ImGui::SetWindowFocus("Orchestrateur");
     }
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_D, g)) {
         if (dash_) closeDashboardWindow();

@@ -117,6 +117,10 @@ void App::drawMenuBar() {
             if (dash_) closeDashboardWindow();
             else openDashboardWindow();
         }
+        if (ImGui::MenuItem("Orchestrateur (agents automatiques)", "Ctrl+3", showOrchestrator_)) {
+            showOrchestrator_ = !showOrchestrator_;
+            if (showOrchestrator_) ImGui::SetWindowFocus("Orchestrateur");
+        }
         ImGui::Separator();
         if (ImGui::BeginMenu("Thème")) {
             const char* themes[] = {"Sombre", "Clair", "Crépuscule"};
