@@ -45,7 +45,9 @@ struct Card {
     ImVec4 color;
     float pad;
     bool accentBar;
-    Card(float w, const ImVec4& c, bool bar = false) : dl(ImGui::GetWindowDrawList()), width(w), color(c), accentBar(bar) {
+    ImVec4 barColor;
+    Card(float w, const ImVec4& c, bool bar = false, ImVec4 barCol = ImVec4(0, 0, 0, 0))
+        : dl(ImGui::GetWindowDrawList()), width(w), color(c), accentBar(bar), barColor(barCol) {
         pad = ImGui::GetStyle().FramePadding.x + 2;
         splitter.Split(dl, 2);
         splitter.SetCurrentChannel(dl, 1);
@@ -61,7 +63,9 @@ struct Card {
         ImVec2 endP(start.x + width, ImGui::GetItemRectMax().y);
         splitter.SetCurrentChannel(dl, 0);
         dl->AddRectFilled(start, endP, ui::col(color), 8.0f);
-        if (accentBar) dl->AddRectFilled(start, ImVec2(start.x + 3, endP.y), ui::col(ui::palette().accent), 8.0f, ImDrawFlags_RoundCornersLeft);
+        if (accentBar)
+            dl->AddRectFilled(start, ImVec2(start.x + 4, endP.y), ui::col(barColor.w > 0 ? barColor : ui::palette().accent), 8.0f,
+                              ImDrawFlags_RoundCornersLeft);
         splitter.Merge(dl);
     }
 };
@@ -136,7 +140,10 @@ void App::drawConversationArea() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 4));
     ImGui::Begin("Conversations", nullptr, ImGuiWindowFlags_NoCollapse);
     ImGui::PopStyleVar();
-    if (open_.empty()) {
+    int visible = 0;
+    for (auto& oc : open_)
+        if (!isOrchBrain(oc->session->localId)) ++visible;
+    if (visible == 0) {
         drawWelcome();
         ImGui::End();
         return;
@@ -149,6 +156,7 @@ void App::drawConversationArea() {
         for (int i = 0; i < (int)open_.size(); ++i) {
             auto& oc = *open_[i];
             auto& s = *oc.session;
+            if (isOrchBrain(s.localId)) continue;  // affichée dans la page « Orchestrateur »
             std::string label = util::truncateUtf8(s.title.empty() ? "Sans titre" : s.title, 32);
             if (s.state == claude::SessionState::Busy) label += "  ●";
             if (!s.permissions.empty()) label += "  ⚠";
@@ -339,6 +347,7 @@ void App::drawConversation(OpenConversation& oc) {
     ImGui::Dummy(ImVec2(0, 4));
     int shown = 0;
     int hoveredNow = -1;
+    int64_t lastMinute = -1;  // horodatage à la minute
     for (int i = 0; i < (int)s.entries.size(); ++i) {
         const Entry& e = s.entries[i];
         if (!e.parentToolUseId.empty()) continue;  // affichées sous l'outil Task correspondant
@@ -348,18 +357,44 @@ void App::drawConversation(OpenConversation& oc) {
             continue;
         ++shown;
         // En-tête « Claude » au début de chaque réponse (après un message de l'utilisateur).
+        bool claudeHeader = false;
         if (e.kind != EntryKind::User && e.kind != EntryKind::System && e.kind != EntryKind::Error && oc.search.empty()) {
             int prev = i - 1;
             while (prev >= 0 && (!s.entries[prev].parentToolUseId.empty() ||
                                  (s.entries[prev].kind == EntryKind::Thinking && s.entries[prev].text.empty())))
                 --prev;
-            if (prev >= 0 && s.entries[prev].kind == EntryKind::User) {
-                ImGui::PushFont(fontBold, 0.0f);
-                ImGui::TextColored(pal.accent, "Claude");
-                ImGui::PopFont();
-                ImGui::SameLine();
-                ImGui::TextDisabled("%s", clockTime(e.time).c_str());
+            claudeHeader = prev >= 0 && s.entries[prev].kind == EntryKind::User;
+        }
+        // Horodatage à la minute : un repère chaque fois que la minute change (rien tant qu'elle ne change pas,
+        // même si une réponse met plusieurs minutes à s'écrire). Les messages de l'utilisateur et l'en-tête
+        // « Claude » portent déjà l'heure.
+        if (oc.search.empty() && e.time > 0) {
+            int64_t minute = e.time / 60;
+            if (minute != lastMinute) {
+                if (!claudeHeader && e.kind != EntryKind::User) {
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    std::string lbl = clockTime(e.time);
+                    ImGui::PushFont(fontUi, ImGui::GetStyle().FontSizeBase * 0.8f);
+                    ImVec2 p0 = ImGui::GetCursorScreenPos();
+                    ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
+                    float y = p0.y + ts.y * 0.55f;
+                    float lead = ImGui::GetFontSize() * 1.2f;
+                    dl->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + lead, y), ui::col(pal.dim, 0.45f), 1.0f);
+                    ImGui::SetCursorScreenPos(ImVec2(p0.x + lead + 6, p0.y));
+                    ImGui::TextColored(ImVec4(pal.dim.x, pal.dim.y, pal.dim.z, 0.9f), "%s", lbl.c_str());
+                    float x2 = ImGui::GetItemRectMax().x + 6;
+                    dl->AddLine(ImVec2(x2, y), ImVec2(std::max(x2, p0.x + width - 8), y), ui::col(pal.dim, 0.18f), 1.0f);
+                    ImGui::PopFont();
+                }
+                lastMinute = minute;
             }
+        }
+        if (claudeHeader) {
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextColored(pal.accent, "Claude");
+            ImGui::PopFont();
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", clockTime(e.time).c_str());
         }
         EntryCache& c = oc.cache[i];
         // Saut des entrées hors écran (hauteur connue) : la liste reste fluide même très longue.
@@ -529,6 +564,7 @@ void App::drawEntry(OpenConversation& oc, int i, float width) {
     const auto& pal = ui::palette();
     EntryCache& cache = oc.cache[i];
     ui::MdStyle md{fontUi, fontBold, fontMono, settings_.wrapCode, fontItalic};
+    if (!oc.selectable.count(i) && isOrchBrain(s.localId) && drawBrainEntry(oc, i, width)) return;
 
     switch (e.kind) {
         case EntryKind::User: {
@@ -614,6 +650,164 @@ void App::drawEntry(OpenConversation& oc, int i, float width) {
             break;
         }
     }
+}
+
+// Discussion de l'orchestrateur : messages de ClaudeDesk repliés, directives en cartes.
+// Renvoie false pour laisser le rendu normal (message écrit par l'utilisateur, outils…).
+bool App::drawBrainEntry(OpenConversation& oc, int i, float width) {
+    auto& s = *oc.session;
+    const Entry& e = s.entries[i];
+    const auto& pal = ui::palette();
+    EntryCache& cache = oc.cache[i];
+    ui::MdStyle md{fontUi, fontBold, fontMono, settings_.wrapCode, fontItalic};
+    const int expandKey = 1000000 + i * 64;  // plage réservée dans oc.expanded
+
+    if (e.kind == EntryKind::User) {
+        std::string title = claude::orchestratorMessageTitle(e.text);
+        bool answer = util::startsWith(util::trim(e.text), "# Réponse de l'humain");
+        if (title.empty() && !answer) return false;
+        ImGui::Dummy(ImVec2(0, 2));
+        if (answer) {
+            Card card(width, pal.userBg, true, pal.warn);
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextColored(pal.warn, "Vous — réponse à sa question");
+            ImGui::PopFont();
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", clockTime(e.time).c_str());
+            std::string body = util::trim(e.text);
+            body = body.substr(std::min(body.size(), body.find('\n') == std::string::npos ? body.size() : body.find('\n')));
+            util::replaceAll(body, "Poursuis et donne tes directives.", "");
+            ImGui::PushTextWrapPos(0.0f);
+            ui::renderMarkdown(ui::parseMarkdown(util::trim(body)), md, expandKey);
+            ImGui::PopTextWrapPos();
+            card.end();
+        } else {
+            bool open = oc.expanded.count(expandKey) > 0;
+            Card card(width, pal.cardBg, true, pal.link);
+            ImGui::TextColored(pal.link, "ClaudeDesk → orchestrateur");
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", clockTime(e.time).c_str());
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextUnformatted(title.c_str());
+            ImGui::PopFont();
+            ImGui::SameLine();
+            if (ImGui::SmallButton(open ? "Masquer" : "Afficher le message")) {
+                if (open) oc.expanded.erase(expandKey);
+                else oc.expanded.insert(expandKey);
+            }
+            if (open) {
+                ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+                ui::renderMarkdown(ui::parseMarkdown(e.text), md, expandKey + 1);
+                ImGui::PopStyleColor();
+            }
+            card.end();
+        }
+        ImGui::Dummy(ImVec2(0, 2));
+        return true;
+    }
+    if (e.kind != EntryKind::Assistant) return false;
+
+    if (cache.segLen != e.text.size()) {
+        cache.segs = claude::splitDirectiveSegments(e.text);
+        cache.segBlocks.clear();
+        for (auto& sg : cache.segs) {
+            std::string body = sg.body;
+            // Cases « [ ] » des choix proposés : le rendu Markdown ne les connaît pas.
+            util::replaceAll(body, "- [ ] ", "- ☐ ");
+            util::replaceAll(body, "- [x] ", "- ☑ ");
+            util::replaceAll(body, "- [X] ", "- ☑ ");
+            cache.segBlocks.push_back(ui::parseMarkdown(body));
+        }
+        cache.segLen = e.text.size();
+    }
+    bool pending = orch_ && orch_->state == claude::OrchState::WaitingHuman;
+    ImGui::Indent(4);
+    for (size_t k = 0; k < cache.segs.size(); ++k) {
+        const claude::TextSegment& sg = cache.segs[k];
+        ImGui::PushID((int)k);
+        if (sg.kind == claude::TextSegment::Text) {
+            RightMargin rm(8);
+            ui::renderMarkdown(cache.segBlocks[k], md, expandKey + 2 + (int)k);
+        } else if (sg.kind == claude::TextSegment::Delegate) {
+            claude::Directives d = claude::parseDirectives("@@DELEGUER " + sg.header + "\n@@FIN");
+            std::string agent = d.delegations.empty() ? sg.header : d.delegations[0].agent;
+            std::string params;
+            if (!d.delegations.empty() && (!d.delegations[0].model.empty() || !d.delegations[0].effort.empty()))
+                params = (d.delegations[0].model.empty() ? std::string("modèle par défaut") : d.delegations[0].model) +
+                         (d.delegations[0].effort.empty() ? "" : " · effort " + d.delegations[0].effort);
+            ImGui::Dummy(ImVec2(0, 2));
+            Card card(width - 8, pal.cardBg, true, pal.link);
+            ImGui::TextColored(pal.link, "→ Tâche confiée à");
+            ImGui::SameLine();
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextUnformatted(agent.c_str());
+            ImGui::PopFont();
+            ImGui::SameLine();
+            if (!params.empty()) ui::badge(params.c_str(), claude::modelTier(params) >= 3 ? pal.warn : pal.dim);
+            else ui::badge("modèle par défaut", pal.dim);
+            if (params.empty() && ImGui::IsItemHovered())
+                ImGui::SetTooltip("L'orchestrateur n'a pas choisi de modèle pour cette tâche : le modèle par défaut des\n"
+                                  "agents a été appliqué. ClaudeDesk le lui rappelle dans le compte rendu suivant.");
+            int key = expandKey + 32 + (int)k;
+            bool open = oc.expanded.count(key) > 0;
+            size_t lines = std::count(sg.body.begin(), sg.body.end(), '\n') + 1;
+            if (open || lines <= 4) {
+                RightMargin rm(card.pad);
+                ui::renderMarkdown(cache.segBlocks[k], md, key);
+            } else {
+                std::string preview;
+                int n = 0;
+                for (auto& l : util::splitLines(sg.body)) {
+                    if (n++ >= 3) break;
+                    preview += l + "\n";
+                }
+                ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextUnformatted(util::trim(preview).c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::PopStyleColor();
+            }
+            if (lines > 4 && ImGui::SmallButton(open ? "Réduire" : ("Voir toute la tâche (" + std::to_string(lines) + " lignes)").c_str())) {
+                if (open) oc.expanded.erase(key);
+                else oc.expanded.insert(key);
+            }
+            card.end();
+        } else if (sg.kind == claude::TextSegment::Human) {
+            ImGui::Dummy(ImVec2(0, 2));
+            Card card(width - 8, ImVec4(pal.warn.x, pal.warn.y, pal.warn.z, 0.08f), true, pal.warn);
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextColored(pal.warn, "❓ Question pour vous");
+            ImGui::PopFont();
+            if (pending && i + 1 >= (int)s.entries.size() - 1) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("— répondez dans la carte en haut de la page");
+            }
+            {
+                RightMargin rm(card.pad);
+                ui::renderMarkdown(cache.segBlocks[k], md, expandKey + 40 + (int)k);
+            }
+            card.end();
+        } else {
+            ImGui::Dummy(ImVec2(0, 2));
+            Card card(width - 8, ImVec4(pal.ok.x, pal.ok.y, pal.ok.z, 0.08f), true, pal.ok);
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextColored(pal.ok, "✓ Bilan final");
+            ImGui::PopFont();
+            {
+                RightMargin rm(card.pad);
+                ui::renderMarkdown(cache.segBlocks[k], md, expandKey + 48 + (int)k);
+            }
+            card.end();
+        }
+        ImGui::PopID();
+    }
+    if (e.streaming) {
+        ImVec4 cc = pal.accent;
+        cc.w = 0.3f + 0.7f * ui::anim::pulse(1.4f);
+        ImGui::TextColored(cc, "▍");
+    }
+    ImGui::Unindent(4);
+    return true;
 }
 
 void App::drawToolEntry(OpenConversation& oc, int i, float width) {

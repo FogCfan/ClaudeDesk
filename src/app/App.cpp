@@ -63,13 +63,28 @@ int App::run(int argc, char** argv) {
     }
     if (optPanel_ == "welcome") showWelcomeModal_ = true;
     if (optPanel_ == "example") createExampleProject();
-    if (optPanel_ == "orchestrator" || !optOrchestrate_.empty()) {
-        showOrchestrator_ = true;
+    if (optPanel_ == "synthesis")  // test : synthèse du premier projet (récaps manquants d'abord)
         for (auto& p : workspace_.projects())
-            if (p->name != "Divers" && !p->children.empty()) {
-                loadOrchestrator(p.get());
+            if (p->name != "Divers") {
+                selectedFolder_ = util::pathToUtf8(p->path);
+                requestFolderRecap(p.get());
                 break;
             }
+    autoLoadOrchestrator();  // orchestration du dernier projet piloté (sa discussion reste hors des onglets)
+    if (optPanel_ == "orchestrator:discussion") orchShowDiscussion_ = true;
+    // --panel orchestrator[:budget|:modeles|:execution|:discussion] : ouvre la page (et un onglet).
+    if (optPanel_.rfind("orchestrator", 0) == 0 || !optOrchestrate_.empty()) {
+        if (optPanel_ == "orchestrator:reglages") orchSettingsTab_ = 0;
+        if (optPanel_ == "orchestrator:budget") orchSettingsTab_ = 1;
+        if (optPanel_ == "orchestrator:modeles") orchSettingsTab_ = 2;
+        if (optPanel_ == "orchestrator:execution") orchSettingsTab_ = 3;
+        page_ = 2;
+        if (!orch_)
+            for (auto& p : workspace_.projects())
+                if (p->name != "Divers" && !p->children.empty()) {
+                    loadOrchestrator(p.get());
+                    break;
+                }
         if (orch_ && !optOrchestrate_.empty()) {
             orch_->settings.objective = optOrchestrate_;
             orch_->settings.maxCycles = std::min(orch_->settings.maxCycles, 4);
@@ -89,6 +104,7 @@ int App::run(int argc, char** argv) {
     }
     settings_.save(settingsPath_);
     if (settings_.dashDetached && optPanel_.empty()) openDashboardWindow();
+    autoRefreshUsage(true);  // mesure fraîche dès le lancement
     if (!optSend_.empty()) {
         OpenConversation* oc = newConversation(nullptr, optCwd_);
         oc->draft = optSend_;
@@ -424,7 +440,7 @@ void App::frame() {
     if (pageAlpha < 1.0f) ui::anim::markBusy();
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::max(0.05f, pageAlpha));
     // Page « tableau de bord » : la disposition du cockpit est gardée en vie mais masquée.
-    ImGuiID dock = ImGui::DockSpaceOverViewport(0, nullptr, page_ == 1 ? ImGuiDockNodeFlags_KeepAliveOnly : ImGuiDockNodeFlags_None);
+    ImGuiID dock = ImGui::DockSpaceOverViewport(0, nullptr, page_ != 0 ? ImGuiDockNodeFlags_KeepAliveOnly : ImGuiDockNodeFlags_None);
     {
         ImGuiDockNode* node = ImGui::DockBuilderGetNode(dock);
         static bool checked = false;
@@ -445,6 +461,15 @@ void App::frame() {
                          ImGuiWindowFlags_NoDocking);
         drawDashboard(false);
         ImGui::End();
+    } else if (page_ == 2) {
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->WorkPos);
+        ImGui::SetNextWindowSize(vp->WorkSize);
+        ImGui::Begin("##orchpage", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoDocking);
+        drawOrchestratorPage();
+        ImGui::End();
     } else {
         if (showWorkspace_) drawWorkspacePanel();
         if (showInspector_) drawInspector();
@@ -455,7 +480,6 @@ void App::frame() {
     }
     ImGui::PopStyleVar();  // fondu de page
     if (showHistory_) drawHistoryImport();
-    if (showOrchestrator_) drawOrchestratorWindow();
     if (showGuide_) drawGuideWindow();
     drawWelcomeModal();
     drawGuideReminder();
@@ -496,6 +520,7 @@ void App::frame() {
     static std::string lastTitle;
     std::string title = "ClaudeDesk";
     if (page_ == 1) title = "Tableau de bord — ClaudeDesk";
+    else if (page_ == 2) title = "Orchestrateur — ClaudeDesk";
     else if (auto* oc = active()) title = oc->session->title + " — ClaudeDesk";
     if (title != lastTitle) {
         SDL_SetWindowTitle(window_, title.c_str());
@@ -516,6 +541,7 @@ void App::frame() {
                 oc->session->permissions.empty())
                 waiting = true;
         if (orch_ && orch_->running() && orch_->state != claude::OrchState::UsagePause) waiting = true;
+        if (!syntheses_.empty() || (optPanel_ == "synthesis" && !jobs_.empty())) waiting = true;
         if (now_ > optAfter_ && (optNoWait_ || !waiting || now_ > optAfter_ + 120)) {
             if (SDL_Surface* surf = SDL_RenderReadPixels(renderer_, nullptr)) {
                 SDL_SaveBMP(surf, optScreenshot_.c_str());
@@ -627,10 +653,17 @@ void App::dashboardFrame() {
 
 void App::focusConversation(int index) {
     if (index < 0 || index >= (int)open_.size()) return;
+    if (isOrchBrain(open_[index]->session->localId)) {
+        openOrchestratorPage(true);
+        return;
+    }
     page_ = 0;
     selectTab_ = index;
     active_ = index;
     open_[index]->focusEditor = true;
+    // La fenêtre « Conversations » peut être un onglet caché derrière une autre (ex. Orchestrateur ancré
+    // au même endroit) : on la ramène au premier plan, sinon l'onglet sélectionné reste invisible.
+    if (ImGui::GetCurrentContext()) ImGui::SetWindowFocus("Conversations");
     SDL_RaiseWindow(window_);
 }
 
@@ -700,8 +733,14 @@ void App::processAsyncResults() {
     }
     tickOrchestrator();
     for (auto& j : jobs_) j->update();
+    pumpFolderSyntheses();
     jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [](auto& j) { return j->finished(); }), jobs_.end());
 
+    static double lastUsageCheck = 0;
+    if (now_ - lastUsageCheck > 30) {
+        lastUsageCheck = now_;
+        autoRefreshUsage(false);
+    }
     static double lastUsageSave = 0;
     if (usage_.dirty && now_ - lastUsageSave > 10) {
         usage_.save(usagePath_);
@@ -811,6 +850,12 @@ OpenConversation* App::newConversation(ws::Folder* folder, const std::string& cw
 }
 
 OpenConversation* App::openConversation(const std::string& id, bool focus) {
+    // La discussion de l'orchestrateur ne s'ouvre pas dans un onglet : elle a sa page.
+    if (focus && isOrchBrain(id)) {
+        focus = false;
+        page_ = 2;
+        orchShowDiscussion_ = true;
+    }
     for (size_t i = 0; i < open_.size(); ++i)
         if (open_[i]->session->localId == id) {
             if (focus) selectTab_ = (int)i;
@@ -1035,7 +1080,68 @@ void App::requestRecap(const std::string& convId) {
     if (job->start(claudeExe_, settings_.recapModel, prompt, cwd)) jobs_.push_back(std::move(job));
 }
 
+// Une conversation a besoin d'un (nouveau) récap : jamais fait, ou la conversation a avancé depuis.
+static bool needsRecap(const ws::ConversationMeta& m) {
+    return m.messages >= 1 && (m.recap.empty() || m.recapTime < m.updated - 60);
+}
+
+const App::FolderSynthesis* App::synthesisFor(const ws::Folder* f) const {
+    if (!f) return nullptr;
+    std::string p = util::pathToUtf8(f->path);
+    for (auto& s : syntheses_)
+        if (s.path == p) return &s;
+    return nullptr;
+}
+
 void App::requestFolderRecap(ws::Folder* f) {
+    if (!f || claudeExe_.empty() || synthesisFor(f)) return;
+    FolderSynthesis s;
+    s.path = util::pathToUtf8(f->path);
+    std::function<void(ws::Folder*, int)> collect = [&](ws::Folder* x, int depth) {
+        for (auto& c : x->conversations)
+            if (needsRecap(c)) s.toStart.push_back(c.id);
+        if (depth < 3)
+            for (auto& ch : x->children) collect(ch.get(), depth + 1);
+    };
+    collect(f, 0);
+    if (s.toStart.empty()) {
+        runFolderSynthesis(f);
+        return;
+    }
+    s.total = (int)s.toStart.size();
+    toast("Synthèse de « " + f->name + " » : " + std::to_string(s.total) +
+          " récap(s) de conversation à (re)générer d'abord.");
+    syntheses_.push_back(std::move(s));
+}
+
+// Lance les récaps en attente (3 à la fois) puis, quand ils sont tous finis, la synthèse.
+void App::pumpFolderSyntheses() {
+    for (size_t k = 0; k < syntheses_.size();) {
+        auto& s = syntheses_[k];
+        for (auto it = s.running.begin(); it != s.running.end();) {
+            bool alive = false;
+            for (auto& j : jobs_)
+                if (j->target == *it && !j->finished()) alive = true;
+            it = alive ? std::next(it) : s.running.erase(it);
+        }
+        while (s.running.size() < 3 && !s.toStart.empty()) {
+            std::string id = s.toStart.front();
+            s.toStart.pop_front();
+            requestRecap(id);
+            for (auto& j : jobs_)
+                if (j->target == id) s.running.insert(id);
+        }
+        if (s.toStart.empty() && s.running.empty()) {
+            std::string path = s.path;
+            syntheses_.erase(syntheses_.begin() + (long)k);
+            if (ws::Folder* f = workspace_.findFolderByPath(util::pathFromUtf8(path))) runFolderSynthesis(f);
+            continue;
+        }
+        ++k;
+    }
+}
+
+void App::runFolderSynthesis(ws::Folder* f) {
     if (!f || claudeExe_.empty()) return;
     std::string recaps;
     std::function<void(ws::Folder*, int)> collect = [&](ws::Folder* x, int depth) {
@@ -1046,7 +1152,7 @@ void App::requestFolderRecap(ws::Folder* f) {
     };
     collect(f, 0);
     if (recaps.empty()) {
-        toast("Aucun récap de conversation dans ce dossier : générez d'abord les récaps des conversations.", true);
+        toast("Aucune conversation à synthétiser dans ce dossier.", true);
         return;
     }
     std::string path = util::pathToUtf8(f->path);
@@ -1072,7 +1178,7 @@ void App::requestFolderRecap(ws::Folder* f) {
         jobs_.push_back(std::move(job));
 }
 
-void App::refreshUsage() {
+void App::refreshUsage(bool silent) {
     if (claudeExe_.empty()) return;
     for (auto& j : jobs_)
         if (j->target == "#usage") return;
@@ -1083,10 +1189,28 @@ void App::refreshUsage() {
     job->onEvent = [this](const json& j) {
         if (j.value("type", "") == "rate_limit_event") usage_.onRateLimitEvent(j.value("rate_limit_info", json::object()));
     };
-    job->onDone = [this](claude::OneShot& j) {
-        if (!j.ok()) toast("Actualisation impossible : " + util::truncateUtf8(j.error(), 200), true);
+    job->onDone = [this, silent](claude::OneShot& j) {
+        if (!j.ok() && !silent) toast("Actualisation impossible : " + util::truncateUtf8(j.error(), 200), true);
     };
     if (job->start(claudeExe_, "haiku", "Réponds uniquement : ok", util::pathToUtf8(util::homeDir()))) jobs_.push_back(std::move(job));
+}
+
+// Usage tenu à jour sans y penser : au lancement, puis quand la mesure est périmée. Pendant qu'une
+// conversation travaille, chaque réponse apporte déjà un rate_limit_event : inutile d'interroger Haiku.
+void App::autoRefreshUsage(bool atLaunch) {
+    if (!settings_.autoRefreshUsage || claudeExe_.empty() || !optScreenshot_.empty()) return;
+    if (now_ - lastAutoUsage_ < 600) return;  // au plus une fois toutes les 10 min (même en cas d'échec)
+    for (auto& oc : open_)
+        if (oc->session->state == claude::SessionState::Busy || oc->session->state == claude::SessionState::Starting) return;
+    int64_t t = util::nowUnix();
+    int64_t age = usage_.lastUpdate > 0 ? t - usage_.lastUpdate : INT64_MAX;
+    bool stale = age > (atLaunch ? 120 : 15 * 60);
+    if (const claude::RateWindow* w = usage_.find("five_hour"); w && w->resetsAt > 0 && t > w->resetsAt && age > 60)
+        stale = true;  // la fenêtre de 5 h s'est réinitialisée depuis la dernière mesure
+    if (!stale) return;
+    if (!atLaunch && !windowFocused_ && !dash_) return;  // personne ne regarde : on attend
+    lastAutoUsage_ = now_;
+    refreshUsage(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,8 +1278,7 @@ void App::handleGlobalShortcuts() {
         else page_ = 1;
     }
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_3, g)) {
-        showOrchestrator_ = !showOrchestrator_;
-        if (showOrchestrator_) ImGui::SetWindowFocus("Orchestrateur");
+        page_ = page_ == 2 ? 0 : 2;
     }
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_D, g)) {
         if (dash_) closeDashboardWindow();

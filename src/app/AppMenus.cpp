@@ -1,9 +1,12 @@
 // Barre de menus, barre d'état, fenêtres d'aide et journal.
+#include <cmath>
+
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_internal.h>
 
 #include "app/App.h"
+#include "ui/Anim.h"
 #include "ui/Theme.h"
 #include "util/Paths.h"
 #include "util/Strings.h"
@@ -117,10 +120,7 @@ void App::drawMenuBar() {
             if (dash_) closeDashboardWindow();
             else openDashboardWindow();
         }
-        if (ImGui::MenuItem("Orchestrateur (agents automatiques)", "Ctrl+3", showOrchestrator_)) {
-            showOrchestrator_ = !showOrchestrator_;
-            if (showOrchestrator_) ImGui::SetWindowFocus("Orchestrateur");
-        }
+        if (ImGui::MenuItem("Orchestrateur (agents automatiques)", "Ctrl+3", page_ == 2)) page_ = 2;
         ImGui::Separator();
         if (ImGui::BeginMenu("Thème")) {
             const char* themes[] = {"Sombre", "Clair", "Crépuscule"};
@@ -221,6 +221,23 @@ void App::drawStatusBar() {
             if (!jobs_.empty()) {
                 ImGui::Separator();
                 ImGui::TextColored(pal.accent, "%d tâche(s) de fond", (int)jobs_.size());
+            }
+            // Orchestration en cours : un clic ouvre sa fenêtre ; une question clignote.
+            if (orch_ && orch_->state != claude::OrchState::Idle) {
+                ImGui::Separator();
+                bool question = orch_->state == claude::OrchState::WaitingHuman;
+                float blink = question ? 0.55f + 0.45f * (float)std::sin(now_ * 4.0) : 1.0f;
+                if (question) ui::anim::markBusy();
+                ImVec4 c = question ? pal.warn : orch_->running() ? pal.accent : pal.dim;
+                c.w *= blink;
+                std::string label = question ? "❓ L'orchestrateur vous pose une question"
+                                             : std::string("Orchestrateur : ") + claude::orchStateLabel(orch_->state) +
+                                                   " · cycle " + std::to_string(orch_->cycle);
+                ImGui::PushStyleColor(ImGuiCol_Text, c);
+                if (ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_None, ImGui::CalcTextSize(label.c_str()))) {
+                    page_ = 2;
+                }
+                ImGui::PopStyleColor();
             }
             if (claudeExe_.empty()) {
                 ImGui::Separator();

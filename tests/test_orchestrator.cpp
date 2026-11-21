@@ -76,13 +76,14 @@ namespace {
 struct FakeConv {
     ParticipantStatus st;
     std::vector<std::string> received;
-    std::string mode;
+    SendOptions last;
 };
 
 struct FakeHost : OrchestratorHost {
     std::vector<AgentInfo> agentList = {{"01 Modèle", "faits matériels"}, {"02 Build", "toolchain"}, {"03 Check", "barrière"}};
     std::map<std::string, FakeConv> convs;
-    double usage = 0.1;
+    double usage = 0.1, weekly = 0.1;
+    bool sub = false;
     int64_t t = 1000;
     std::string brainPrompt;
 
@@ -99,10 +100,10 @@ struct FakeHost : OrchestratorHost {
         return id;
     }
     bool ensureOpen(const std::string& id) override { return convs.count(id) > 0; }
-    bool send(const std::string& id, const std::string& text, const std::string& mode) override {
+    bool send(const std::string& id, const std::string& text, const SendOptions& opt) override {
         auto& c = convs[id];
         c.received.push_back(text);
-        c.mode = mode;
+        c.last = opt;
         c.st.busy = true;
         return true;
     }
@@ -110,8 +111,20 @@ struct FakeHost : OrchestratorHost {
         auto it = convs.find(id);
         return it == convs.end() ? ParticipantStatus{} : it->second.st;
     }
-    double fiveHourUtilization() override { return usage; }
-    int64_t fiveHourResetsAt() override { return 5000; }
+    double utilization(const std::string& w) override { return w == "five_hour" ? usage : weekly; }
+    int64_t resetsAt(const std::string& w) override { return w == "five_hour" ? 5000 : 900000; }
+    bool isSubscription() override { return sub; }
+    // Rotation : un premier appel lance le « récap » (renvoie ""), le suivant crée la nouvelle conversation.
+    std::map<std::string, int> rotateCalls;
+    int rotations = 0;
+    std::string rotate(const std::string& agent, const std::string& id) override {
+        if (rotateCalls[id]++ == 0) return {};
+        ++rotations;
+        std::string nid = id + "#" + std::to_string(rotations);
+        convs[nid].st.exists = true;
+        (void)agent;
+        return nid;
+    }
     int64_t now() override { return t; }
 
     // Simule la fin d'un tour.
@@ -136,7 +149,7 @@ TEST_CASE("orchestrateur : cycle complet jusqu'à @@TERMINE") {
     CHECK(h.brainPrompt.find("@@DELEGUER") != std::string::npos);
     REQUIRE(h.convs["brain"].received.size() == 1);
     CHECK(h.convs["brain"].received[0].find("02 Build") != std::string::npos);
-    CHECK(h.convs["brain"].mode == "auto");
+    CHECK(h.convs["brain"].last.permissionMode == "auto");
 
     o.tick(h);  // le cerveau réfléchit encore
     CHECK(o.state == OrchState::Thinking);
@@ -209,6 +222,8 @@ TEST_CASE("orchestrateur : garde-fous budget, cycles, usage et plantage") {
         Orchestrator o;
         o.settings.objective = "x";
         o.settings.maxCostUsd = 1.0;
+        o.settings.strictBudget = false;
+        o.settings.budgetTolerance = 0;
         REQUIRE(o.start(h));
         h.answer("brain", "@@DELEGUER 01\na\n@@FIN", 1.2);  // le cerveau seul dépasse le budget
         o.tick(h);
@@ -296,4 +311,600 @@ TEST_CASE("orchestrateur : sauvegarde et reprise après fermeture") {
     r.tick(h);
     CHECK(h.convs["conv:01 Modèle"].received.size() == 2);
     CHECK(h.convs["conv:02 Build"].received.size() == 2);
+}
+
+// ---------------------------------------------------------------------------
+// Modèles, questions, budgets
+// ---------------------------------------------------------------------------
+
+TEST_CASE("orchestrateur : modèle et effort par délégation") {
+    Directives d = parseDirectives("@@DELEGUER 04 Simulateur | modele=Opus effort=high\nSpike.\n@@FIN\n"
+                                   "@@DELEGUER 02 Build | modèle=haiku, effort=low\nDoc.\n@@FIN\n"
+                                   "@@DELEGUER 01 Modèle\nYAML.\n@@FIN");
+    REQUIRE(d.delegations.size() == 3);
+    CHECK(d.delegations[0].agent == "04 Simulateur");
+    CHECK(d.delegations[0].model == "opus");
+    CHECK(d.delegations[0].effort == "high");
+    CHECK(d.delegations[1].model == "haiku");
+    CHECK(d.delegations[1].effort == "low");
+    CHECK(d.delegations[2].model.empty());
+
+    std::vector<std::string> all = {"haiku", "sonnet", "opus", "fable"};
+    std::vector<std::string> eco = {"haiku", "sonnet"};
+    CHECK(clampModel("opus", all) == "opus");
+    CHECK(clampModel("", all).empty());
+    CHECK(clampModel("opus", eco) == "sonnet");  // plafonné au plus capable autorisé
+    CHECK(clampModel("claude-opus-5-5", eco) == "sonnet");
+    CHECK(clampModel("", eco) == "sonnet");  // liste restreinte : jamais le défaut du CLI
+    CHECK(clampModel("haiku", {"sonnet", "opus"}) == "sonnet");  // rien en dessous : le plus modeste
+    CHECK(clampEffort("max", "high") == "high");
+    CHECK(clampEffort("low", "high") == "low");
+    CHECK(clampEffort("xhigh", "") == "xhigh");
+    CHECK(clampEffort("bizarre", "high").empty());
+
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.allowedModels = eco;
+    o.settings.maxEffort = "medium";
+    o.settings.defaultWorkerModel = "haiku";
+    REQUIRE(o.start(h));
+    CHECK(h.convs["brain"].last.model == "sonnet");  // orchestrateur : le plus capable autorisé
+    h.answer("brain", "@@DELEGUER 01 | modele=opus effort=max\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN");
+    o.tick(h);
+    CHECK(h.convs["conv:01 Modèle"].last.model == "sonnet");
+    CHECK(h.convs["conv:01 Modèle"].last.effort == "medium");
+    CHECK(h.convs["conv:02 Build"].last.model == "haiku");  // défaut des agents
+    CHECK(o.tasks[0].model == "sonnet");
+}
+
+TEST_CASE("orchestrateur : questions à options") {
+    Directives d = parseDirectives("@@HUMAIN\nQuel UART pour le printf ?\n- UART2 (recommandé)\n- UART4\n- LPUART\n@@FIN\n"
+                                   "@@HUMAIN\nOn publie sur GitHub ?\n@@FIN");
+    REQUIRE(d.questions.size() == 2);
+    CHECK(d.questions[0].text == "Quel UART pour le printf ?");
+    REQUIRE(d.questions[0].options.size() == 3);
+    CHECK(d.questions[0].options[0] == "UART2 (recommandé)");
+    CHECK(d.questions[1].options.empty());
+    CHECK(splitQuestion("Choix :\n1. Renode\n2) QEMU").options.size() == 2);
+    CHECK(splitQuestion("Choix :\nA) Renode\nB) QEMU").options.size() == 2);
+    CHECK(splitQuestion("Une seule ligne :\n- seule option").options.empty());
+
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@HUMAIN\nQuel UART ?\n- UART2\n- UART4\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::WaitingHuman);
+    CHECK(o.questions.size() == 1);
+    int seq = o.questionSeq;
+    CHECK(o.answerHuman(h, "Quel UART ? → UART2"));
+    CHECK(o.state == OrchState::Thinking);
+    CHECK(h.convs["brain"].received.back().find("UART2") != std::string::npos);
+    CHECK(o.questions.empty());
+    REQUIRE(o.qaHistory.size() == 1);
+    CHECK(o.qaHistory[0].answer == "Quel UART ? → UART2");
+    CHECK(o.questionSeq == seq);
+}
+
+TEST_CASE("orchestrateur : budget strict, phase finale puis conclusion") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.maxCostUsd = 2.0;
+    o.settings.budgetTolerance = 0;  // sans marge : arrêt pile à la cible
+    o.settings.maxParallel = 1;
+    REQUIRE(o.start(h));
+    CHECK_FALSE(o.subscription);
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN", 0.5);
+    o.tick(h);
+    h.answer("conv:01 Modèle", "ok", 1.6);  // 2,1 $ : budget dépassé, la tâche 02 ne part pas
+    o.tick(h);
+    CHECK(h.convs.count("conv:02 Build") == 0);
+    CHECK(o.tasks[1].failed);
+    CHECK(o.finalPhase());
+    CHECK(o.state == OrchState::Thinking);
+    CHECK(h.convs["brain"].received.back().find("BUDGET ÉPUISÉ") != std::string::npos);
+
+    // L'orchestrateur tente encore de déléguer : pause, rien n'est envoyé.
+    h.answer("brain", "@@DELEGUER 02\nb\n@@FIN", 0.1);
+    o.tick(h);
+    CHECK(o.state == OrchState::Paused);
+    CHECK(h.convs.count("conv:02 Build") == 0);
+}
+
+TEST_CASE("orchestrateur : phase finale annoncée à 75 % du budget") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.maxCostUsd = 2.0;
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN", 0.5);
+    o.tick(h);
+    h.answer("conv:01 Modèle", "ok", 1.0);  // 1,5 / 2 $
+    o.tick(h);
+    CHECK(h.convs["brain"].received.back().find("Phase finale") != std::string::npos);
+    CHECK_FALSE(o.finalPhase());
+}
+
+TEST_CASE("orchestrateur : budget en part de ce qui reste dans la session") {
+    FakeHost h;
+    h.sub = true;
+    h.usage = 0.30;  // 60 points restent avant le plafond de 90 %
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.sessionShare = 0.5;  // la moitié de ce qui reste : 30 points
+    o.settings.strictBudget = false;
+    REQUIRE(o.start(h));
+    CHECK(o.subscription);
+    CHECK(o.sessionAllowance() == doctest::Approx(0.30));
+    CHECK(o.budgetFraction() == doctest::Approx(0.0));
+    CHECK(h.convs["brain"].received[0].find("ce qui restait") != std::string::npos);
+    h.usage = 0.38;
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    o.tick(h);
+    CHECK(o.windowSpent == doctest::Approx(0.08));
+    CHECK(o.budgetFraction() == doctest::Approx(0.08 / 0.30));
+    CHECK(o.budgetLabel().find("session de 5 h") != std::string::npos);
+    h.usage = 0.62;  // 32 points sur 30 : cible dépassée, mais dans la tolérance (+15 %) — on continue
+    h.answer("conv:01 Modèle", "ok");
+    o.tick(h);
+    CHECK(o.state == OrchState::Thinking);
+    CHECK(h.convs["brain"].received.back().find("Cible atteinte") != std::string::npos);
+    h.answer("brain", "@@DELEGUER 01\nfinir\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::Working);
+    h.usage = 0.66;  // 36 points sur 30 : au-delà de la tolérance
+    h.answer("conv:01 Modèle", "ok");
+    o.tick(h);
+    CHECK(o.state == OrchState::UsagePause);  // abonnement : on attend la session suivante
+    CHECK(o.pauseReason.find("prochaine session") != std::string::npos);
+
+    // Nouvelle session de 5 h : budget renouvelé sur ce qui reste, l'orchestration repart seule.
+    h.usage = 0.04;
+    o.tick(h);
+    CHECK(o.sessionAllowance() == doctest::Approx(0.43));  // moitié des 86 points qui restent
+    CHECK(o.windowSpent == doctest::Approx(0.0));           // nouvelle référence : l'usage actuel de la session
+    CHECK(o.usageSpent == doctest::Approx(0.36));           // total toutes sessions
+    CHECK(o.state == OrchState::Working);
+
+    // Forcer le mode API malgré l'abonnement, ou l'inverse
+    o.settings.budgetMode = "api";
+    CHECK_FALSE(Orchestrator::resolveSubscription(o.settings, true));
+    o.settings.budgetMode = "subscription";
+    CHECK(Orchestrator::resolveSubscription(o.settings, false));
+}
+
+TEST_CASE("orchestrateur : niveau bas en fin de session, sans fausse alerte") {
+    // Cas réel : 13 % utilisés dans une session neuve, niveau « bas » (25 % du restant).
+    FakeHost h;
+    h.sub = true;
+    h.usage = 0.13;
+    Orchestrator o;
+    o.settings.objective = "x";
+    applyBudgetPreset(o.settings, BudgetPreset::Low);
+    REQUIRE(o.start(h));
+    CHECK(o.sessionAllowance() == doctest::Approx(0.25 * 0.77));
+    CHECK(o.budgetFraction() < 0.01);  // rien de consommé : pas d'alerte
+}
+
+TEST_CASE("orchestrateur : abonnement détecté après le départ") {
+    FakeHost h;  // pas encore de mesure : l'abonnement est inconnu au départ
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    CHECK_FALSE(o.subscription);
+    h.sub = true;
+    h.usage = 0.40;
+    o.tick(h);
+    CHECK(o.subscription);
+    h.usage = 0.45;
+    o.tick(h);
+    CHECK(o.usageSpent == doctest::Approx(0.05));
+
+    Orchestrator forced;  // mode API imposé : pas de bascule
+    forced.settings.objective = "x";
+    forced.settings.budgetMode = "api";
+    FakeHost h2;
+    REQUIRE(forced.start(h2));
+    h2.sub = true;
+    forced.tick(h2);
+    CHECK_FALSE(forced.subscription);
+}
+
+TEST_CASE("orchestrateur : plafond hebdomadaire") {
+    FakeHost h;
+    h.weekly = 0.97;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    CHECK(o.state == OrchState::UsagePause);
+    CHECK(o.pauseReason.find("hebdomadaire") != std::string::npos);
+    h.weekly = 0.2;  // nouvelle semaine
+    o.tick(h);
+    CHECK(o.state == OrchState::Thinking);
+    CHECK(h.convs["brain"].received.size() == 1);
+}
+
+// ---------------------------------------------------------------------------
+// Questions réelles, niveaux de budget, messages au cerveau
+// ---------------------------------------------------------------------------
+
+TEST_CASE("orchestrateur : deux questions numérotées avec sous-puces (cas réel)") {
+    std::string body =
+        "Deux décisions sont toujours en attente. Elles bloquent la compilation des vrais exemples du SDK Alif.\n"
+        "1. **Licences des packs CMSIS.** `cpackget` attend une acceptation pour trois packs :\n"
+        "   - ARM::CMSIS 6.1.0 et ARM::CMSIS-Compiler 2.1.0, sous licence Apache-2.0 ;\n"
+        "   - AlifSemiconductor::Ensemble 2.2.1, sous licence propriétaire.\n"
+        "Les textes sont dans `tools\\packs`. Soit tu lances toi-même le script, soit tu me réponds explicitement "
+        "« j'accepte les licences des packs » et je le ferai lancer par l'agent 02.\n"
+        "2. **Version de GCC** : 14.3.1, celle que nous avons fixée, ou 13.x, celle du template Alif ? "
+        "Si personne ne compile encore pour la carte, je recommande de garder 14.3.1.";
+    Directives d = parseDirectives("Point d'étape.\n@@HUMAIN\n" + body + "\n@@FIN");
+    REQUIRE(d.questions.size() == 2);
+    CHECK(d.questions[0].options.empty());  // les sous-puces sont du contexte, pas des choix
+    CHECK(d.questions[0].title.find("Licences des packs CMSIS.") == 0);
+    CHECK(d.questions[0].text.find("Deux décisions") == 0);  // contexte commun en tête de la 1re question
+    CHECK(d.questions[0].text.find("ARM::CMSIS 6.1.0") != std::string::npos);
+    REQUIRE(d.questions[0].suggestions.size() == 1);
+    CHECK(d.questions[0].suggestions[0] == "j'accepte les licences des packs");
+    CHECK(d.questions[1].title.find("Version de GCC") == 0);
+    CHECK(d.questions[1].options.empty());
+
+    // Courtes lignes numérotées sans question : ce sont des choix
+    CHECK(splitQuestions("Quel simulateur ?\n1. Renode\n2. QEMU").size() == 1);
+    CHECK(splitQuestions("Quel simulateur ?\n1. Renode\n2. QEMU")[0].options.size() == 2);
+    // Puces de contexte suivies de texte : pas des choix
+    CHECK(splitQuestion("État :\n- build OK\n- tests KO\nOn continue ?").options.empty());
+    // Cases explicites : des choix, même suivies de texte
+    HumanQuestion q = splitQuestion("Quel UART ?\n- [ ] UART2 (recommandé)\n- [ ] UART4\nPrécise si autre.");
+    REQUIRE(q.options.size() == 2);
+    CHECK(q.options[0] == "UART2 (recommandé)");
+    CHECK(q.title == "Quel UART ?");
+}
+
+TEST_CASE("orchestrateur : niveaux de budget") {
+    OrchestratorSettings s;
+    s.objective = "garder";
+    s.workerMode = "acceptEdits";
+    for (BudgetPreset p : kBudgetPresets) {
+        applyBudgetPreset(s, p);
+        CHECK(budgetPresetMatches(s, p));
+        CHECK(s.objective == "garder");
+        CHECK(s.workerMode == "acceptEdits");
+        for (BudgetPreset other : kBudgetPresets)
+            if (other != p) CHECK_FALSE(budgetPresetMatches(s, other));
+        CHECK_FALSE(budgetPresetSummary(p, true).empty());
+    }
+    applyBudgetPreset(s, BudgetPreset::Low);
+    CHECK(s.sessionShare == doctest::Approx(0.25));
+    CHECK(clampModel("opus", s.allowedModels) == "sonnet");
+    s.maxParallel = 5;  // réglage avancé modifié : plus aucun niveau ne correspond (« personnalisé »)
+    for (BudgetPreset p : kBudgetPresets) CHECK_FALSE(budgetPresetMatches(s, p));
+    applyBudgetPreset(s, BudgetPreset::Max);
+    CHECK(s.sessionShare == 0.0);  // sans limite, en enchaînant les sessions
+    CHECK(std::string(budgetPresetLabel(BudgetPreset::Max, true)) == "Max abonnement");
+    CHECK(budgetPresetSummary(BudgetPreset::Low, false).find("$") != std::string::npos);
+}
+
+TEST_CASE("orchestrateur : le cerveau connaît le budget et le quota réels") {
+    FakeHost h;
+    h.sub = true;
+    h.usage = 0.87;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.sessionShare = 0;  // sans limite
+    REQUIRE(o.start(h));
+    const std::string& first = h.convs["brain"].received[0];
+    CHECK(first.find("aucune limite fixée") != std::string::npos);
+    CHECK(first.find("Budget : 0 % de la fenêtre") == std::string::npos);  // l'ancien libellé trompeur
+    CHECK(first.find("fenêtre de 5 h à 87 %") != std::string::npos);
+    CHECK(first.find("Marge faible") != std::string::npos);
+    CHECK(first.find("doit tenir dans ce budget") == std::string::npos);  // pas de budget : pas de contrainte annoncée
+    CHECK(first.find("optimise dans tous les cas") != std::string::npos);  // même sans limite, on économise
+    CHECK(Orchestrator::systemPrompt().find("PLAFOND, pas un objectif") != std::string::npos);
+
+    // Même au niveau maximal, les agents travaillent par défaut sur un modèle économique.
+    OrchestratorSettings mx;
+    applyBudgetPreset(mx, BudgetPreset::Max);
+    CHECK(mx.defaultWorkerModel == "sonnet");
+}
+
+TEST_CASE("orchestrateur : relance et reprise signalées au cerveau") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@TERMINE\nfini\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::Finished);
+    REQUIRE(o.start(h));  // relance dans la même conversation
+    CHECK(h.convs["brain"].received.back().find("Relance de l'orchestration") == 2);
+
+    // Fermeture de ClaudeDesk pendant la réflexion, puis reprise : message renvoyé une seule fois annoté.
+    Orchestrator r;
+    r.fromJson(o.toJson());
+    h.convs["brain"].st.busy = false;
+    r.resume(h);
+    CHECK(h.convs["brain"].received.back().find("Reprise après interruption") == 2);
+    Orchestrator r2;
+    r2.fromJson(r.toJson());
+    h.convs["brain"].st.busy = false;
+    r2.resume(h);
+    const std::string& again = h.convs["brain"].received.back();
+    CHECK(again.find("Reprise après interruption") == 2);
+    CHECK(again.find("Reprise après interruption", 10) == std::string::npos);
+}
+
+TEST_CASE("orchestrateur : segments d'affichage et messages de ClaudeDesk") {
+    auto segs = splitDirectiveSegments("Analyse.\n\n@@DELEGUER 02 Build | modele=sonnet\nInstalle.\n@@FIN\n"
+                                       "Puis :\n@@HUMAIN\nQuel UART ?\n- [ ] UART2\n@@FIN\n@@TERMINE\nFini.");
+    REQUIRE(segs.size() == 5);
+    CHECK(segs[0].kind == TextSegment::Text);
+    CHECK(segs[0].body == "Analyse.");
+    CHECK(segs[1].kind == TextSegment::Delegate);
+    CHECK(segs[1].header == "02 Build | modele=sonnet");
+    CHECK(segs[1].body == "Installe.");
+    CHECK(segs[2].body == "Puis :");
+    CHECK(segs[3].kind == TextSegment::Human);
+    CHECK(segs[4].kind == TextSegment::Done);
+    CHECK(segs[4].body == "Fini.");
+    CHECK(splitDirectiveSegments("Pas de directive").size() == 1);
+
+    CHECK(orchestratorMessageTitle("# Objectif\nx") == "Mission : objectif, équipe et moyens");
+    CHECK(orchestratorMessageTitle("# Comptes rendus — cycle 3\n\n## 02") == "Comptes rendus de l'équipe — cycle 3");
+    CHECK(orchestratorMessageTitle("_(Reprise après interruption : …)_\n\n# Objectif") == "Reprise après interruption");
+    CHECK(orchestratorMessageTitle("Peux-tu accélérer ?").empty());
+}
+
+TEST_CASE("orchestrateur : tolérance de dépassement pour finir sans bâcler") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.maxCostUsd = 2.0;  // tolérance par défaut : +15 % → arrêt ferme à 2,30 $
+    o.settings.maxParallel = 1;
+    REQUIRE(o.start(h));
+    CHECK(h.convs["brain"].received[0].find("Tolérance") != std::string::npos);
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN", 0.5);
+    o.tick(h);
+    h.answer("conv:01 Modèle", "ok", 1.6);  // 2,10 $ : cible dépassée, dans la tolérance → la tâche 02 part quand même
+    o.tick(h);
+    CHECK(h.convs["conv:02 Build"].received.size() == 1);
+    CHECK_FALSE(o.finalPhase());
+    h.answer("conv:02 Build", "ok", 0.3);  // 2,40 $ : au-delà de la tolérance
+    o.tick(h);
+    CHECK(o.finalPhase());
+    CHECK(h.convs["brain"].received.back().find("BUDGET ÉPUISÉ") != std::string::npos);
+
+    // Le message « Phase finale » rappelle la marge et demande de réduire le périmètre, pas la qualité.
+    Orchestrator p;
+    p.settings.objective = "x";
+    p.settings.maxCostUsd = 2.0;
+    FakeHost h2;
+    REQUIRE(p.start(h2));
+    h2.answer("brain", "@@DELEGUER 01\na\n@@FIN", 0.5);
+    p.tick(h2);
+    h2.answer("conv:01 Modèle", "ok", 1.0);
+    p.tick(h2);
+    const std::string& m = h2.convs["brain"].received.back();
+    CHECK(m.find("Phase finale") != std::string::npos);
+    CHECK(m.find("plutôt que la qualité") != std::string::npos);
+    CHECK(m.find("sans te précipiter") != std::string::npos);
+}
+
+TEST_CASE("orchestrateur : la consommation des autres n'est pas comptée, la part suit le restant") {
+    // Cas réel : l'orchestration attend votre réponse ; la mesure passe de 13 % (périmée) à 25 %.
+    FakeHost h;
+    h.sub = true;
+    h.usage = 0.13;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.sessionShare = 0.5;
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@HUMAIN\nQuel UART ?\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::WaitingHuman);
+    h.t += 120;  // l'équipe est au repos depuis 2 min
+    h.usage = 0.25;
+    o.tick(h);
+    CHECK(o.windowSpent == doctest::Approx(0.0));                // rien n'est attribué à l'orchestration
+    CHECK(o.sessionAllowance() == doctest::Approx(0.5 * 0.65));  // la part suit ce qui reste réellement
+    CHECK(o.budgetFraction() == doctest::Approx(0.0));
+    // Changer de niveau met la part à jour immédiatement.
+    applyBudgetPreset(o.settings, BudgetPreset::Low);
+    CHECK(o.sessionAllowance() == doctest::Approx(0.25 * 0.65));
+}
+
+TEST_CASE("orchestrateur : relancer le budget garde la limite, plafonnée par ce qui reste") {
+    // Exemple de l'utilisateur : 25 consommés sur une limite de 50 ; relance → 0 / 50 ;
+    // si l'usage total de la session atteint ensuite 80 %, la limite tombe à 20 (ce qui reste).
+    FakeHost h;
+    h.sub = true;
+    h.usage = 0.0;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.usagePause = 0;  // pas de plafond : la session entière
+    o.settings.weeklyPause = 0;
+    o.settings.sessionShare = 0.5;
+    REQUIRE(o.start(h));
+    CHECK(o.sessionAllowance() == doctest::Approx(0.50));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    h.usage = 0.25;
+    o.tick(h);
+    CHECK(o.windowSpent == doctest::Approx(0.25));
+    o.resetBudget(h);
+    CHECK(o.windowSpent == 0.0);
+    CHECK(o.sessionAllowance() == doctest::Approx(0.50));  // la limite reste 50
+    CHECK(o.budgetFraction() == doctest::Approx(0.0));
+    // Consommation ailleurs pendant que l'équipe est au repos : la session n'a plus que 20 % → limite 20
+    h.convs["conv:01 Modèle"].st.busy = false;
+    h.t += 120;
+    h.usage = 0.80;
+    o.tick(h);
+    CHECK(o.sessionAllowance() == doctest::Approx(0.20));
+    // Changer de niveau annule la limite figée
+    o.settings.sessionShare = 0.25;
+    CHECK(o.sessionAllowance() == doctest::Approx(0.25 * 0.20));
+}
+
+TEST_CASE("orchestrateur : relancer le budget en API") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.maxCostUsd = 2.0;
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN", 1.5);
+    o.tick(h);
+    CHECK(o.budgetFraction() == doctest::Approx(0.75));
+    o.resetBudget(h);
+    CHECK(o.budgetFraction() == doctest::Approx(0.0));
+    CHECK(o.spentUsd == doctest::Approx(1.5));  // le total reste affiché
+    h.answer("conv:01 Modèle", "ok", 0.5);
+    o.tick(h);
+    CHECK(o.budgetSpentUsd() == doctest::Approx(0.5));
+}
+
+TEST_CASE("orchestrateur : une petite baisse de la mesure n'est pas une nouvelle session") {
+    // Cas réel : en plein cycle, une mesure légèrement plus basse faisait repartir le budget de zéro et
+    // attribuait toute la session (43 %) à l'orchestration.
+    FakeHost h;
+    h.sub = true;
+    h.usage = 0.30;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.sessionShare = 0.5;
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN");
+    h.usage = 0.36;
+    o.tick(h);
+    CHECK(o.windowSpent == doctest::Approx(0.06));
+    h.usage = 0.35;  // mesure reçue dans le désordre
+    o.tick(h);
+    CHECK(o.windowSpent == doctest::Approx(0.06));
+    CHECK(o.windowBase == doctest::Approx(0.30));  // la référence de départ est conservée
+    h.usage = 0.40;
+    o.tick(h);
+    CHECK(o.windowSpent == doctest::Approx(0.10));  // écart depuis le départ, sans double comptage
+    // Vraie nouvelle session : forte chute de la mesure (ou date de réinitialisation qui change)
+    h.usage = 0.02;
+    o.tick(h);
+    CHECK(o.windowBase == doctest::Approx(0.02));
+    CHECK(o.windowSpent == doctest::Approx(0.0));
+}
+
+TEST_CASE("orchestrateur : rappel quand le modèle n'est pas choisi, niveau moyen") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    applyBudgetPreset(o.settings, BudgetPreset::Medium);
+    CHECK(o.settings.brainModel == "opus");  // l'orchestrateur décide : modèle capable
+    CHECK(o.settings.defaultWorkerModel == "sonnet");
+    REQUIRE(o.start(h));
+    CHECK(h.convs["brain"].last.model == "opus");
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02 | modele=haiku effort=low\nb\n@@FIN");
+    o.tick(h);
+    CHECK(h.convs["conv:02 Build"].last.model == "haiku");
+    h.answer("conv:01 Modèle", "ok");
+    h.answer("conv:02 Build", "ok");
+    o.tick(h);
+    const std::string& rep = h.convs["brain"].received.back();
+    CHECK(rep.find("tu n'as pas choisi de modèle pour 01 Modèle") != std::string::npos);
+    CHECK(rep.find("pour 01 Modèle — le défaut") != std::string::npos);  // 02 avait un modèle choisi : absent du rappel
+}
+
+TEST_CASE("orchestrateur : contexte allégé par récap + nouvelle conversation") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "Construire E7 Twin";
+    o.settings.rotateAtContext = 0.45;
+    o.settings.rotateAfterTasks = 2;
+    REQUIRE(o.start(h));
+    // Cycle 1 : une tâche pour 01
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    o.tick(h);
+    REQUIRE(h.convs["conv:01 Modèle"].received.size() == 1);
+    h.convs["conv:01 Modèle"].st.context = 0.60;  // la conversation de l'agent a beaucoup grossi
+    h.answer("conv:01 Modèle", "ok");
+    o.tick(h);
+    // Cycle 2 : nouvelle tâche pour 01 → récap d'abord (en cours), puis nouvelle conversation
+    h.answer("brain", "@@DELEGUER 01\nb\n@@FIN");
+    o.tick(h);
+    CHECK(h.convs["conv:01 Modèle"].received.size() == 1);  // rien n'est envoyé à l'ancienne conversation
+    CHECK(o.state == OrchState::Working);
+    o.tick(h);  // le récap est prêt
+    REQUIRE(h.convs.count("conv:01 Modèle#1"));
+    CHECK(h.convs["conv:01 Modèle#1"].received.size() == 1);
+    CHECK(o.agentConv["01 Modèle"] == "conv:01 Modèle#1");
+    bool logged = false;
+    for (auto& l : o.log) logged |= l.text.find("contexte allégé") != std::string::npos;
+    CHECK(logged);
+
+    // L'orchestrateur aussi : son contexte chargé → nouvelle conversation, avec un rappel de l'objectif.
+    h.convs["brain"].st.context = 0.50;
+    h.answer("conv:01 Modèle#1", "ok");
+    o.tick(h);  // récap de l'orchestrateur en cours
+    o.tick(h);
+    CHECK(o.brainConvId == "brain#2");
+    REQUIRE(h.convs["brain#2"].received.size() == 1);
+    CHECK(h.convs["brain#2"].received[0].find("Contexte allégé") != std::string::npos);
+    CHECK(h.convs["brain#2"].received[0].find("Construire E7 Twin") != std::string::npos);
+    CHECK(h.convs["brain#2"].received[0].find("Comptes rendus") != std::string::npos);
+}
+
+TEST_CASE("orchestrateur : rotation après N tâches, et désactivable") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.rotateAfterTasks = 1;
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    o.tick(h);
+    h.answer("conv:01 Modèle", "ok");
+    o.tick(h);
+    h.answer("brain", "@@DELEGUER 01\nb\n@@FIN");
+    o.tick(h);
+    o.tick(h);
+    CHECK(o.agentConv["01 Modèle"] == "conv:01 Modèle#1");
+
+    FakeHost h2;
+    Orchestrator off;
+    off.settings.objective = "x";
+    off.settings.contextRotation = false;
+    REQUIRE(off.start(h2));
+    h2.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    off.tick(h2);
+    h2.convs["conv:01 Modèle"].st.context = 0.95;
+    h2.answer("conv:01 Modèle", "ok");
+    off.tick(h2);
+    h2.answer("brain", "@@DELEGUER 01\nb\n@@FIN");
+    off.tick(h2);
+    CHECK(h2.convs["conv:01 Modèle"].received.size() == 2);  // même conversation
+}
+
+TEST_CASE("orchestrateur : le plafond du compte suspend, il ne fait pas conclure") {
+    // Cas réel : compte à 97 % (plafond 90 %) → la part restante tombait à 0 et l'orchestrateur devait conclure
+    // « objectif non atteint ». Il doit au contraire attendre la prochaine session de 5 h.
+    FakeHost h;
+    h.sub = true;
+    h.usage = 0.30;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.sessionShare = 0.5;
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    o.tick(h);
+    h.answer("conv:01 Modèle", "ok");
+    h.usage = 0.97;
+    o.tick(h);
+    CHECK(o.state == OrchState::UsagePause);
+    CHECK_FALSE(o.finalPhase());
+    CHECK(h.convs["brain"].received.size() == 1);  // aucun « BUDGET ÉPUISÉ » envoyé
+    // Nouvelle session : reprise, budget renouvelé, comptes rendus envoyés normalement.
+    h.usage = 0.03;
+    o.tick(h);  // reprise (état Working) …
+    o.tick(h);  // … puis envoi des comptes rendus
+    CHECK(o.state == OrchState::Thinking);
+    CHECK(h.convs["brain"].received.back().find("Comptes rendus") != std::string::npos);
+    CHECK(h.convs["brain"].received.back().find("BUDGET ÉPUISÉ") == std::string::npos);
 }

@@ -395,16 +395,31 @@ void App::drawInspector() {
         ImGui::TextDisabled("%d conversations · activité %s", f->totalConversations(), util::humanDate(f->lastActivity()).c_str());
         if (ImGui::Button("Nouvelle conversation ici")) newConversation(f);
         ImGui::SameLine();
+        const FolderSynthesis* syn = synthesisFor(f);
+        bool synRunning = syn != nullptr;
+        for (auto& j : jobs_)
+            if (j->target == util::pathToUtf8(f->path)) synRunning = true;
+        ImGui::BeginDisabled(synRunning);
         if (ImGui::Button("Synthèse du dossier")) requestFolderRecap(f);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Synthétise les récaps des conversations du dossier (et sous-dossiers).\n"
-                              "Elle est injectée dans le contexte des nouvelles conversations.");
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Génère d'abord le récap des conversations qui n'en ont pas (ou dont le récap est\n"
+                              "dépassé), puis synthétise tous les récaps du dossier (et sous-dossiers).\n"
+                              "La synthèse est injectée dans le contexte des nouvelles conversations.");
+        if (synRunning) {
+            ui::spinner((float)now_, ui::palette().accent);
+            ImGui::SameLine();
+            if (syn)
+                ImGui::TextDisabled("Synthèse en préparation : récaps %d / %d…",
+                                    syn->total - (int)syn->toStart.size() - (int)syn->running.size(), syn->total);
+            else
+                ImGui::TextDisabled("Synthèse en cours…");
+        }
         if (f->isProject && f->name != "Divers") {
             ImGui::SameLine();
             if (ImGui::Button("Orchestrer…")) {
                 if (!orch_ || !orch_->running()) loadOrchestrator(f);
-                showOrchestrator_ = true;
-                ImGui::SetWindowFocus("Orchestrateur");
+                page_ = 2;
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Chaque thème du projet devient un agent ; une conversation « Orchestrateur »\n"

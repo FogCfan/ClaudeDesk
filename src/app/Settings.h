@@ -29,6 +29,7 @@ struct Settings {
     bool expandTools = false;
     bool wrapCode = false;
     bool notifyOnFinish = true;         // fait clignoter la barre des tâches
+    bool autoRefreshUsage = true;       // mesure l'usage au lancement et quand la mesure est périmée
     bool confirmBypass = true;
     bool tutorialSeen = false;          // ancien indicateur (migration)
     int launchCount = 0;                // 1er lancement : guide ; 2 à 11 : rappel ; ensuite rien
