@@ -359,7 +359,7 @@ void App::drawOrchestrationHero(bool detached) {
         ui::spinner((float)now_, sc);
         ImGui::SameLine();
     }
-    ui::badge(claude::orchStateLabel(o.state), sc);
+    ui::badge(o.brainPaused() ? "En pause jusqu'à la prochaine session" : claude::orchStateLabel(o.state), sc);
     ImGui::SameLine();
     ImGui::TextDisabled("cycle %d%s", o.cycle, o.settings.maxCycles > 0 ? (" / " + std::to_string(o.settings.maxCycles)).c_str() : "");
     {

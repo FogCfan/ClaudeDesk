@@ -543,7 +543,7 @@ void App::drawOrchestratorStatus() {
             ui::spinner((float)now_, pal.accent);
             ImGui::SameLine();
         }
-        ui::badge(claude::orchStateLabel(o.state), sc);
+        ui::badge(o.brainPaused() ? "En pause jusqu'à la prochaine session" : claude::orchStateLabel(o.state), sc);
         ImGui::SameLine();
         ImGui::TextDisabled("cycle %d%s", o.cycle, o.settings.maxCycles > 0 ? (" / " + std::to_string(o.settings.maxCycles)).c_str() : "");
         if (o.finalPhase()) {
@@ -645,6 +645,55 @@ void App::drawOrchestratorStatus() {
         if (ImGui::SmallButton("Lire le bilan")) orchShowBilan_ = true;
     }
     ImGui::Spacing();
+}
+
+// Pause décidée par l'orchestrateur lui-même (@@PAUSE) : une information, pas une question.
+void App::drawOrchestratorPauseNote() {
+    const auto& pal = ui::palette();
+    AppOrchHost host(*this);
+    auto& o = *orch_;
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(pal.link.x, pal.link.y, pal.link.z, 0.8f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(pal.link.x, pal.link.y, pal.link.z, 0.06f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, std::max(ImGui::GetFontSize() * 12,
+                                                                              ImGui::GetMainViewport()->WorkSize.y * 0.40f)));
+    ImGui::BeginChild("##brainpause", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PushFont(fontBold, 0.0f);
+    ImGui::TextColored(pal.link, "⏸ L'orchestrateur s'est mis en pause");
+    ImGui::PopFont();
+    int64_t nowS = host.now();
+    if (o.state == claude::OrchState::UsagePause && o.pauseUntil > nowS)
+        ImGui::TextDisabled("Rien à faire de votre côté : il reprendra seul à la prochaine session de 5 h (dans %s), avec son plan.",
+                            util::humanDuration(o.pauseUntil - nowS).c_str());
+    else if (o.state == claude::OrchState::UsagePause)
+        ImGui::TextDisabled("Rien à faire de votre côté : il reprendra seul à la prochaine session de 5 h, avec son plan.");
+    else
+        ImGui::TextDisabled("Mise en pause manuelle par-dessus : cliquez sur Reprendre pour qu'il reprenne son plan.");
+    ImGui::Spacing();
+    {
+        ui::MdStyle md{fontUi, fontBold, fontMono, settings_.wrapCode, fontItalic};
+        static std::string cachedText;
+        static std::vector<ui::MdBlock> cachedBlocks;
+        if (cachedText != o.pauseNote) {
+            cachedText = o.pauseNote;
+            cachedBlocks = ui::parseMarkdown(o.pauseNote);
+        }
+        ui::renderMarkdown(cachedBlocks, md, 977001);
+    }
+    ImGui::Spacing();
+    if (ImGui::Button("▶ Reprendre maintenant")) {
+        o.resume(host);
+        saveOrchestrator();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Relance l'orchestrateur tout de suite avec son plan de reprise, sans attendre la session suivante.");
+    ImGui::SameLine();
+    if (ImGui::Button("Voir la discussion")) openOrchestratorPage(true);
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
 }
 
 // Carte de réponse aux questions @@HUMAIN.
@@ -1124,6 +1173,12 @@ void App::drawOrchestratorSettings() {
         if (ImGui::BeginTabItem("Exécution", nullptr, tabFlags(3))) {
             ImGui::SetNextItemWidth(w);
             changedIf(ImGui::SliderInt("Agents en parallèle", &o.settings.maxParallel, 1, 6));
+            changedIf(ImGui::Checkbox("Comptes rendus au fil de l'eau", &o.settings.rollingReports));
+            ImGui::SameLine();
+            ui::helpMarker("Activé : dès qu'un agent termine alors que d'autres travaillent encore, l'orchestrateur reçoit\n"
+                           "son compte rendu et peut aussitôt confier une nouvelle tâche aux agents libres (ou répondre\n"
+                           "@@ATTENDRE). L'équipe reste occupée, au prix de quelques tours de plus pour l'orchestrateur.\n"
+                           "Désactivé : il attend que toute l'équipe ait fini avant de décider de la suite.");
             ImGui::SetNextItemWidth(w);
             if (ImGui::InputInt("Cycles maximum (0 = illimité)", &o.settings.maxCycles)) {
                 o.settings.maxCycles = std::max(0, o.settings.maxCycles);
@@ -1231,8 +1286,9 @@ App::AgentView App::agentView(const std::string& name) {
     AppOrchHost host(*this);
     auto it = o.agentConv.find(name);
     v.convId = it != o.agentConv.end() ? it->second : std::string();
+    // La tâche en cours prime ; sinon la plus récente (en file, ou terminée).
     for (auto& t : o.tasks)
-        if (t.agent == name) v.task = &t;
+        if (t.agent == name && !(v.task && v.task->sent && !v.task->done)) v.task = &t;
     claude::ParticipantStatus st = v.convId.empty() ? claude::ParticipantStatus{} : host.status(v.convId);
     v.status = st;
     if (v.task && v.task->sent && !v.task->done) {
@@ -1452,6 +1508,7 @@ void App::drawOrchestratorPage() {
 
     drawOrchestratorStatus();
     if (orch_->state == claude::OrchState::WaitingHuman) drawOrchestratorQuestion();
+    else if (orch_->brainPaused()) drawOrchestratorPauseNote();
     ImGui::Separator();
 
     // --- Corps : panneau de gauche (équipe / réglages / journal) + discussion à droite ---

@@ -284,7 +284,7 @@ std::vector<HumanQuestion> splitQuestions(const std::string& body) {
 
 Directives parseDirectives(const std::string& text) {
     Directives d;
-    enum class Mode { None, Delegate, Human, Done } mode = Mode::None;
+    enum class Mode { None, Delegate, Human, Done, Wait, Pause } mode = Mode::None;
     Delegation cur;
     std::string body;
     auto flush = [&] {
@@ -296,8 +296,15 @@ Directives parseDirectives(const std::string& text) {
                     d.delegations.push_back(cur);
                 }
                 break;
+            case Mode::Pause:
+                d.pause = true;
+                d.pauseNote += (d.pauseNote.empty() ? "" : "\n\n") + b;
+                break;
             case Mode::Human:
-                if (!b.empty()) {
+                if (looksLikePauseNotice(b)) {  // annonce de pause écrite comme une question : traitée comme @@PAUSE
+                    d.pause = true;
+                    d.pauseNote += (d.pauseNote.empty() ? "" : "\n\n") + b;
+                } else if (!b.empty()) {
                     d.needHuman = true;
                     d.question += (d.question.empty() ? "" : "\n\n") + b;
                     for (auto& q : splitQuestions(b)) d.questions.push_back(std::move(q));
@@ -307,6 +314,7 @@ Directives parseDirectives(const std::string& text) {
                 d.finished = true;
                 d.summary += (d.summary.empty() ? "" : "\n\n") + b;
                 break;
+            case Mode::Wait: d.wait = true; break;
             case Mode::None: break;
         }
         mode = Mode::None;
@@ -338,6 +346,17 @@ Directives parseDirectives(const std::string& text) {
             if (util::startsWith(k, "@@termine")) {
                 flush();
                 mode = Mode::Done;
+                body = afterKeyword(t) + "\n";
+                continue;
+            }
+            if (util::startsWith(k, "@@attendre")) {
+                flush();
+                mode = Mode::Wait;
+                continue;
+            }
+            if (util::startsWith(k, "@@pause")) {
+                flush();
+                mode = Mode::Pause;
                 body = afterKeyword(t) + "\n";
                 continue;
             }
@@ -391,11 +410,26 @@ std::string lastTurnText(const std::vector<Entry>& entries) {
     return out;
 }
 
+bool looksLikePauseNotice(const std::string& body) {
+    std::string b = util::trim(body);
+    if (b.empty() || b.find('?') != std::string::npos) return false;
+    // De vrais choix (« - [ ] … ») ou une réponse suggérée : c'est une question. Une simple liste (plan de reprise) non.
+    if (b.find("[ ]") != std::string::npos) return false;
+    for (auto& q : splitQuestions(b))
+        if (!q.suggestions.empty()) return false;
+    std::string l = util::toLower(b);
+    for (const char* w : {"en pause", "mettre en pause", "mets en pause", "relance-moi", "relancez-moi", "relance moi",
+                          "relancez moi", "réinitialisation du quota", "reinitialisation du quota"})
+        if (l.find(w) != std::string::npos) return true;
+    return false;
+}
+
 std::vector<TextSegment> splitDirectiveSegments(const std::string& text) {
     std::vector<TextSegment> out;
     TextSegment cur;
     auto flush = [&] {
         cur.body = util::trim(cur.body);
+        if (cur.kind == TextSegment::Human && looksLikePauseNotice(cur.body)) cur.kind = TextSegment::Pause;
         if (cur.kind != TextSegment::Text || !cur.body.empty()) out.push_back(cur);
         cur = TextSegment{};
     };
@@ -413,6 +447,8 @@ std::vector<TextSegment> splitDirectiveSegments(const std::string& text) {
             if (util::startsWith(k, "@@deleguer")) kind = TextSegment::Delegate;
             else if (util::startsWith(k, "@@humain")) kind = TextSegment::Human;
             else if (util::startsWith(k, "@@termine")) kind = TextSegment::Done;
+            else if (util::startsWith(k, "@@attendre")) kind = TextSegment::Wait;
+            else if (util::startsWith(k, "@@pause")) kind = TextSegment::Pause;
             if (kind != TextSegment::Text) {
                 flush();
                 cur.kind = kind;
@@ -435,6 +471,12 @@ std::string orchestratorMessageTitle(const std::string& userText) {
         std::string first = util::firstLine(t, 120);
         size_t p = first.find("cycle");
         return "Comptes rendus de l'équipe" + (p == std::string::npos ? std::string() : " — " + first.substr(p));
+    }
+    if (util::startsWith(t, "# Reprise après ta pause")) return "Reprise après sa pause (nouvelle session de 5 h)";
+    if (util::startsWith(t, "# Compte rendu intermédiaire")) {
+        std::string first = util::firstLine(t, 120);
+        size_t p = first.find("cycle");
+        return "Compte rendu intermédiaire" + (p == std::string::npos ? std::string() : " — " + first.substr(p));
     }
     if (util::startsWith(t, "Ta réponse ne contient aucune directive")) return "Relance : directive attendue";
     if (util::startsWith(t, "Reprends là où tu en étais")) return "Reprise";
@@ -704,7 +746,8 @@ std::string Orchestrator::budgetNotes() const {
             if (settings.usagePause > 0 && settings.usagePause - quota5h_ < 0.10)
                 n += "\n**Marge faible** : il reste " + pct(std::max(0.0, settings.usagePause - quota5h_)) +
                      " avant la pause automatique. Préfère des tâches courtes et des modèles économiques ; "
-                     "l'orchestration reprendra seule après la réinitialisation de la fenêtre.";
+                     "l'orchestration reprendra seule après la réinitialisation de la fenêtre. Si rien d'utile ne tient "
+                     "dans cette marge, réponds @@PAUSE (état + plan de reprise) plutôt qu'@@HUMAIN.";
         }
     } else {
         n = settings.maxCostUsd > 0 ? "Budget : " + util::formatUsd(budgetSpentUsd()) + " dépensés sur " + util::formatUsd(settings.maxCostUsd) + "."
@@ -761,6 +804,26 @@ Termine CHAQUE réponse par un ou plusieurs blocs de directives, chaque marqueur
 <bilan final : ce qui est livré, comment c'est vérifié, limites connues>
 @@FIN
 
+@@ATTENDRE
+<facultatif : ce que tu attends>
+@@FIN
+(seulement en réponse à un compte rendu intermédiaire, quand rien d'utile ne peut partir avant les autres comptes rendus)
+
+@@PAUSE
+<état actuel (ce qui est fait, ce qui a été interrompu) et plan de reprise>
+@@FIN
+(quand le quota du compte ou le budget ne permet plus d'avancer proprement : ClaudeDesk suspend l'orchestration et te relance
+seul à la prochaine session de 5 h, avec ce message. N'utilise JAMAIS @@HUMAIN pour annoncer une pause : @@HUMAIN est
+réservé aux vraies questions.)
+
+## Travail au fil de l'eau
+Tu n'attends pas la fin de toute l'équipe : dès qu'un agent termine alors que d'autres travaillent encore, ClaudeDesk
+t'envoie un **compte rendu intermédiaire** (ce qui vient de finir + qui travaille encore). Vérifie si besoin, puis :
+- confie aussitôt une nouvelle tâche aux agents libres (@@DELEGUER) si un travail indépendant est prêt — c'est le
+  moyen de garder l'équipe occupée ;
+- sinon réponds @@ATTENDRE : ClaudeDesk te renverra la suite dès le prochain agent terminé.
+Une tâche confiée à un agent encore occupé part après la sienne (file d'attente).
+
 ## Optimiser, toujours
 Le budget est un PLAFOND, pas un objectif : quel que soit le niveau (même élevé ou sans limite), cherche la façon la plus
 efficace de mener le projet. Un travail bien découpé et confié au bon modèle va plus vite et coûte moins cher ; garde la
@@ -784,7 +847,7 @@ Une seule question par bloc @@HUMAIN ; pour plusieurs questions, écris plusieur
 ## Règles
 - Plusieurs @@DELEGUER vers des agents différents s'exécutent en parallèle : ne parallélise que des tâches indépendantes. Un agent ne reçoit qu'une tâche à la fois.
 - L'agent ne voit PAS cette conversation : donne-lui tout le contexte nécessaire dans la tâche.
-- Après chaque cycle, ClaudeDesk te transmet les comptes rendus des agents. Vérifie (lis les fichiers, lance les tests) avant de considérer une étape comme faite ; renvoie une correction si besoin.
+- ClaudeDesk te transmet les comptes rendus des agents (au fil de l'eau, puis quand toute l'équipe a fini). Vérifie (lis les fichiers, lance les tests) avant de considérer une étape comme faite ; renvoie une correction si besoin.
 - Découpe en étapes de taille raisonnable : une tâche ≈ un livrable vérifiable.
 - @@HUMAIN pour : décision majeure non tranchée, information manquante, action irréversible ou externe (commit, push, publication, achat, matériel physique). Ne demande jamais de commit ou de push aux agents.
 - @@TERMINE seulement quand l'objectif est atteint et vérifié, ou quand ClaudeDesk annonce le budget épuisé.
@@ -816,9 +879,26 @@ static std::string taskMessage(const OrchTask& t) {
            "(comment), **Reste / bloquant**.";
 }
 
-std::string Orchestrator::buildReport() const {
-    std::string r = "# Comptes rendus — cycle " + std::to_string(cycle) + "\n\n";
+int Orchestrator::tasksInFlight() const {
+    int n = 0;
+    for (auto& t : tasks)
+        if (!t.done) ++n;
+    return n;
+}
+
+void Orchestrator::markReported() {
+    for (auto& t : tasks)
+        if (t.done) t.reported = true;
+    changed = true;
+}
+
+// Comptes rendus pas encore transmis, puis les agents toujours au travail (ou en file).
+std::string Orchestrator::progressSection(int64_t now) const {
+    std::string r;
+    bool any = false;
     for (auto& t : tasks) {
+        if (!t.done || t.reported) continue;
+        any = true;
         r += "## " + t.agent + (t.failed ? " — ÉCHEC" : " — terminé");
         if (!t.model.empty() || !t.effort.empty())
             r += " (" + (t.model.empty() ? std::string("modèle par défaut") : t.model) +
@@ -828,18 +908,43 @@ std::string Orchestrator::buildReport() const {
         if (rep.size() > 8000) rep = util::truncateUtf8(rep, 8000) + "\n(… compte rendu tronqué)";
         r += rep + "\n\n";
     }
+    if (!any) r += "_(Aucun nouveau compte rendu depuis le précédent.)_\n\n";
     // Délégations sans modèle : le défaut a servi partout. Rappel pour que le cerveau optimise.
     std::string unchosen;
     for (auto& t : tasks)
-        if (t.sent && !t.modelChosen) unchosen += (unchosen.empty() ? "" : ", ") + t.agent;
+        if (t.done && !t.reported && t.sent && !t.modelChosen) unchosen += (unchosen.empty() ? "" : ", ") + t.agent;
     if (!unchosen.empty())
         r += "**Rappel** : tu n'as pas choisi de modèle pour " + unchosen + " — le défaut des agents (" +
              (settings.defaultWorkerModel.empty() ? std::string("celui de leur conversation") : settings.defaultWorkerModel) +
              ") a été appliqué. Indique « | modele=… effort=… » à CHAQUE délégation : haiku pour la mécanique, sonnet pour "
              "le courant, opus pour le difficile (conception, débogage, sujets mal connus).\n\n";
+    std::string running;
+    for (auto& t : tasks) {
+        if (t.done) continue;
+        running += "- **" + t.agent + "** — ";
+        if (t.sent) {
+            int64_t mins = t.sentAt > 0 && now > t.sentAt ? (now - t.sentAt) / 60 : 0;
+            running += "au travail depuis " + std::to_string(mins) + " min";
+        } else {
+            running += "en file d'attente";
+        }
+        running += " : " + util::firstLine(t.task, 160) + "\n";
+    }
+    if (!running.empty()) r += "## Toujours en cours\n" + running + "\n";
+    return r;
+}
+
+std::string Orchestrator::buildReport(bool partial, int64_t now) const {
+    std::string r = (partial ? "# Compte rendu intermédiaire — cycle " : "# Comptes rendus — cycle ") + std::to_string(cycle) +
+                    "\n\n" + progressSection(now);
     r += "---\n" + budgetNotes() + "\nCycle " + std::to_string(cycle);
     if (settings.maxCycles > 0) r += " / " + std::to_string(settings.maxCycles);
-    r += ".\nVérifie ce qui doit l'être, puis donne tes directives (@@DELEGUER / @@HUMAIN / @@TERMINE).";
+    if (partial)
+        r += ".\nLes agents « toujours en cours » continuent : ne leur confie rien qui dépende de leur résultat. Vérifie ce "
+             "qui doit l'être, puis relance dès maintenant les agents libres (@@DELEGUER), pose une question (@@HUMAIN) ou "
+             "attends les comptes rendus suivants (@@ATTENDRE … @@FIN).";
+    else
+        r += ".\nVérifie ce qui doit l'être, puis donne tes directives (@@DELEGUER / @@HUMAIN / @@TERMINE).";
     return r;
 }
 
@@ -874,6 +979,36 @@ void Orchestrator::budgetPause(OrchestratorHost& h) {
     pauseFrom(state, "budget épuisé (" + budgetLabel() + ") — augmentez-le puis reprenez", &h);
 }
 
+// L'orchestrateur suspend lui-même (@@PAUSE) : pas de question pour l'humain, reprise automatique à la prochaine
+// session de 5 h, avec son plan de reprise.
+void Orchestrator::brainPause(OrchestratorHost& h, const std::string& note) {
+    ParticipantStatus st = h.status(brainConvId);
+    brainTurnsAtSend_ = st.turns;  // reprise : le message de reprise partira (aucune réponse en attente)
+    brainCostAtSend_ = st.costUsd;
+    pauseNote = util::trim(note).empty() ? std::string("(pause sans précision)") : util::trim(note);
+    int64_t r = h.resetsAt("five_hour");
+    pauseUntil = r > h.now() ? r : (windowResetsAt_ > h.now() ? windowResetsAt_ : 0);
+    resumeState_ = OrchState::Thinking;
+    state = OrchState::UsagePause;
+    usageWindow_ = "brain";
+    pauseReason = pauseUntil > h.now()
+                      ? "l'orchestrateur s'est mis en pause : reprise automatique à la prochaine session de 5 h (dans " +
+                            util::humanDuration(pauseUntil - h.now()) + ")"
+                      : "l'orchestrateur s'est mis en pause : reprise automatique dès la prochaine session de 5 h (ou "
+                        "cliquez sur Reprendre)";
+    changed = true;
+    addLog(&h, "⏸ L'orchestrateur se met en pause : " + util::firstLine(pauseNote, 150), true);
+}
+
+std::string Orchestrator::resumeAfterPauseMessage() const {
+    std::string quoted;
+    for (auto& l : util::splitLines(pauseNote)) quoted += "> " + l + "\n";
+    return "# Reprise après ta pause\n\nTu avais suspendu l'orchestration avec ce message :\n\n" + quoted + "\n" +
+           budgetNotes() +
+           "\n\nDes agents ont pu être interrompus pendant la pause : vérifie l'état du dépôt, puis reprends ton plan "
+           "(@@DELEGUER / @@HUMAIN / @@PAUSE / @@TERMINE).";
+}
+
 void Orchestrator::pauseFrom(OrchState from, const std::string& reason, OrchestratorHost* h) {
     resumeState_ = from;
     state = OrchState::Paused;
@@ -904,6 +1039,8 @@ bool Orchestrator::start(OrchestratorHost& h) {
     humanQuestion.clear();
     questions.clear();
     pauseReason.clear();
+    pauseNote.clear();
+    pauseUntil = 0;
     nudges_ = 0;
     finalRequested_ = false;
     subscription = resolveSubscription(settings, h.isSubscription());
@@ -961,7 +1098,16 @@ bool Orchestrator::answerHuman(OrchestratorHost& h, const std::string& answer) {
     addLog(&h, "Vous : " + util::firstLine(answer, 150), true);
     questions.clear();
     humanQuestion.clear();
-    return sendBrain(h, "# Réponse de l'humain\n\n" + answer + "\n\nPoursuis et donne tes directives.");
+    std::string msg = "# Réponse de l'humain\n\n" + answer + "\n\n";
+    // Pendant la question, l'équipe a continué : on joint ce qui a avancé.
+    bool news = tasksInFlight() > 0;
+    for (auto& t : tasks)
+        if (t.done && !t.reported) news = true;
+    if (news) {
+        msg += "# Avancement de l'équipe pendant la question\n\n" + progressSection(h.now());
+        markReported();
+    }
+    return sendBrain(h, msg + "Poursuis et donne tes directives.");
 }
 
 void Orchestrator::pause(const std::string& reason) {
@@ -976,6 +1122,8 @@ void Orchestrator::stop() {
     if (state == OrchState::Idle) return;
     state = OrchState::Idle;
     pauseReason.clear();
+    pauseNote.clear();
+    pauseUntil = 0;
     questions.clear();
     addLog(nullptr, "Orchestration arrêtée.", true);
 }
@@ -987,8 +1135,7 @@ void Orchestrator::resume(OrchestratorHost& h) {
     pauseReason.clear();
     if (!exhausted()) finalRequested_ = false;  // budget relevé : on repart normalement
     if (!brainConvId.empty()) h.ensureOpen(brainConvId);
-    for (auto& t : tasks)
-        if (t.sent && !t.done) h.ensureOpen(t.convId);
+    reviveTasks(h);
     lastFiveHour_ = h.utilization("five_hour");
     state = to;
     changed = true;
@@ -999,9 +1146,14 @@ void Orchestrator::resume(OrchestratorHost& h) {
             pauseFrom(OrchState::Thinking, "conversation de l'orchestrateur introuvable", &h);
             return;
         }
-        // Le dernier message n'a pas obtenu de réponse (fermeture, plantage…) : on le renvoie.
-        if (!st.busy && st.turns <= brainTurnsAtSend_)
-        {
+        if (!pauseNote.empty()) {  // fin d'une pause décidée par l'orchestrateur : il reprend son plan
+            snapshotQuota(h);
+            std::string msg = resumeAfterPauseMessage();
+            pauseNote.clear();
+            pauseUntil = 0;
+            if (!st.busy) sendBrain(h, msg);
+        } else if (!st.busy && st.turns <= brainTurnsAtSend_) {
+            // Le dernier message n'a pas obtenu de réponse (fermeture, plantage…) : on le renvoie.
             std::string msg = lastBrainMessage_.empty() ? "Reprends là où tu en étais et donne tes directives." : lastBrainMessage_;
             const std::string tag = "_(Reprise après interruption";
             if (!util::startsWith(msg, tag))
@@ -1009,12 +1161,17 @@ void Orchestrator::resume(OrchestratorHost& h) {
             snapshotQuota(h);
             sendBrain(h, msg);
         }
-    } else if (to == OrchState::Working) {
-        for (auto& t : tasks) {
-            if (!t.sent || t.done) continue;
-            ParticipantStatus st = h.status(t.convId);
-            if (!st.busy && st.turns <= t.turnsAtSend) t.sent = false;  // renvoyée par dispatch
-        }
+    }
+}
+
+// Tâches en vol (les agents travaillent aussi pendant que le cerveau réfléchit ou attend une réponse) : conversations
+// rouvertes ; une tâche dont le tour n'a pas abouti (processus disparu) repart via dispatch.
+void Orchestrator::reviveTasks(OrchestratorHost& h) {
+    for (auto& t : tasks) {
+        if (!t.sent || t.done) continue;
+        h.ensureOpen(t.convId);
+        ParticipantStatus st = h.status(t.convId);
+        if (!st.busy && st.turns <= t.turnsAtSend) t.sent = false;
     }
 }
 
@@ -1091,6 +1248,16 @@ void Orchestrator::tick(OrchestratorHost& h) {
         addLog(&h, "Abonnement détecté : le budget devient une part du quota de 5 h.", true);
     }
     if (state != OrchState::Idle && state != OrchState::Finished) trackUsage(h);
+    // L'équipe avance indépendamment du cerveau : on relève les tâches terminées et on envoie celles en file,
+    // qu'il réfléchisse, attende une réponse humaine ou attende les agents.
+    if (canDispatch()) {
+        if (reviveOnTick_) {
+            reviveOnTick_ = false;
+            reviveTasks(h);
+        }
+        collectTasks(h);
+        dispatch(h);
+    }
     switch (state) {
         case OrchState::Thinking: tickThinking(h); break;
         case OrchState::Working: tickWorking(h); break;
@@ -1108,6 +1275,18 @@ void Orchestrator::tick(OrchestratorHost& h) {
             break;
         }
         case OrchState::UsagePause: {
+            if (usageWindow_ == "brain") {  // pause décidée par l'orchestrateur : reprise à la session suivante
+                int64_t r = h.resetsAt("five_hour");
+                if (pauseUntil == 0 && r > h.now()) pauseUntil = r, changed = true;
+                bool reset = pauseUntil > 0 && (h.now() > pauseUntil + 30 || r > pauseUntil + 60 ||
+                                                windowResetsAt_ > pauseUntil + 60);
+                if (reset) {
+                    state = OrchState::Paused;
+                    addLog(&h, "Nouvelle session de 5 h : l'orchestrateur reprend après sa pause.", true);
+                    resume(h);
+                }
+                break;
+            }
             if (usageWindow_ == "budget") {
                 int64_t r = h.resetsAt("five_hour");
                 if (!exhausted() || (r > 0 && h.now() > r + 30)) {
@@ -1163,6 +1342,9 @@ void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& tex
         state = OrchState::Finished;
         finalSummary = d.summary;
         addLog(&h, "Objectif atteint : " + util::firstLine(d.summary, 150), true);
+        if (int n = tasksInFlight(); n > 0)
+            addLog(&h, std::to_string(n) + " tâche(s) encore en cours ou en file : celles déjà lancées se terminent dans "
+                       "leur conversation.");
         return;
     }
     if (d.needHuman) {
@@ -1176,6 +1358,18 @@ void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& tex
         std::string extra = d.delegations.empty() ? "" : " (ses délégations attendront votre réponse)";
         addLog(&h, "Question pour vous : " + util::firstLine(questions.empty() ? d.question : questions[0].text, 150) + extra,
                true);
+        return;
+    }
+    if (d.pause) {
+        nudges_ = 0;
+        brainPause(h, d.pauseNote);
+        return;
+    }
+    if (d.delegations.empty() && tasksInFlight() > 0) {
+        // @@ATTENDRE (ou rien) alors que des agents travaillent encore : on attend leurs comptes rendus.
+        nudges_ = 0;
+        state = OrchState::Working;
+        addLog(&h, "L'orchestrateur attend les comptes rendus des agents encore au travail.");
         return;
     }
     if (d.delegations.empty()) {
@@ -1193,8 +1387,10 @@ void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& tex
             return;
         }
         addLog(&h, "Réponse sans directive : relance de l'orchestrateur.");
-        sendBrain(h, "Ta réponse ne contient aucune directive. Termine par un bloc @@DELEGUER <agent> … @@FIN, "
-                     "@@HUMAIN … @@FIN ou @@TERMINE … @@FIN (voir le protocole).");
+        sendBrain(h, std::string("Ta réponse ne contient aucune directive") +
+                         (d.wait ? " exploitable : plus aucun agent ne travaille, @@ATTENDRE n'attendrait rien" : "") +
+                         ". Termine par un bloc @@DELEGUER <agent> … @@FIN, @@HUMAIN … @@FIN ou @@TERMINE … @@FIN "
+                         "(voir le protocole).");
         return;
     }
     nudges_ = 0;
@@ -1205,7 +1401,9 @@ void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& tex
     for (auto& n : names) available += (available.empty() ? "" : ", ") + n;
 
     ++cycle;
-    tasks.clear();
+    // On garde les tâches encore en cours / en file et les comptes rendus pas encore transmis.
+    tasks.erase(std::remove_if(tasks.begin(), tasks.end(), [](const OrchTask& t) { return t.done && t.reported; }),
+                tasks.end());
     int valid = 0;
     for (auto& del : d.delegations) {
         OrchTask t;
@@ -1226,11 +1424,11 @@ void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& tex
         }
         tasks.push_back(std::move(t));
     }
-    if (valid == 0) {
-        sendBrain(h, buildReport());
+    state = OrchState::Working;
+    if (valid == 0) {  // échecs immédiats : rapportés tout de suite si personne ne travaille, sinon au prochain compte rendu
+        if (tasksInFlight() == 0) sendReport(h, false);
         return;
     }
-    state = OrchState::Working;
     addLog(&h, "Cycle " + std::to_string(cycle) + " : " + std::to_string(valid) + " tâche(s) déléguée(s).", true);
     dispatch(h);
 }
@@ -1240,7 +1438,7 @@ void Orchestrator::dispatch(OrchestratorHost& h) {
     for (auto& t : tasks)
         if (t.sent && !t.done) ++active;
     for (auto& t : tasks) {
-        if (state != OrchState::Working) return;
+        if (!canDispatch()) return;
         if (t.sent || t.done) continue;
         // Plafond du compte atteint : pause jusqu'à la prochaine session (et non « budget épuisé »).
         if (!finalRequested_ && !usageOk(h)) return;
@@ -1310,7 +1508,7 @@ void Orchestrator::dispatch(OrchestratorHost& h) {
     }
 }
 
-void Orchestrator::tickWorking(OrchestratorHost& h) {
+void Orchestrator::collectTasks(OrchestratorHost& h) {
     for (auto& t : tasks) {
         if (!t.sent || t.done) continue;
         ParticipantStatus st = h.status(t.convId);
@@ -1339,11 +1537,59 @@ void Orchestrator::tickWorking(OrchestratorHost& h) {
             addLog(&h, t.agent + " : processus arrêté.", true);
         }
     }
-    dispatch(h);
-    if (state != OrchState::Working) return;
+}
+
+// Compte rendu intermédiaire utile : quelque chose de neuf à rapporter, rien en file (une place libre serait
+// aussitôt prise), une place libre et au moins un agent libre — sinon le cerveau ne pourrait rien lancer.
+bool Orchestrator::partialReportUseful(OrchestratorHost& h) const {
+    if (!settings.rollingReports || finalRequested_ || exhausted()) return false;
+    if (settings.maxCycles > 0 && cycle >= settings.maxCycles) return false;
+    bool fresh = false;
+    int running = 0;
+    std::vector<std::string> busyAgents;
+    for (auto& t : tasks) {
+        if (t.done && !t.reported) fresh = true;
+        if (!t.done && !t.sent) return false;  // en file
+        if (!t.done && t.sent) {
+            ++running;
+            if (std::find(busyAgents.begin(), busyAgents.end(), t.agent) == busyAgents.end()) busyAgents.push_back(t.agent);
+        }
+    }
+    if (!fresh || running == 0 || running >= std::max(1, settings.maxParallel)) return false;
+    return busyAgents.size() < h.agents().size();
+}
+
+bool Orchestrator::sendReport(OrchestratorHost& h, bool partial) {
+    std::string prefix;
+    ParticipantStatus bst = h.status(brainConvId);
+    if (needsRotation(bst, brainConvId)) {
+        std::string nid = h.rotate("", brainConvId);
+        if (nid.empty()) return false;  // récap de l'orchestrateur en cours
+        addLog(&h, "↻ Orchestrateur : contexte allégé (récap + nouvelle conversation).", true);
+        brainConvId = nid;
+        prefix = brainRefresher();
+    }
+    std::string report = buildReport(partial, h.now());
+    std::string done;
     for (auto& t : tasks)
-        if (!t.done) return;
+        if (t.done && !t.reported) done += (done.empty() ? "" : ", ") + t.agent;
+    markReported();
+    if (partial)
+        addLog(&h, "Compte rendu intermédiaire (" + done + ") envoyé à l'orchestrateur ; " +
+                       std::to_string(tasksInFlight()) + " agent(s) toujours au travail.");
+    else
+        addLog(&h, "Comptes rendus du cycle " + std::to_string(cycle) + " envoyés à l'orchestrateur.");
+    return sendBrain(h, prefix + report);
+}
+
+void Orchestrator::tickWorking(OrchestratorHost& h) {
+    if (state != OrchState::Working) return;
     if (h.status(brainConvId).busy) return;  // l'utilisateur discute avec l'orchestrateur
+    if (tasksInFlight() > 0) {
+        // Au fil de l'eau : un agent a fini, d'autres travaillent encore — le cerveau peut relancer les agents libres.
+        if (partialReportUseful(h) && usageOk(h)) sendReport(h, true);
+        return;
+    }
     // Le plafond du compte passe avant le budget : il suspend (reprise à la prochaine session) sans faire conclure.
     if (!finalRequested_ && !usageOk(h)) return;
     if (exhausted()) {
@@ -1360,17 +1606,7 @@ void Orchestrator::tickWorking(OrchestratorHost& h) {
         return;
     }
     if (!finalRequested_ && !usageOk(h)) return;
-    std::string prefix;
-    ParticipantStatus bst = h.status(brainConvId);
-    if (needsRotation(bst, brainConvId)) {
-        std::string nid = h.rotate("", brainConvId);
-        if (nid.empty()) return;  // récap de l'orchestrateur en cours
-        addLog(&h, "↻ Orchestrateur : contexte allégé (récap + nouvelle conversation).", true);
-        brainConvId = nid;
-        prefix = brainRefresher();
-    }
-    addLog(&h, "Comptes rendus du cycle " + std::to_string(cycle) + " envoyés à l'orchestrateur.");
-    sendBrain(h, prefix + buildReport());
+    sendReport(h, false);
 }
 
 bool Orchestrator::needsRotation(const ParticipantStatus& st, const std::string& convId) const {
@@ -1399,7 +1635,7 @@ json Orchestrator::toJson() const {
         jt.push_back({{"agent", t.agent},   {"task", t.task},     {"convId", t.convId},       {"model", t.model}, {"modelChosen", t.modelChosen},
                       {"effort", t.effort}, {"cycle", t.cycle},   {"turnsAtSend", t.turnsAtSend},
                       {"costAtSend", t.costAtSend}, {"sent", t.sent}, {"done", t.done}, {"failed", t.failed},
-                      {"report", t.report}, {"sentAt", t.sentAt}, {"doneAt", t.doneAt}});
+                      {"report", t.report}, {"reported", t.reported}, {"sentAt", t.sentAt}, {"doneAt", t.doneAt}});
     json jl = json::array();
     for (auto& l : log) jl.push_back({{"t", l.time}, {"text", l.text}, {"important", l.important}});
     json jq = json::array();
@@ -1413,6 +1649,7 @@ json Orchestrator::toJson() const {
              {{"objective", s.objective},
               {"maxCycles", s.maxCycles},
               {"maxParallel", s.maxParallel},
+              {"rollingReports", s.rollingReports},
               {"workerMode", s.workerMode},
               {"brainMode", s.brainMode},
               {"budgetMode", s.budgetMode},
@@ -1460,7 +1697,9 @@ json Orchestrator::toJson() const {
             {"lastBrainMessage", lastBrainMessage_},
             {"nudges", nudges_},
             {"finalRequested", finalRequested_},
-            {"usageWindow", usageWindow_}};
+            {"usageWindow", usageWindow_},
+            {"pauseNote", pauseNote},
+            {"pauseUntil", pauseUntil}};
 }
 
 void Orchestrator::fromJson(const json& j) {
@@ -1469,6 +1708,7 @@ void Orchestrator::fromJson(const json& j) {
     st.objective = s.value("objective", std::string());
     st.maxCycles = s.value("maxCycles", st.maxCycles);
     st.maxParallel = s.value("maxParallel", st.maxParallel);
+    st.rollingReports = s.value("rollingReports", st.rollingReports);
     st.workerMode = s.value("workerMode", st.workerMode);
     st.brainMode = s.value("brainMode", st.brainMode);
     st.budgetMode = s.value("budgetMode", st.budgetMode);
@@ -1522,6 +1762,8 @@ void Orchestrator::fromJson(const json& j) {
         t.done = jt.value("done", false);
         t.failed = jt.value("failed", false);
         t.report = jt.value("report", std::string());
+        // Ancien format (cycles barrières) : hors phase « agents au travail », les tâches terminées étaient rapportées.
+        t.reported = jt.value("reported", t.done && j.value("state", std::string()) != "working");
         t.sentAt = jt.value("sentAt", (int64_t)0);
         t.doneAt = jt.value("doneAt", (int64_t)0);
         tasks.push_back(std::move(t));
@@ -1553,6 +1795,8 @@ void Orchestrator::fromJson(const json& j) {
     nudges_ = j.value("nudges", 0);
     finalRequested_ = j.value("finalRequested", false);
     usageWindow_ = j.value("usageWindow", std::string());
+    pauseNote = j.value("pauseNote", std::string());
+    pauseUntil = j.value("pauseUntil", (int64_t)0);
     lastFiveHour_ = j.value("lastFiveHour", -1.0);
     windowResetsAt_ = j.value("windowResetsAt", (int64_t)0);
     allowanceOverride_ = j.value("allowanceOverride", -1.0);
@@ -1563,15 +1807,34 @@ void Orchestrator::fromJson(const json& j) {
         for (auto& [k, v] : j["convTasks"].items())
             if (v.is_number_integer()) convTasks_[k] = v.get<int>();  // gardé : une session réinitialisée entre-temps sera détectée
     // Questions en attente : réanalysées avec le découpage actuel (questions multiples, options…).
-    if (state == OrchState::WaitingHuman && !humanQuestion.empty())
-        questions = parseDirectives("@@HUMAIN\n" + humanQuestion + "\n@@FIN").questions;
+    if (state == OrchState::WaitingHuman && !humanQuestion.empty()) {
+        Directives d = parseDirectives("@@HUMAIN\n" + humanQuestion + "\n@@FIN");
+        questions = d.questions;
+        if (d.pause && !d.needHuman) {
+            // Annonce de pause enregistrée comme une question (versions précédentes) : c'est une pause de
+            // l'orchestrateur, reprise à la fin de la session de 5 h où elle a été décidée.
+            pauseNote = d.pauseNote;
+            pauseUntil = windowResetsAt_;
+            humanQuestion.clear();
+            questions.clear();
+            resumeState_ = OrchState::Thinking;
+            state = OrchState::UsagePause;
+            usageWindow_ = "brain";
+            pauseReason = "l'orchestrateur s'est mis en pause : reprise automatique à la prochaine session de 5 h (ou "
+                          "cliquez sur Reprendre)";
+        }
+    }
     // Rechargée en cours de route (ClaudeDesk fermé) : les processus ont disparu,
     // on attend une reprise explicite. Une question en attente reste une question.
+    reviveOnTick_ = false;
+    if (state == OrchState::WaitingHuman)
+        for (auto& t : tasks)
+            if (t.sent && !t.done) reviveOnTick_ = true;  // processus disparus : rouvrir / renvoyer au prochain passage
     if (state == OrchState::Thinking || state == OrchState::Working) {
         resumeState_ = state;
         state = OrchState::Paused;
         pauseReason = "ClaudeDesk a été fermé pendant l'orchestration — cliquez sur Reprendre";
-    } else if (state == OrchState::UsagePause) {
+    } else if (state == OrchState::UsagePause && usageWindow_ != "brain") {  // pause de l'orchestrateur : reste automatique
         state = OrchState::Paused;
         pauseReason = "pause d'usage en cours à la fermeture — cliquez sur Reprendre";
     }

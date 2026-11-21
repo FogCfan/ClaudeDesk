@@ -14,7 +14,7 @@ Code, commentaires et textes d'interface en **français**.
 - `src/app` — `App` (boucle, onglets, fenêtres), `AppMenus`, `Settings` (settings.json)
 - `src/claude` — `ClaudeSession` (protocole stream-json), `Process`, `CommandLine`,
   `SessionConfig`, `History`, `Transcript`, `UsageTracker` (rate_limit_event), `OneShot` (récaps),
-  `Orchestrator` (moteur de l'orchestrateur, sans UI : directives `@@DELEGUER/@@HUMAIN/@@TERMINE`, garde-fous)
+  `Orchestrator` (moteur de l'orchestrateur, sans UI : directives `@@DELEGUER/@@HUMAIN/@@ATTENDRE/@@TERMINE`, comptes rendus au fil de l'eau, garde-fous)
 - `src/ui` — panneaux ImGui : `ConversationView`, `PromptEditor`, `ConfigPanel`,
   `WorkspacePanel`, `Dashboard`, `UsagePanel`, `PermissionPanel`, `Markdown`, `Theme`, `Anim`, `Tutorial`,
   `OrchestratorPanel` (page 2 « Orchestrateur », Ctrl+3, + `AppOrchHost`, l'adaptateur moteur ↔ conversations ; état dans

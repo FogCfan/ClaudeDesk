@@ -43,13 +43,20 @@ struct Directives {
     std::vector<Delegation> delegations;
     bool finished = false;
     std::string summary;                   // @@TERMINE
+    bool wait = false;                     // @@ATTENDRE : attendre les comptes rendus des agents encore au travail
+    bool pause = false;                    // @@PAUSE : suspendre jusqu'à la prochaine session de 5 h
+    std::string pauseNote;                 //   état + plan de reprise (aussi : un @@HUMAIN qui n'est qu'une annonce de pause)
     bool needHuman = false;
     std::string question;                  // @@HUMAIN : texte brut complet
     std::vector<HumanQuestion> questions;  // @@HUMAIN : une entrée par bloc, options détectées
-    bool empty() const { return delegations.empty() && !finished && !needHuman; }
+    bool empty() const { return delegations.empty() && !finished && !needHuman && !pause; }
 };
 
-// Analyse les blocs « @@DELEGUER <agent> [| modele=… effort=…] / @@HUMAIN / @@TERMINE … @@FIN ».
+// Un bloc @@HUMAIN qui n'est en réalité qu'une annonce de pause (« Orchestration en pause : quota presque épuisé…
+// Relance-moi après la réinitialisation ») : aucune question, aucun choix, et un vocabulaire de pause.
+bool looksLikePauseNotice(const std::string& body);
+
+// Analyse les blocs « @@DELEGUER <agent> [| modele=… effort=…] / @@HUMAIN / @@TERMINE / @@ATTENDRE … @@FIN ».
 Directives parseDirectives(const std::string& text);
 // Sépare une question de ses options. Sont des options : les cases « - [ ] … » où qu'elles soient,
 // sinon une liste finale d'au moins deux puces / numéros de premier niveau (les sous-puces
@@ -65,7 +72,7 @@ std::string lastTurnText(const std::vector<Entry>& entries);
 
 // Découpe une réponse du cerveau pour l'affichage : texte libre et blocs de directives.
 struct TextSegment {
-    enum Kind { Text, Delegate, Human, Done } kind = Text;
+    enum Kind { Text, Delegate, Human, Done, Wait, Pause } kind = Text;
     std::string header;  // après le mot-clé (« 02 Build | modele=… »)
     std::string body;
 };
@@ -135,6 +142,9 @@ struct OrchestratorSettings {
     std::string objective;
     int maxCycles = 25;
     int maxParallel = 3;
+    // Comptes rendus au fil de l'eau : dès qu'un agent termine alors que d'autres travaillent encore (et qu'une place
+    // se libère), le cerveau reçoit un compte rendu intermédiaire et peut relancer aussitôt les agents libres.
+    bool rollingReports = true;
     std::string workerMode = "auto";   // mode de permission des agents
     std::string brainMode = "auto";    // mode de permission du cerveau
 
@@ -193,6 +203,7 @@ struct OrchTask {
     int turnsAtSend = 0;
     double costAtSend = 0;
     bool sent = false, done = false, failed = false, notifiedHuman = false;
+    bool reported = false;      // compte rendu transmis au cerveau
     std::string report;
     int64_t sentAt = 0, doneAt = 0;
 };
@@ -231,13 +242,18 @@ public:
     bool subscription = false;     // budget effectif : abonnement (sinon dollars)
     std::string brainConvId;
     std::map<std::string, std::string> agentConv;  // agent -> conversation utilisée
-    std::vector<OrchTask> tasks;                   // tâches du cycle en cours
+    std::vector<OrchTask> tasks;                   // tâches en cours, en file, ou terminées pas encore traitées par le cerveau
     std::deque<OrchLogEntry> log;                  // plus récent en dernier
     std::string finalSummary;
     std::string humanQuestion;                     // texte brut de la dernière question
     std::vector<HumanQuestion> questions;          // questions en attente (structurées)
     int questionSeq = 0;                           // change à chaque nouvelle question
     std::deque<QaEntry> qaHistory;                 // questions posées et vos réponses
+    // Pause décidée par l'orchestrateur (@@PAUSE) : son message, et la réinitialisation de la fenêtre de 5 h
+    // attendue pour reprendre seul (0 = inconnue : reprise manuelle, ou dès qu'elle est connue).
+    std::string pauseNote;
+    int64_t pauseUntil = 0;
+    bool brainPaused() const { return !pauseNote.empty() && (state == OrchState::UsagePause || state == OrchState::Paused); }
     bool changed = false;                          // à sauvegarder
 
     // Nouveau départ avec settings.objective (réinitialise cycles, dépense, journal).
@@ -252,6 +268,7 @@ public:
     bool running() const;  // Thinking / Working / WaitingHuman / UsagePause
     OrchState resumeState() const { return resumeState_; }
     bool finalPhase() const { return finalRequested_; }
+    int tasksInFlight() const;  // tâches envoyées non terminées + tâches en file
 
     // Part du budget consommée (0..1+), -1 si illimité.
     double budgetFraction() const;
@@ -270,16 +287,28 @@ private:
     void handleBrainAnswer(OrchestratorHost& h, const std::string& text);
     void tickThinking(OrchestratorHost& h);
     void tickWorking(OrchestratorHost& h);
+    void collectTasks(OrchestratorHost& h);   // relève les tâches terminées (quel que soit l'état du cerveau)
+    void reviveTasks(OrchestratorHost& h);    // rouvre les conversations des tâches en vol ; renvoie celles interrompues
+    bool sendReport(OrchestratorHost& h, bool partial);
+    bool partialReportUseful(OrchestratorHost& h) const;
+    bool canDispatch() const {
+        return state == OrchState::Thinking || state == OrchState::Working || state == OrchState::WaitingHuman;
+    }
     void trackUsage(OrchestratorHost& h);
     void dispatch(OrchestratorHost& h);
     // Arrêt ferme : cible + tolérance. Entre les deux, on termine proprement ce qui est en cours.
     bool exhausted() const { double f = budgetFraction(); return f >= 1.0 + std::max(0.0, settings.budgetTolerance); }
     bool usageOk(OrchestratorHost& h);
     std::string budgetNotes() const;
-    std::string buildReport() const;
+    // Comptes rendus non encore transmis + agents toujours au travail ; `partial` : d'autres agents travaillent encore.
+    std::string buildReport(bool partial, int64_t now) const;
+    std::string progressSection(int64_t now) const;
+    void markReported();
     void addLog(OrchestratorHost* h, const std::string& text, bool important = false);
     void pauseFrom(OrchState from, const std::string& reason, OrchestratorHost* h);
     void budgetPause(OrchestratorHost& h);
+    void brainPause(OrchestratorHost& h, const std::string& note);
+    std::string resumeAfterPauseMessage() const;
 
     OrchState resumeState_ = OrchState::Idle;
     int brainTurnsAtSend_ = 0;
@@ -293,7 +322,8 @@ private:
     int64_t windowResetsAt_ = 0;
     std::map<std::string, int> convTasks_;  // tâches confiées par conversation (rotation)
     bool needsRotation(const ParticipantStatus& st, const std::string& convId) const;
-    std::string brainRefresher() const;      // rappel de l'objectif et de l'équipe pour un cerveau tout neuf   // réinitialisation de la session de 5 h suivie (détection d'une nouvelle session)
+    std::string brainRefresher() const;      // rappel de l'objectif et de l'équipe pour un cerveau tout neuf
+    bool reviveOnTick_ = false;              // rechargée avec une question en attente et des tâches en vol
     double allowanceOverride_ = -1;  // limite figée par « Relancer le budget » (-1 : calcul normal)
     double overrideShare_ = -1;      // niveau en vigueur lors de la relance (un autre niveau annule la limite figée)
     double costBaseline_ = 0;        // API : dépense déjà comptée avant la dernière relance

@@ -177,6 +177,7 @@ private:
     void drawOrchestratorBudgetCard(bool subscription);
     void drawBudgetGauge(double fraction, double tolerance, float width, float height);
     void drawOrchestratorQuestion();
+    void drawOrchestratorPauseNote();  // pause décidée par l'orchestrateur (@@PAUSE)
     void drawOrchestratorSettings();
     void drawOrchestratorLog();
     void drawOrchestratorTeam(bool compact);

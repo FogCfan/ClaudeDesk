@@ -5,6 +5,12 @@ vrai CLI `claude` en mode `-p --input-format stream-json --output-format stream-
 vos réglages, CLAUDE.md, MCP, skills, hooks et votre abonnement s'appliquent
 exactement comme dans le terminal.
 
+En plus d'un vrai éditeur et du suivi en direct de l'usage, ClaudeDesk range le travail en
+**projets › thèmes › conversations** (mode cowork) et peut faire travailler une **équipe d'agents**
+sur un objectif grâce à l'**orchestrateur** (page 3), dans un budget que vous fixez.
+
+Windows (MSYS2 UCRT64) et macOS (Homebrew) ; ClaudeDesk est lui-même développé depuis ClaudeDesk.
+
 ## Lancer
 
 ```
@@ -54,9 +60,10 @@ Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/
 - **Permissions** : panneau Autoriser / Toujours autoriser / Refuser (+ consigne), Alt+A/T/R.
   Les questions de Claude (AskUserQuestion) et la validation de plan (mode Plan) ont leur propre UI.
 - Plusieurs conversations en parallèle (onglets), rouvertes au redémarrage.
+- Repère discret « ── hh:mm ── » dans le fil à chaque changement de minute.
 - La barre des tâches clignote quand Claude a fini ou attend une décision.
 
-### Deux pages : Cockpit et Tableau de bord
+### Trois pages : Cockpit, Tableau de bord, Orchestrateur
 - **Cockpit** (Ctrl+1) : la page principale décrite ci-dessus.
 - **Tableau de bord des conversations** (Ctrl+2) : toutes les conversations ouvertes en cartes, triées
   par urgence (⚠ attend votre décision, en cours, prête, en veille). Chaque carte montre l'état et la durée,
@@ -65,11 +72,16 @@ Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/
   commun à toutes les conversations. Filtres « actives » / « à traiter », « Tout interrompre ».
 - **Fenêtre séparée** (Ctrl+Maj+D ou ⧉) : le tableau de bord dans sa propre fenêtre Windows (second
   contexte ImGui), à poser sur un deuxième écran. Son état est mémorisé au redémarrage.
+- **Orchestrateur** (Ctrl+3) : le chef de projet automatique et son équipe (voir plus bas). Quand une
+  orchestration existe, le tableau de bord l'affiche en tête (carte « Orchestration » + équipe).
 
 ### Usage en direct (équivalent de `/usage`)
 - Limites du forfait : fenêtre de 5 h et semaine, % utilisé, heure de réinitialisation,
   historique sur 24 h. Mis à jour à chaque réponse (événements `rate_limit_event` du CLI) ;
   bouton **Actualiser** (requête minuscule à Haiku).
+- **Actualisation automatique** (Configuration › Application) : au lancement si la mesure date de plus de 2 min,
+  puis si elle date de plus de 15 min ou que la fenêtre de 5 h s'est réinitialisée — au plus une requête toutes
+  les 10 min, jamais pendant qu'une session travaille ni quand la fenêtre n'est pas regardée.
 - Conversation active : coût équivalent API, jetons (dont cache), tours, temps API,
   **remplissage de la fenêtre de contexte**, coût par tour, tâches de Claude, serveurs MCP.
 
@@ -120,7 +132,8 @@ ClaudeDesk\
   de session Claude Code. **Reprendre** = votre prochain message continue la session (`--resume`).
 - **Récap** (bouton, Ctrl+Maj+R, ou automatique à la fermeture) : objectif, ce qui a été fait,
   décisions, fichiers, reste à faire — généré par Haiku.
-- **Synthèse de dossier** : condense les récaps d'un thème.
+- **Synthèse de dossier** : condense les récaps d'un thème ; les récaps manquants ou périmés sont
+  d'abord générés (3 en parallèle), l'inspecteur affiche « récaps x / n ».
 - **Contexte injecté** : une nouvelle conversation reçoit dans son prompt système les notes et
   synthèses du projet et des thèmes parents, plus les récaps des échanges précédents du dossier.
   « Repartir de ce contexte » ouvre une conversation neuve, légère, mais informée.
@@ -128,6 +141,52 @@ ClaudeDesk\
   épingles, recherche dans les titres et récaps.
 - **Importer depuis Claude Code** : les sessions faites dans le terminal
   (`~/.claude/projects`) s'importent dans un dossier et se reprennent telles quelles.
+
+### Orchestrateur : une équipe d'agents sur un objectif
+Une conversation **« Orchestrateur »** (le cerveau), à la racine d'un projet cowork, pilote les conversations
+de ses thèmes : **chaque thème est un agent**, les notes du dossier décrivent son rôle. Ouverture : Ctrl+3,
+le bouton de page *Orchestrateur*, ou **Orchestrer…** dans l'inspecteur d'un projet.
+
+```
+ cerveau ──@@DELEGUER agent | modele=… effort=…──▶ agents (en parallèle, limité)
+    ▲                                                  │
+    └───── comptes rendus (au fil de l'eau) ◀──────────┘   … jusqu'à @@TERMINE
+```
+
+- **Directives** en fin de réponse du cerveau : `@@DELEGUER <agent>` (une tâche, avec modèle et effort),
+  `@@HUMAIN` (une question pour vous), `@@ATTENDRE` (attendre les agents encore au travail), `@@TERMINE` (bilan).
+- **Au fil de l'eau** : le cerveau n'attend pas toute l'équipe. Dès qu'un agent termine alors que d'autres
+  travaillent encore (et qu'une place est libre), il reçoit un **compte rendu intermédiaire** et peut relancer
+  aussitôt les agents libres ; une tâche confiée à un agent occupé part après la sienne. L'équipe continue
+  aussi pendant qu'il réfléchit ou qu'une question vous attend (la réponse lui transmet ce qui a avancé).
+  Désactivable : *Réglages avancés › Exécution › Comptes rendus au fil de l'eau*.
+- **Budget** — la contrainte principale, toujours un **plafond** (le cerveau optimise : Haiku pour la
+  mécanique, Sonnet pour le courant, Opus pour le difficile). Quatre niveaux simples :
+
+  | Niveau | Abonnement (part de ce qui reste dans la session de 5 h) | API | Modèles permis | Agents |
+  |---|---|---|---|---|
+  | Bas | 25 % | 5 $ | Haiku, Sonnet | 2 |
+  | Moyen (défaut) | 50 % | 20 $ | + Opus | 3 |
+  | Élevé | 100 % | 60 $ | + Fable | 3 |
+  | Max abonnement | sans limite (sessions enchaînées) | 200 $ | tous | 4 |
+
+  La part se renouvelle à chaque session de 5 h ; seule la consommation faite pendant que l'équipe travaille
+  est comptée. Option **résultat dans le budget** : phase finale à 75 % (« réduis le périmètre plutôt que la
+  qualité »), tolérance de +15 % pour finir proprement, puis conclusion obligatoire. Plafonds du compte (5 h et
+  hebdomadaire) : pause puis reprise automatique à la réinitialisation. « ↺ Relancer le budget » remet le
+  compteur à zéro. *Réglages avancés* : budget détaillé, modèles et efforts autorisés, défauts des agents et
+  du cerveau, parallélisme, cycles maximum, modes de permission.
+- **Questions** : un bloc `@@HUMAIN` devient un formulaire (questions numérotées séparées, options
+  cliquables `- [ ]`, la recommandée présélectionnée, réponses suggérées, « Laisse-le décider », Ctrl+Entrée).
+  La barre des tâches clignote.
+- **Contexte maîtrisé** : avant d'envoyer une tâche, une conversation d'agent trop chargée (45 % de contexte
+  ou 6 tâches par défaut) est récapitulée puis remplacée par une conversation neuve du même thème, qui reçoit
+  la mémoire cowork. Idem pour le cerveau.
+- **La page** : cartes Avancement et Budget (jauge, repère 75 %, cible, tolérance), l'équipe (statut, modèle,
+  contexte de chaque agent), réglages, journal, et la discussion du cerveau à droite, rendue en cartes
+  (tâches confiées, questions, bilan) — vous pouvez lui écrire directement. Onglet « Bilan ✓ » à la fin.
+- **Persistance** : `<projet>/_orchestrateur.json`, rechargé au démarrage ; une orchestration interrompue par
+  la fermeture reste en pause jusqu'à *Reprendre* (les tâches interrompues sont renvoyées).
 
 ### Prise en main
 - **Premier lancement** : le guide s'ouvre sur sa page *Bienvenue*. **Lancements 2 à 11** : une bulle animée,
@@ -161,7 +220,7 @@ F1 dans l'application affiche la liste complète.
 | Ctrl+F | Rechercher dans la conversation |
 | Ctrl+Maj+C | Copier la dernière réponse |
 | Ctrl+Maj+R | Générer le récap |
-| Ctrl+1 / Ctrl+2 | Cockpit / tableau de bord |
+| Ctrl+1 / Ctrl+2 / Ctrl+3 | Cockpit / tableau de bord / orchestrateur |
 | Ctrl+Maj+D | Tableau de bord dans une fenêtre séparée |
 | Maj+F1 | Guide de démarrage |
 | Ctrl+S | Tout enregistrer |
@@ -172,7 +231,7 @@ F1 dans l'application affiche la liste complète.
 ```
 src/
   util/        Strings (UTF-8, base64, dates), Paths (fichiers, %APPDATA%)
-  claude/      Process        processus Win32 + threads de lecture des tubes
+  claude/      Process        processus Win32 (Process_posix : macOS) + threads de lecture
                CommandLine    échappement des arguments, détection de claude.exe
                SessionConfig  réglages → options du CLI
                ClaudeSession  protocole stream-json : messages, streaming, outils,
@@ -182,16 +241,23 @@ src/
                UsageTracker   limites du forfait, stats par session
                OneShot        appels ponctuels (récaps, actualisation de l'usage)
                History        lecture des sessions de ~/.claude/projects
+               Orchestrator   moteur de l'orchestrateur, sans UI : directives, file de
+                              tâches, comptes rendus au fil de l'eau, budget, rotation
   workspace/   Workspace      arborescence cowork sur disque + contexte injecté
   app/         App (boucle SDL, actions), AppMenus, Settings
   ui/          ConversationView, PromptEditor, PermissionPanel, UsagePanel,
                ConfigPanel, WorkspacePanel, Dashboard (page 2 + fil d'activité),
-               Tutorial (bienvenue, visite, guide, projet exemple), Markdown, Theme
-tests/         doctest : protocole rejoué, arborescence, échappement, utilitaires
+               OrchestratorPanel (page 3 + AppOrchHost, l'adaptateur moteur ↔ conversations),
+               Tutorial (bienvenue, visite, guide, projet exemple), Markdown, Theme, Anim
+tests/         doctest : protocole rejoué, arborescence, échappement, utilitaires, orchestrateur
 ```
 
 Données : `%APPDATA%\ClaudeDesk\` (settings.json, usage.json, layout.ini, prompts\).
 
-Options de lancement (tests) : `--data-dir`, `--workspace`, `--cwd`, `--send "texte"`,
-`--panel history|shortcuts|newproject|light|dashboard|detached|guide<N>|welcome|example|gfx|reminder|tour<N>`,
-`--screenshot capture.bmp --after 3 [--nowait]` (la fenêtre détachée est capturée dans `capture_dash.bmp`).
+Options de lancement (tests, instance isolée) : `--data-dir`, `--workspace`, `--cwd`, `--send "texte"`,
+`--panel history|shortcuts|newproject|light|dashboard|detached|guide<N>|welcome|example|gfx|reminder|tour<N>|synthesis`,
+`--panel orchestrator[:reglages|:budget|:modeles|:execution|:discussion]`, `--orchestrate "objectif"` (lance
+l'orchestrateur sur le premier projet à thèmes), `--screenshot capture.bmp --after 3 [--nowait]` (la fenêtre
+détachée est capturée dans `capture_dash.bmp`).
+
+Tests unitaires : `cmake --build --preset debug` puis `build/debug/desk_tests.exe` (ou `ctest --preset debug`).
