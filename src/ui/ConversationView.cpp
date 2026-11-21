@@ -584,9 +584,13 @@ void App::drawEntry(OpenConversation& oc, int i, float width) {
                 if (oc.selectable.count(i)) {
                     ui::selectableText("##sel", e.text, ImGui::GetContentRegionAvail().x);
                 } else {
-                    ImGui::PushTextWrapPos(0.0f);
-                    ImGui::TextUnformatted(e.text.c_str());
-                    ImGui::PopTextWrapPos();
+                    // Rendu Markdown, comme les réponses (tâches de l'orchestrateur, messages collés…) ;
+                    // les retours à la ligne d'un message ordinaire sont conservés.
+                    if (cache.textLen != e.text.size()) {
+                        cache.blocks = ui::parseMarkdown(e.text);
+                        cache.textLen = e.text.size();
+                    }
+                    ui::renderMarkdown(cache.blocks, md, i);
                 }
             }
             card.end();
@@ -787,6 +791,28 @@ bool App::drawBrainEntry(OpenConversation& oc, int i, float width) {
                 ui::renderMarkdown(cache.segBlocks[k], md, expandKey + 40 + (int)k);
             }
             card.end();
+        } else if (sg.kind == claude::TextSegment::Pause) {
+            ImGui::Dummy(ImVec2(0, 2));
+            Card card(width - 8, ImVec4(pal.link.x, pal.link.y, pal.link.z, 0.06f), true, pal.link);
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextColored(pal.link, "⏸ Pause jusqu'à la prochaine session de 5 h");
+            ImGui::PopFont();
+            ImGui::SameLine();
+            ImGui::TextDisabled("— reprise automatique");
+            {
+                RightMargin rm(card.pad);
+                ui::renderMarkdown(cache.segBlocks[k], md, expandKey + 60 + (int)k);
+            }
+            card.end();
+        } else if (sg.kind == claude::TextSegment::Wait) {
+            ImGui::Dummy(ImVec2(0, 2));
+            ImGui::TextColored(pal.dim, "⏳ Attend les comptes rendus des agents encore au travail");
+            if (!sg.body.empty()) {
+                RightMargin rm(8);
+                ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+                ui::renderMarkdown(cache.segBlocks[k], md, expandKey + 56 + (int)k);
+                ImGui::PopStyleColor();
+            }
         } else {
             ImGui::Dummy(ImVec2(0, 2));
             Card card(width - 8, ImVec4(pal.ok.x, pal.ok.y, pal.ok.z, 0.08f), true, pal.ok);

@@ -231,7 +231,7 @@ void App::drawStatusBar() {
                 ImVec4 c = question ? pal.warn : orch_->running() ? pal.accent : pal.dim;
                 c.w *= blink;
                 std::string label = question ? "❓ L'orchestrateur vous pose une question"
-                                             : std::string("Orchestrateur : ") + claude::orchStateLabel(orch_->state) +
+                                             : std::string("Orchestrateur : ") + (orch_->brainPaused() ? "en pause jusqu'à la prochaine session" : claude::orchStateLabel(orch_->state)) +
                                                    " · cycle " + std::to_string(orch_->cycle);
                 ImGui::PushStyleColor(ImGuiCol_Text, c);
                 if (ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_None, ImGui::CalcTextSize(label.c_str()))) {

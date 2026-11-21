@@ -908,3 +908,258 @@ TEST_CASE("orchestrateur : le plafond du compte suspend, il ne fait pas conclure
     CHECK(h.convs["brain"].received.back().find("Comptes rendus") != std::string::npos);
     CHECK(h.convs["brain"].received.back().find("BUDGET ÉPUISÉ") == std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Comptes rendus au fil de l'eau
+// ---------------------------------------------------------------------------
+
+TEST_CASE("orchestrateur : un agent termine, l'orchestrateur relance pendant que les autres travaillent") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.maxParallel = 3;
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::Working);
+    CHECK(o.tasksInFlight() == 2);
+
+    // 01 termine, 02 travaille encore : compte rendu intermédiaire immédiat.
+    h.answer("conv:01 Modèle", "Fait : A.");
+    o.tick(h);
+    CHECK(o.state == OrchState::Thinking);
+    REQUIRE(h.convs["brain"].received.size() == 2);
+    const std::string rep = h.convs["brain"].received[1];
+    CHECK(rep.find("# Compte rendu intermédiaire") == 0);
+    CHECK(rep.find("Fait : A.") != std::string::npos);
+    CHECK(rep.find("Toujours en cours") != std::string::npos);
+    CHECK(rep.find("02 Build") != std::string::npos);
+    CHECK(orchestratorMessageTitle(rep).find("Compte rendu intermédiaire") == 0);
+
+    // Pendant que le cerveau réfléchit, 02 termine : relevé, rapporté plus tard.
+    h.answer("conv:02 Build", "Fait : B.");
+    o.tick(h);
+    CHECK(o.state == OrchState::Thinking);
+    CHECK(o.tasksInFlight() == 0);
+
+    // Le cerveau relance 03 : la tâche part, 01 (déjà rapportée) disparaît, 02 attend son compte rendu.
+    h.answer("brain", "@@DELEGUER 03 | modele=haiku\nc\n@@FIN");
+    o.tick(h);
+    CHECK(o.state == OrchState::Working);
+    CHECK(o.cycle == 2);
+    CHECK(h.convs["conv:03 Check"].received.size() == 1);
+    REQUIRE(o.tasks.size() == 2);
+    CHECK(o.tasks[0].agent == "02 Build");
+    CHECK_FALSE(o.tasks[0].reported);
+
+    // 02 non rapporté + 03 au travail : nouveau compte rendu intermédiaire avec B.
+    o.tick(h);
+    CHECK(o.state == OrchState::Thinking);
+    CHECK(h.convs["brain"].received.back().find("Fait : B.") != std::string::npos);
+    CHECK(h.convs["brain"].received.back().find("03 Check") != std::string::npos);
+
+    // @@ATTENDRE : on attend 03, sans relance « aucune directive ».
+    h.answer("brain", "Rien d'indépendant à lancer.\n@@ATTENDRE\n03 doit finir.\n@@FIN");
+    o.tick(h);
+    CHECK(o.state == OrchState::Working);
+    size_t n = h.convs["brain"].received.size();
+    o.tick(h);
+    CHECK(h.convs["brain"].received.size() == n);
+
+    // 03 termine : plus personne au travail → comptes rendus complets (seulement le nouveau).
+    h.answer("conv:03 Check", "Fait : C.");
+    o.tick(h);
+    CHECK(o.state == OrchState::Thinking);
+    const std::string full = h.convs["brain"].received.back();
+    CHECK(full.find("# Comptes rendus") == 0);
+    CHECK(full.find("Fait : C.") != std::string::npos);
+    CHECK(full.find("Fait : B.") == std::string::npos);
+
+    // @@ATTENDRE alors que plus rien ne tourne : relance.
+    h.answer("brain", "@@ATTENDRE\n@@FIN");
+    o.tick(h);
+    CHECK(o.state == OrchState::Thinking);
+    CHECK(h.convs["brain"].received.back().find("aucune directive") != std::string::npos);
+}
+
+TEST_CASE("orchestrateur : pas de compte rendu intermédiaire inutile") {
+    SUBCASE("option désactivée : on attend toute l'équipe") {
+        FakeHost h;
+        Orchestrator o;
+        o.settings.objective = "x";
+        o.settings.rollingReports = false;
+        REQUIRE(o.start(h));
+        h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN");
+        o.tick(h);
+        h.answer("conv:01 Modèle", "A");
+        o.tick(h);
+        CHECK(o.state == OrchState::Working);
+        CHECK(h.convs["brain"].received.size() == 1);
+        h.answer("conv:02 Build", "B");
+        o.tick(h);
+        CHECK(o.state == OrchState::Thinking);
+        CHECK(h.convs["brain"].received.back().find("# Comptes rendus") == 0);
+    }
+    SUBCASE("aucune place libre (parallélisme atteint par la file)") {
+        FakeHost h;
+        Orchestrator o;
+        o.settings.objective = "x";
+        o.settings.maxParallel = 1;
+        REQUIRE(o.start(h));
+        h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN");
+        o.tick(h);
+        h.answer("conv:01 Modèle", "A");
+        o.tick(h);  // 02 part aussitôt : la seule place est prise
+        CHECK(o.state == OrchState::Working);
+        CHECK(h.convs["brain"].received.size() == 1);
+    }
+    SUBCASE("tous les agents occupés") {
+        FakeHost h;
+        h.agentList = {{"01 Modèle", ""}, {"02 Build", ""}};
+        Orchestrator o;
+        o.settings.objective = "x";
+        o.settings.maxParallel = 3;
+        REQUIRE(o.start(h));
+        // Deux tâches pour 01 (la seconde en file) et une pour 02.
+        h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN\n@@DELEGUER 01\na2\n@@FIN");
+        o.tick(h);
+        h.answer("conv:01 Modèle", "A");
+        o.tick(h);  // a2 part sur 01, 02 travaille : plus d'agent libre
+        CHECK(h.convs["conv:01 Modèle"].received.size() == 2);
+        CHECK(o.state == OrchState::Working);
+        CHECK(h.convs["brain"].received.size() == 1);
+    }
+}
+
+TEST_CASE("orchestrateur : l'équipe continue pendant une question, la réponse joint l'avancement") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN");
+    o.tick(h);
+    h.answer("conv:01 Modèle", "A");
+    o.tick(h);  // compte rendu intermédiaire
+    h.answer("brain", "@@HUMAIN\nOn garde UART2 ?\n- [ ] Oui\n- [ ] Non\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::WaitingHuman);
+    h.answer("conv:02 Build", "Fait : B pendant la question.");
+    o.tick(h);
+    CHECK(o.state == OrchState::WaitingHuman);
+    CHECK(o.tasksInFlight() == 0);
+
+    // Sauvegarde / rechargement : le compte rendu non transmis est conservé.
+    Orchestrator r;
+    r.fromJson(o.toJson());
+    CHECK(r.settings.rollingReports);
+    REQUIRE(r.tasks.size() == 2);
+    CHECK(r.tasks[0].reported);
+    CHECK_FALSE(r.tasks[1].reported);
+
+    REQUIRE(o.answerHuman(h, "Oui"));
+    const std::string msg = h.convs["brain"].received.back();
+    CHECK(msg.find("Oui") != std::string::npos);
+    CHECK(msg.find("Fait : B pendant la question.") != std::string::npos);
+    CHECK(o.tasks[1].reported);
+}
+
+TEST_CASE("orchestrateur : @@ATTENDRE analysé et affiché") {
+    Directives d = parseDirectives("Je patiente.\n@@ATTENDRE\n02 doit finir.\n@@FIN");
+    CHECK(d.wait);
+    CHECK(d.empty());
+    auto segs = splitDirectiveSegments("Texte\n@@ATTENDRE\nraison\n@@FIN");
+    REQUIRE(segs.size() == 2);
+    CHECK(segs[1].kind == TextSegment::Wait);
+    CHECK(segs[1].body == "raison");
+}
+
+// ---------------------------------------------------------------------------
+// Pause décidée par l'orchestrateur
+// ---------------------------------------------------------------------------
+
+TEST_CASE("orchestrateur : annonce de pause reconnue, vraie question conservée") {
+    const std::string notice =
+        "Orchestration en pause : le quota de la fenêtre de 5 h est presque épuisé.\n"
+        "Relance-moi après la réinitialisation du quota (dans environ 4 h 20). Le prochain cycle est prévu :\n"
+        "- **04** : terminer le stub MHU ;\n- **02** : terminer `build/package`.";
+    CHECK(looksLikePauseNotice(notice));
+    CHECK_FALSE(looksLikePauseNotice("On met en pause le dashboard ?"));
+    CHECK_FALSE(looksLikePauseNotice("Quel UART ?\n- [ ] UART2\n- [ ] UART4"));
+    CHECK_FALSE(looksLikePauseNotice("Installe GCC 14 puis préviens-moi."));
+
+    Directives d = parseDirectives("Bilan.\n@@HUMAIN\n" + notice + "\n@@FIN");
+    CHECK(d.pause);
+    CHECK_FALSE(d.needHuman);
+    CHECK(d.pauseNote.find("Relance-moi") != std::string::npos);
+    Directives p = parseDirectives("@@PAUSE\nQuota épuisé, reprise : 04 puis 02.\n@@FIN");
+    CHECK(p.pause);
+    CHECK(p.pauseNote == "Quota épuisé, reprise : 04 puis 02.");
+    CHECK_FALSE(p.empty());
+
+    auto segs = splitDirectiveSegments("x\n@@HUMAIN\n" + notice + "\n@@FIN\n@@PAUSE\ny\n@@FIN");
+    REQUIRE(segs.size() == 3);
+    CHECK(segs[1].kind == TextSegment::Pause);
+    CHECK(segs[2].kind == TextSegment::Pause);
+}
+
+TEST_CASE("orchestrateur : @@PAUSE suspend sans question puis reprend seul à la session suivante") {
+    FakeHost h;  // fenêtre de 5 h réinitialisée à t = 5000
+    h.sub = true;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "Le quota est presque épuisé.\n@@PAUSE\nReprise : 04 puis 02.\n@@FIN");
+    o.tick(h);
+    CHECK(o.state == OrchState::UsagePause);
+    CHECK(o.brainPaused());
+    CHECK(o.questions.empty());
+    CHECK(o.humanQuestion.empty());
+    CHECK(o.pauseUntil == 5000);
+    CHECK(o.running());
+
+    // Sauvegarde / rechargement : la pause reste automatique.
+    Orchestrator r;
+    r.fromJson(o.toJson());
+    CHECK(r.state == OrchState::UsagePause);
+    CHECK(r.pauseNote == "Reprise : 04 puis 02.");
+
+    size_t n = h.convs["brain"].received.size();
+    h.t = 3000;
+    o.tick(h);
+    CHECK(o.state == OrchState::UsagePause);
+    CHECK(h.convs["brain"].received.size() == n);
+
+    h.t = 6000;  // nouvelle session
+    o.tick(h);
+    CHECK(o.state == OrchState::Thinking);
+    CHECK_FALSE(o.brainPaused());
+    REQUIRE(h.convs["brain"].received.size() == n + 1);
+    const std::string msg = h.convs["brain"].received.back();
+    CHECK(msg.find("# Reprise après ta pause") == 0);
+    CHECK(msg.find("> Reprise : 04 puis 02.") != std::string::npos);
+    CHECK(msg.find("Reprise après interruption") == std::string::npos);
+    CHECK(orchestratorMessageTitle(msg).find("Reprise après sa pause") == 0);
+}
+
+TEST_CASE("orchestrateur : une annonce de pause enregistrée comme question est convertie au rechargement") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "(réponse affichée comme une question)");
+    // Simule l'état laissé par une version précédente : question en attente qui n'est qu'une annonce de pause.
+    nlohmann::json j = o.toJson();
+    j["state"] = "waitingHuman";
+    j["humanQuestion"] = "Orchestration en pause : quota presque épuisé. Relance-moi après la réinitialisation du quota.";
+    j["windowResetsAt"] = 5000;
+    Orchestrator r;
+    r.fromJson(j);
+    CHECK(r.state == OrchState::UsagePause);
+    CHECK(r.brainPaused());
+    CHECK(r.questions.empty());
+    CHECK(r.pauseUntil == 5000);
+    h.t = 6000;
+    r.tick(h);
+    CHECK(r.state == OrchState::Thinking);
+    CHECK(h.convs["brain"].received.back().find("# Reprise après ta pause") == 0);
+}
