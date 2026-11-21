@@ -10,10 +10,13 @@
 #include <unordered_map>
 #include <vector>
 
+#include <imgui.h>
+
 #include "app/Settings.h"
 #include "claude/ClaudeSession.h"
 #include "claude/History.h"
 #include "claude/OneShot.h"
+#include "claude/Orchestrator.h"
 #include "claude/UsageTracker.h"
 #include "ui/Markdown.h"
 #include "workspace/Workspace.h"
@@ -32,6 +35,10 @@ struct EntryCache {
     bool streaming = false;
     std::vector<ui::MdBlock> blocks;
     float height = 0, width = 0;
+    // Discussion de l'orchestrateur : réponse découpée en texte libre / directives (cartes).
+    size_t segLen = (size_t)-1;
+    std::vector<claude::TextSegment> segs;
+    std::vector<std::vector<ui::MdBlock>> segBlocks;
 };
 
 // Polices d'un contexte ImGui (chaque fenêtre système a son propre atlas).
@@ -164,6 +171,18 @@ private:
     void drawDashboardCard(OpenConversation& oc, int index, float width, float height);
     void drawActivityFeed();
     void drawShortcutTables();                // AppMenus.cpp
+    // Page « Orchestrateur » (OrchestratorPanel.cpp)
+    void drawOrchestratorPage();
+    void drawOrchestratorStatus();
+    void drawOrchestratorBudgetCard(bool subscription);
+    void drawBudgetGauge(double fraction, double tolerance, float width, float height);
+    void drawOrchestratorQuestion();
+    void drawOrchestratorSettings();
+    void drawOrchestratorLog();
+    void drawOrchestratorTeam(bool compact);
+    void drawOrchestratorDiscussion();
+    void drawOrchestrationHero(bool detached);   // carte d'orchestration du tableau de bord (Dashboard.cpp)
+    bool drawBrainEntry(OpenConversation& oc, int index, float width);  // ConversationView.cpp
     void drawGuideWindow();                   // Tutorial.cpp
     void drawTour();                          // Tutorial.cpp
     void drawWelcomeModal();                  // Tutorial.cpp
@@ -178,19 +197,34 @@ private:
     void dashboardFrame();
 
     // --- Actions ---
-    OpenConversation* newConversation(ws::Folder* folder, const std::string& cwdOverride = {});
-    OpenConversation* openConversation(const std::string& id);
+    // `focus` = false : ouverte en arrière-plan, sans changer l'onglet actif (orchestrateur).
+    OpenConversation* newConversation(ws::Folder* folder, const std::string& cwdOverride = {}, bool focus = true);
+    OpenConversation* openConversation(const std::string& id, bool focus = true);
     OpenConversation* openImported(const claude::HistorySession& hs, ws::Folder* folder);
     void closeConversation(int index);
     void saveConversation(OpenConversation& oc);
     void saveAll();
     void sendDraft(OpenConversation& oc);
-    void sendText(OpenConversation& oc, const std::string& text, const std::vector<claude::ImageAttachment>& images = {});
+    // `remember` = false : ne pas ajouter le texte à l'historique des prompts (envois automatiques).
+    void sendText(OpenConversation& oc, const std::string& text, const std::vector<claude::ImageAttachment>& images = {},
+                  bool remember = true);
     void pushActivity(const OpenConversation& oc, ActivityKind kind, const std::string& text);
     void focusConversation(int index);  // affiche la conversation dans le cockpit
     void requestRecap(const std::string& convId);
-    void requestFolderRecap(ws::Folder* f);
-    void refreshUsage();
+    void requestFolderRecap(ws::Folder* f);   // récaps manquants/périmés d'abord, puis synthèse
+    void runFolderSynthesis(ws::Folder* f);
+    void pumpFolderSyntheses();
+    struct FolderSynthesis {                  // synthèse en préparation : récaps à générer avant
+        std::string path;                     // dossier (UTF-8)
+        std::deque<std::string> toStart;      // conversations dont le récap reste à lancer
+        std::set<std::string> running;        // récaps en cours
+        int total = 0;
+    };
+    std::vector<FolderSynthesis> syntheses_;
+    std::set<std::string> rotating_;          // orchestrateur : conversations dont le récap de rotation est lancé
+    const FolderSynthesis* synthesisFor(const ws::Folder* f) const;
+    void refreshUsage(bool silent = false);
+    void autoRefreshUsage(bool atLaunch);    // actualise si la mesure est absente ou périmée
     void exportMarkdown(OpenConversation& oc);
     void attachFile(OpenConversation& oc, const std::string& path);
     void handleGlobalShortcuts();
@@ -203,6 +237,28 @@ private:
     void openFolderDialog(std::function<void(const std::string&)> cb, const std::string& start = {});
     void openFileDialog(std::function<void(const std::vector<std::string>&)> cb);
 
+    // --- Orchestrateur (OrchestratorPanel.cpp) ---
+    friend class AppOrchHost;
+    struct AgentView {                       // un agent de l'équipe, vu depuis l'interface
+        std::string name, convId, label;
+        const char* icon = "·";
+        ImVec4 color{0.5f, 0.5f, 0.5f, 1};
+        bool working = false, attention = false;
+        const claude::OrchTask* task = nullptr;
+        claude::ParticipantStatus status;
+    };
+    AgentView agentView(const std::string& name);
+    bool isOrchBrain(const std::string& convId) const;
+    void openOrchestratorPage(bool discussion = false);
+    void autoLoadOrchestrator();
+    void tickOrchestrator();
+    bool loadOrchestrator(ws::Folder* project);
+    void saveOrchestrator();
+    bool orchestratorStart();
+    void orchestratorResume();
+    ws::Folder* orchProjectFolder();
+    int indexOfConversation(const std::string& id) const;
+
     // --- Données ---
     SDL_Window* window_ = nullptr;
     SDL_Renderer* renderer_ = nullptr;
@@ -210,6 +266,7 @@ private:
     std::string optDataDir_, optWorkspace_, optSend_, optScreenshot_, optCwd_;
     double optAfter_ = 3.0;
     std::string optPanel_;
+    std::string optOrchestrate_;   // --orchestrate "<objectif>" : lance l'orchestrateur sur le 1er projet
     bool optNoWait_ = false;
     ImGuiContext* mainCtx_ = nullptr;
     bool fontReloadPending_ = false;
@@ -242,6 +299,7 @@ private:
     double reminderFadeOut_ = -1;
     float dpiScale_ = 1.0f;
     double now_ = 0;
+    double lastAutoUsage_ = -1e9;            // dernière actualisation automatique (horloge de l'app)
     bool windowFocused_ = true;
 
     Settings settings_;
@@ -269,6 +327,20 @@ private:
     int configTab_ = -1;           // onglet à sélectionner dans Configuration
     bool openNewProject_ = false;
     bool resetLayout_ = false;
+
+    // Orchestrateur : une seule orchestration à la fois
+    std::unique_ptr<claude::Orchestrator> orch_;
+    std::string orchProject_;      // chemin UTF-8 du projet piloté
+    bool orchShowDiscussion_ = false;
+    bool orchShowBilan_ = false;             // page Orchestrateur : sélectionner l'onglet « Bilan »        // page Orchestrateur : afficher la discussion (onglet)
+    double orchLastSave_ = 0;
+    int orchSeenQuestion_ = -1;              // dernière question signalée (ouverture de la fenêtre)
+    int orchFormSeq_ = -1;                   // question à laquelle correspond le formulaire de réponse
+    std::vector<int> orchAnswerSel_;         // option choisie par question (-1 aucune, -2 « Autre »)
+    std::vector<std::string> orchAnswerOther_;
+    std::string orchAnswerExtra_;
+    int orchSettingsTab_ = -1;              // onglet des réglages à sélectionner (-1 : aucun)
+    bool orchAdvanced_ = false;              // réglages avancés affichés (sinon : niveaux de budget)
 
     // Nouveau projet
     std::string npName_, npCwd_, npFolders_ = "Code, Infra, Docs, Idées";

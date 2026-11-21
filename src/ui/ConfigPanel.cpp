@@ -396,6 +396,12 @@ void App::drawConfigWindow() {
             ImGui::Checkbox("Déplier les appels d'outils", &settings_.expandTools);
             ImGui::Checkbox("Retour à la ligne dans les blocs de code", &settings_.wrapCode);
             ImGui::Checkbox("Faire clignoter la barre des tâches quand Claude a fini", &settings_.notifyOnFinish);
+            ImGui::Checkbox("Actualiser l'usage automatiquement", &settings_.autoRefreshUsage);
+            ImGui::SameLine();
+            ui::helpMarker("Au lancement, puis quand la mesure date de plus de 15 min (ou que la fenêtre de 5 h\n"
+                           "s'est réinitialisée) sans échange en cours. Chaque actualisation envoie une requête\n"
+                           "minuscule à Haiku. Pendant que Claude travaille, l'usage se met à jour tout seul\n"
+                           "à chaque réponse, sans requête supplémentaire.");
             ImGui::Checkbox("Confirmer le mode « sans permissions »", &settings_.confirmBypass);
 
             ImGui::SeparatorText("Accueil");

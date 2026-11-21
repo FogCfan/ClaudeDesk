@@ -39,6 +39,7 @@ void Settings::load(const std::string& path) {
     expandTools = j.value("expandTools", expandTools);
     wrapCode = j.value("wrapCode", wrapCode);
     notifyOnFinish = j.value("notifyOnFinish", notifyOnFinish);
+    autoRefreshUsage = j.value("autoRefreshUsage", autoRefreshUsage);
     confirmBypass = j.value("confirmBypass", confirmBypass);
     tutorialSeen = j.value("tutorialSeen", tutorialSeen);
     // Installations antérieures au compteur : le premier lancement a déjà eu lieu.
@@ -74,7 +75,7 @@ void Settings::save(const std::string& path) const {
               {"defaultConfig", defaultConfig}, {"promptPresets", presets},     {"fontSize", fontSize},
               {"uiScale", uiScale},           {"theme", theme},                 {"enterSends", enterSends},
               {"showThinking", showThinking}, {"expandTools", expandTools},     {"wrapCode", wrapCode},
-              {"notifyOnFinish", notifyOnFinish}, {"confirmBypass", confirmBypass},
+              {"notifyOnFinish", notifyOnFinish}, {"autoRefreshUsage", autoRefreshUsage}, {"confirmBypass", confirmBypass},
               {"injectContext", injectContext}, {"autoRecap", autoRecap},       {"recapModel", recapModel},
               {"autosaveSeconds", autosaveSeconds}, {"recentCwds", recentCwds}, {"promptHistory", promptHistory},
               {"openTabs", openTabs}, {"activeTab", activeTab}, {"tutorialSeen", tutorialSeen}, {"launchCount", launchCount},

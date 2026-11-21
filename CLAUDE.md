@@ -13,9 +13,13 @@ Code, commentaires et textes d'interface en **français**.
 ## Carte du code
 - `src/app` — `App` (boucle, onglets, fenêtres), `AppMenus`, `Settings` (settings.json)
 - `src/claude` — `ClaudeSession` (protocole stream-json), `Process`, `CommandLine`,
-  `SessionConfig`, `History`, `Transcript`, `UsageTracker` (rate_limit_event), `OneShot` (récaps)
+  `SessionConfig`, `History`, `Transcript`, `UsageTracker` (rate_limit_event), `OneShot` (récaps),
+  `Orchestrator` (moteur de l'orchestrateur, sans UI : directives `@@DELEGUER/@@HUMAIN/@@TERMINE`, garde-fous)
 - `src/ui` — panneaux ImGui : `ConversationView`, `PromptEditor`, `ConfigPanel`,
-  `WorkspacePanel`, `Dashboard`, `UsagePanel`, `PermissionPanel`, `Markdown`, `Theme`, `Anim`, `Tutorial`
+  `WorkspacePanel`, `Dashboard`, `UsagePanel`, `PermissionPanel`, `Markdown`, `Theme`, `Anim`, `Tutorial`,
+  `OrchestratorPanel` (page 2 « Orchestrateur », Ctrl+3, + `AppOrchHost`, l'adaptateur moteur ↔ conversations ; état dans
+  `<projet>/_orchestrateur.json`). La discussion du cerveau est exclue des onglets (`isOrchBrain`) et rendue en cartes
+  (`drawBrainEntry`) ; le tableau de bord l'affiche en tête avec son équipe (`drawOrchestrationHero`).
 - `src/workspace` — `Workspace` : vrais dossiers + `_dossier.json` + `*.conv.json`, corbeille, `buildContext`
 - `src/util` — chemins, chaînes, fichiers
 - `tests/` — doctest (`desk_tests`) : protocole, workspace, chaînes
@@ -48,6 +52,8 @@ build\debug\ClaudeDesk.exe --data-dir <tmp>\data --workspace <tmp>\ws ^
     [--cwd <dossier>] [--panel history|light|dashboard|detached|guide|welcome|example|tour<N>] ^
     [--send "message"] --nowait --screenshot <tmp>\capture.bmp --after 3
 ```
+Orchestrateur : `--panel orchestrator[:budget|:modeles|:execution|:discussion]` ouvre la page ; `--orchestrate "<objectif>"` la lance sur le premier
+projet à thèmes de l'espace de test (la capture attend la fin de l'orchestration, 2 min max après `--after`).
 La capture ne contient que la fenêtre ; la lire ensuite pour vérifier. Pour tester un vrai
 échange à moindre coût : `{"defaultConfig":{"model":"haiku"}}` dans `<tmp>\data\settings.json`.
 
