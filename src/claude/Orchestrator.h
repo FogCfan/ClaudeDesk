@@ -12,6 +12,7 @@
 // cerveau est prévenu à l'approche de la limite puis doit conclure.
 //
 // Logique pure (sans SDL ni ImGui) : l'application fournit un OrchestratorHost.
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -177,6 +178,9 @@ std::string cleanAgentName(const std::string& name);
 // --- Moteur -------------------------------------------------------------------
 struct OrchestratorSettings {
     std::string objective;
+    // Type de projet (claude/ProjectKind : software, concept, data, document, hybrid, auto) : méthode de travail,
+    // vérifications et vocabulaire du cerveau et des agents. Défaut « software » (orchestrations d'avant les types).
+    std::string projectKind = "software";
     int maxCycles = 25;
     int maxParallel = 3;
     // Comptes rendus au fil de l'eau : dès qu'un agent termine alors que d'autres travaillent encore (et qu'une place
@@ -326,7 +330,14 @@ public:
     double sessionAllowance() const;
     // « Relancer le budget » : compteur à 0, même limite qu'avant — plafonnée par ce qui reste réellement dans la
     // session (abonnement) ; en API, compteur en dollars remis à 0 avec la même limite.
+    // Si rien n'a été consommé depuis une relance précédente, la limite figée est abandonnée : la part redevient
+    // celle du niveau choisi, calculée sur ce qui reste maintenant.
     void resetBudget(OrchestratorHost& h);
+    // Limite figée par une relance (sinon : part normale du niveau).
+    bool budgetOverridden() const { return allowanceOverride_ >= 0 && std::abs(overrideShare_ - settings.sessionShare) < 1e-9; }
+    // Orchestration terminée ou reprise : l'usage de la session consommé entre-temps (ailleurs) est ajouté à
+    // windowBase, pour que le reste et la zone de budget partent de l'usage réel.
+    void absorbUntracked(OrchestratorHost& h);
     double budgetSpentUsd() const { return spentUsd - costBaseline_; }  // API : dépense comptée dans le budget
     double ceiling() const { return settings.usagePause > 0 ? settings.usagePause : 1.0; }
     bool subscription = false;     // budget effectif : abonnement (sinon dollars)
@@ -374,7 +385,8 @@ public:
     std::string budgetLabel() const;  // « 12 % / 40 % de la fenêtre 5 h » ou « 3,20 $ / 25,00 $ »
     static bool resolveSubscription(const OrchestratorSettings& s, bool hostSubscription);
 
-    static std::string systemPrompt(bool brainReadOnly = true, bool canCreateAgents = false, bool visualChecks = false);
+    static std::string systemPrompt(bool brainReadOnly = true, bool canCreateAgents = false, bool visualChecks = false,
+                                    const std::string& projectKind = "software");
     std::string brainPrompt() const;  // systemPrompt(…) + agents équipés du navigateur
     bool isBrowserAgent(const std::string& agent) const;
     // Outils du cerveau selon les réglages (vide = tous).

@@ -64,6 +64,34 @@ int App::run(int argc, char** argv) {
     if (!init()) return 1;
     if (optW > 0 && optH > 0) SDL_SetWindowSize(window_, optW, optH);
     if (optPanel_ == "history") showHistory_ = true;
+    // Connexion : --panel login (connexion expirée) | login:attente (connexion en cours) | login:ok | login:conv (carte)
+    if (optPanel_.rfind("login", 0) == 0) {
+        const std::string err = "Failed to authenticate: this login reached its time limit and cannot be renewed. Run "
+                                "`claude auth login` to sign in again, or use `claude setup-token` and set "
+                                "CLAUDE_CODE_OAUTH_TOKEN for unattended jobs";
+        if (optPanel_ == "login:conv" || optPanel_ == "login:ok") {
+            OpenConversation* oc = newConversation(nullptr, optCwd_);
+            auto& s = *oc->session;
+            claude::Entry u;
+            u.kind = claude::EntryKind::User;
+            u.text = "Problème, le bouton « Quitter » n'apparaît pas quand je lance l'application.";
+            u.time = util::nowUnix();
+            s.entries.push_back(u);
+            s.addSystemNote(err, true);
+            s.authFailed = true;
+            s.title = "Bouton Quitter";
+        }
+        if (optPanel_ == "login:ok") {
+            showLogin_ = loginJustSucceeded_ = true;
+        } else if (optPanel_ == "login:attente") {
+            showLogin_ = true;
+            loginStartedAt_ = 0;
+        } else {
+            authProblem_ = true;
+            if (optPanel_ == "login") openLogin(err);
+            else authReason_ = err;
+        }
+    }
     if (optPanel_ == "shortcuts") showShortcuts_ = true;
     if (optPanel_ == "newproject") openNewProject_ = true;
     if (optPanel_ == "light") settings_.theme = 1, applyTheme();
@@ -97,6 +125,15 @@ int App::run(int argc, char** argv) {
             designer_.req.description = "Une application web de recettes avec planning de la semaine et liste de courses.";
             designer_.design = claude::demoDesign();
             designer_.step = 2;
+        }
+        // designer:doc = conception d'exemple d'un audit ; designer:type-<id> = étape « Décrire », type présélectionné
+        if (optPanel_ == "designer:doc") {
+            designer_.req.kind = "document";
+            designer_.design = claude::demoDesign(claude::ProjectKind::Document);
+        }
+        if (optPanel_.rfind("designer:type-", 0) == 0) {
+            designer_.req.kind = optPanel_.substr(14);
+            designer_.step = 0;
         }
         if (optPanel_ == "designer:questions") {
             claude::DesignQuestion q;
@@ -189,7 +226,8 @@ int App::run(int argc, char** argv) {
                 case SDL_EVENT_WINDOW_FOCUS_LOST: windowFocused_ = false; break;
                 case SDL_EVENT_DROP_FILE:
                     if (ev.drop.windowID == SDL_GetWindowID(window_))
-                        if (auto* oc = active(); oc && ev.drop.data) attachFile(*oc, ev.drop.data);
+                        if (ev.drop.data && !dropOnProjects(ev.drop.x, ev.drop.y, ev.drop.data))
+                            if (auto* oc = active()) attachFile(*oc, ev.drop.data);
                     break;
                 default: break;
             }
@@ -208,7 +246,9 @@ int App::run(int argc, char** argv) {
             now_ = SDL_GetTicks() / 1000.0;
             processAsyncResults();
             dashboardFrame();  // le tableau de bord détaché reste vivant
-            SDL_DelayPrecise((uint64_t)(1e9 / std::max(30.0f, displayHz_)));
+            // Réduite : on continue de lire les réponses de Claude, à cadence réduite si l'on économise l'énergie.
+            float hz = settings_.ecoBackground ? (float)std::max(5, settings_.backgroundFps) : std::max(30.0f, displayHz_);
+            SDL_DelayPrecise((uint64_t)(1e9 / hz));
             continue;
         }
         frame();
@@ -216,7 +256,8 @@ int App::run(int argc, char** argv) {
         {
             bool focused = windowFocused_ || (dash_ && (SDL_GetWindowFlags(dash_->window) & SDL_WINDOW_INPUT_FOCUS));
             int cap = settings_.fpsMode == 1 ? std::max(10, settings_.fpsCap) : 0;
-            if (!focused && settings_.ecoBackground) cap = cap ? std::min(cap, 30) : 30;
+            int bg = std::max(5, settings_.backgroundFps);
+            if (!focused && settings_.ecoBackground) cap = cap ? std::min(cap, bg) : bg;
             if (cap > 0) {
                 uint64_t target = 1000000000ull / (uint64_t)cap;
                 uint64_t el = SDL_GetTicksNS() - lastFrameNs;
@@ -242,6 +283,14 @@ bool App::init() {
     settingsPath_ = util::pathToUtf8(dataDir / "settings.json");
     usagePath_ = util::pathToUtf8(dataDir / "usage.json");
     iniPath_ = util::pathToUtf8(dataDir / "layout.ini");
+    {
+        // Le panneau « Espace de travail » s'appelle désormais « Projets » : on garde sa place dans la disposition.
+        std::string ini;
+        if (util::readFile(dataDir / "layout.ini", ini) && ini.find("[Window][Espace de travail]") != std::string::npos) {
+            util::replaceAll(ini, "[Window][Espace de travail]", "[Window][Projets]");
+            util::writeFileAtomic(dataDir / "layout.ini", ini);
+        }
+    }
     settings_.load(settingsPath_);
     usage_.load(usagePath_);
     designerPath_ = util::pathToUtf8(dataDir / "designer.json");
@@ -282,7 +331,7 @@ bool App::init() {
     fs::path root = !optWorkspace_.empty()             ? util::pathFromUtf8(optWorkspace_)
                     : settings_.workspaceRoot.empty() ? util::documentsDir() / "ClaudeDesk"
                                                       : util::pathFromUtf8(settings_.workspaceRoot);
-    if (!workspace_.open(root)) toast("Impossible d'ouvrir l'espace de travail : " + util::pathToUtf8(root), true);
+    if (!workspace_.open(root)) toast("Impossible d'ouvrir le dossier des projets : " + util::pathToUtf8(root), true);
     if (claudeExe_.empty())
         toast("Claude Code introuvable : indiquez son chemin dans Configuration › Application.", true);
 
@@ -589,6 +638,7 @@ void App::frame() {
     if (showAbout_) drawAboutWindow();
     if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
     drawNewProjectPopup();
+    drawLoginWindow();
 
     // Notifications éphémères en bas à droite.
     while (!toasts_.empty() && toasts_.front().until < now_) toasts_.pop_front();
@@ -788,7 +838,7 @@ void App::buildDefaultLayout(unsigned int dock) {
     ImGui::DockBuilderSplitNode(rest, ImGuiDir_Right, 0.30f, &right, &center);
     ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.40f, &leftBottom, &leftTop);
     ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.58f, &rightBottom, &rightTop);
-    ImGui::DockBuilderDockWindow("Espace de travail", leftTop);
+    ImGui::DockBuilderDockWindow("Projets", leftTop);
     ImGui::DockBuilderDockWindow("Inspecteur", leftBottom);
     ImGui::DockBuilderDockWindow("Conversations", center);
     ImGui::DockBuilderDockWindow("Usage", rightTop);
@@ -802,7 +852,58 @@ void App::buildDefaultLayout(unsigned int dock) {
 // Tâches de fond : sessions, récaps, boîtes de dialogue, sauvegarde auto
 // ---------------------------------------------------------------------------
 
+// Énergie : en mode automatique, le préréglage suit la source d'alimentation (vérifiée toutes les 5 s). Si
+// l'utilisateur modifie un réglage de détail, on passe en « Personnalisé » au lieu d'écraser son choix.
+void App::tickEnergy(bool force) {
+    if (!force && now_ - energyChecked_ < 5.0) return;
+    energyChecked_ = now_;
+    int secs = -1, pct = -1;
+    SDL_PowerState ps = SDL_GetPowerInfo(&secs, &pct);
+    hasBattery_ = ps == SDL_POWERSTATE_ON_BATTERY || ps == SDL_POWERSTATE_CHARGING || ps == SDL_POWERSTATE_CHARGED;
+    bool battery = ps == SDL_POWERSTATE_ON_BATTERY;
+    batteryPct_ = pct;
+    batterySecs_ = secs;
+    // Réglages modifiés à la main depuis le dernier préréglage appliqué
+    if (!force && energyApplied_ > 0 && settings_.energyMode != EnergyCustom && !energyPresetMatches(settings_, energyApplied_)) {
+        settings_.energyMode = EnergyCustom;
+        energyApplied_ = -1;
+        settings_.save(settingsPath_);
+        toast("Mode d'énergie : « Personnalisé » (vous avez modifié un réglage). Choisissez un préréglage pour y revenir.");
+        return;
+    }
+    int want = settings_.energyMode == EnergyAuto ? (battery ? settings_.energyOnBattery : settings_.energyOnAc)
+               : settings_.energyMode == EnergyCustom ? -1
+                                                       : settings_.energyMode;
+    bool sourceChanged = battery != onBattery_;
+    onBattery_ = battery;
+    if (want < 0) {
+        energyApplied_ = -1;
+        return;
+    }
+    if (want == energyApplied_ && energyPresetMatches(settings_, want)) return;
+    bool hq = settings_.highQuality;
+    applyEnergyPreset(settings_, want);
+    if (hq != settings_.highQuality) applyTheme();
+    bool announce = energyApplied_ >= 0 && settings_.energyMode == EnergyAuto && sourceChanged;
+    energyApplied_ = want;
+    settings_.save(settingsPath_);
+    if (announce)
+        toast(std::string(battery ? "Sur batterie" : "Sur secteur") + " : mode « " + energyModeLabel(want) + " » activé.");
+}
+
+void App::setEnergyMode(int mode) {
+    settings_.energyMode = mode;
+    energyApplied_ = -1;
+    if (mode == EnergyCustom) {
+        settings_.save(settingsPath_);
+        return;
+    }
+    tickEnergy(true);
+}
+
 void App::processAsyncResults() {
+    tickAuth();
+    tickEnergy();
     {
         std::vector<std::function<void()>> pending;
         {
@@ -875,6 +976,7 @@ void App::wireSession(claude::ClaudeSession& s) {
     s.claudeExe = claudeExe_;
     s.promptDir = util::pathToUtf8(util::pathFromUtf8(settingsPath_).parent_path() / "prompts");
     s.onRateLimit = [this](const json& info) { usage_.onRateLimitEvent(info); };
+    s.onAuthError = [this](claude::ClaudeSession& sess) { onAuthError(sess); };
     s.onTurnFinished = [this](claude::ClaudeSession& sess) {
         if (!sess.accountPlan.empty()) usage_.subscription = sess.accountPlan;
         for (auto& oc : open_)
@@ -911,7 +1013,14 @@ ws::Folder* App::defaultFolder() {
 std::string App::contextFor(OpenConversation& oc) {
     std::string ctx;
     if (oc.injectContext)
-        if (ws::Folder* f = folderOf(oc)) ctx = workspace_.buildContext(f, oc.session->localId);
+        if (ws::Folder* f = folderOf(oc)) {
+            ctx = workspace_.buildContext(f, oc.session->localId);
+            // Conseils de méthode propres au type de projet (données, rapport, concept…)
+            if (const ws::Folder* p = f->project()) {
+                std::string hint = claude::conversationKindHint(claude::projectKindFromId(p->projectKind));
+                if (!hint.empty()) ctx += "\n" + hint + "\n";
+            }
+        }
     // Conversation sans session Claude Code (exemple, session perdue…) : Claude reçoit son propre fil.
     auto& s = *oc.session;
     bool hasHistory = false;
@@ -1002,7 +1111,7 @@ OpenConversation* App::openImported(const claude::HistorySession& hs, ws::Folder
     };
     for (auto& p : workspace_.projects())
         if (auto id = find(p.get()); !id.empty()) {
-            toast("Cette session est déjà dans l'espace de travail.");
+            toast("Cette session est déjà dans vos projets.");
             return openConversation(id);
         }
     OpenConversation* oc = newConversation(folder, hs.cwd);

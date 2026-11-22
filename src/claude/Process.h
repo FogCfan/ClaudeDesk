@@ -65,4 +65,31 @@ private:
     std::string error_;
 };
 
+// Commande lancée dans une fenêtre de terminal VISIBLE, pour que l'utilisateur interagisse directement avec
+// elle (connexion : `claude auth login` ouvre le navigateur et peut demander de coller un code).
+// Windows : nouvelle console (cmd /c), qui reste ouverte en cas d'échec pour laisser lire le message.
+// macOS : Terminal.app via osascript ; Linux : x-terminal-emulator. Hors Windows, la fin n'est pas suivie.
+class TerminalProcess {
+public:
+    TerminalProcess() = default;
+    ~TerminalProcess();
+    TerminalProcess(const TerminalProcess&) = delete;
+    TerminalProcess& operator=(const TerminalProcess&) = delete;
+
+    bool start(const std::string& exe, const std::vector<std::string>& args, const std::string& title);
+    bool running() const;       // false aussi quand la fin ne peut pas être suivie
+    bool tracked() const;       // la fin de la commande est observable (running / exitCode fiables)
+    int exitCode() const { return exitCode_; }
+    const std::string& error() const { return error_; }
+
+private:
+#ifdef _WIN32
+    void* process_ = nullptr;
+#else
+    int pid_ = -1;
+#endif
+    mutable int exitCode_ = -1;
+    std::string error_;
+};
+
 }  // namespace claude

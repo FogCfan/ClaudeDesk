@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "claude/Auth.h"
 #include "util/Paths.h"
 #include "util/Strings.h"
 
@@ -108,6 +109,20 @@ void ClaudeSession::sendControl(const std::string& subtype, json extra) {
     writeJson({{"type", "control_request"}, {"request_id", "ctl-" + std::to_string(++controlCounter_)}, {"request", extra}});
 }
 
+json ClaudeSession::userMessage(const std::string& text, const std::vector<ImageAttachment>& images) {
+    json content;
+    if (images.empty()) {
+        content = text;
+    } else {
+        content = json::array();
+        for (auto& img : images)
+            content.push_back({{"type", "image"},
+                               {"source", {{"type", "base64"}, {"media_type", img.mediaType}, {"data", img.base64}}}});
+        if (!text.empty()) content.push_back({{"type", "text"}, {"text", text}});
+    }
+    return {{"type", "user"}, {"message", {{"role", "user"}, {"content", content}}}};
+}
+
 void ClaudeSession::send(const std::string& text, const std::vector<ImageAttachment>& images) {
     if (util::trim(text).empty() && images.empty()) return;
     Entry e;
@@ -120,18 +135,7 @@ void ClaudeSession::send(const std::string& text, const std::vector<ImageAttachm
     dirty = true;
     lastUserText_ = text;
     lastUserImages_ = images;
-
-    json content;
-    if (images.empty()) {
-        content = text;
-    } else {
-        content = json::array();
-        for (auto& img : images)
-            content.push_back({{"type", "image"},
-                               {"source", {{"type", "base64"}, {"media_type", img.mediaType}, {"data", img.base64}}}});
-        if (!text.empty()) content.push_back({{"type", "text"}, {"text", text}});
-    }
-    json msg = {{"type", "user"}, {"message", {{"role", "user"}, {"content", content}}}};
+    json msg = userMessage(text, images);
 
     if (restartPending && state != SessionState::Busy) {
         restartPending = false;
@@ -265,6 +269,12 @@ void ClaudeSession::update(double now) {
             }
             return;
         }
+        if (code != 0 && isAuthErrorText(errTail)) {
+            addSystemNote(util::trim(errTail), true);
+            authFailed = true;
+            if (onAuthError) onAuthError(*this);
+            return;
+        }
         if (wasBusy || code != 0)
             addSystemNote("Le processus Claude Code s'est arrêté (code " + std::to_string(code) + ")." +
                               (errTail.empty() ? "" : "\n" + errTail),
@@ -303,6 +313,12 @@ void ClaudeSession::handleLine(const std::string& line, double now) {
             statusText = "Nouvelle tentative API…";
         }
     } else if (type == "assistant") {
+        // Échec d'authentification : le CLI fabrique un message assistant (<synthetic>) qui répète l'erreur, puis un
+        // résultat en erreur. On n'affiche que le second, sous forme de carte « reconnectez-vous ».
+        if (jstr(j, "error") == "authentication_failed") {
+            authErrorPending_ = true;
+            return;
+        }
         handleAssistant(j.value("message", json::object()), parent);
     } else if (type == "user") {
         handleUser(j.value("message", json::object()), parent);
@@ -544,16 +560,26 @@ void ClaudeSession::handleResult(const json& j, double now) {
             if (model == stats.lastModel || stats.contextWindow == 0) stats.contextWindow = cw;
         }
     }
+    std::string sub = jstr(j, "subtype");
+    bool isError = j.value("is_error", false) || (sub != "success" && !sub.empty());
+    bool authError = isError && (authErrorPending_ || isAuthErrorText(jstr(j, "result")));
+    authErrorPending_ = false;
+
     stats.costUsd += ts.costUsd;
     stats.outputTokens += ts.outputTokens;
     stats.apiSeconds += jint(j, "duration_api_ms") / 1000.0;
-    stats.turns++;
-    stats.turnHistory.push_back(ts);
-    if (stats.turnHistory.size() > 400) stats.turnHistory.erase(stats.turnHistory.begin());
-
-    std::string sub = jstr(j, "subtype");
-    bool isError = j.value("is_error", false) || (sub != "success" && !sub.empty());
-    if (isError) {
+    // Un tour refusé faute de connexion n'est pas une réponse : il ne compte pas (l'orchestrateur renverra le
+    // message après la reconnexion au lieu de prendre l'erreur pour le travail de l'agent).
+    if (!authError) {
+        stats.turns++;
+        stats.turnHistory.push_back(ts);
+        if (stats.turnHistory.size() > 400) stats.turnHistory.erase(stats.turnHistory.begin());
+    }
+    if (authError) {
+        std::string msg = jstr(j, "result");
+        addSystemNote(msg.empty() ? "Échec d'authentification (authentication_failed)." : msg, true);
+        authFailed = true;
+    } else if (isError) {
         std::string msg = jstr(j, "result");
         if (msg.empty() && j.contains("errors"))
             for (auto& e : j["errors"]) msg += (e.is_string() ? e.get<std::string>() : e.dump()) + "\n";
@@ -572,7 +598,35 @@ void ClaudeSession::handleResult(const json& j, double now) {
         statusText.clear();
     }
     dirty = true;
+    if (!isError) authFailed = false;
+    if (authError && onAuthError) onAuthError(*this);
     if (onTurnFinished) onTurnFinished(*this);
+}
+
+bool ClaudeSession::resendLast() {
+    if (state == SessionState::Busy || state == SessionState::Starting) return false;
+    std::string text = lastUserText_;
+    std::vector<ImageAttachment> images = lastUserImages_;
+    if (text.empty() && images.empty())  // conversation rechargée : le texte du dernier message suffit
+        for (auto it = entries.rbegin(); it != entries.rend(); ++it)
+            if (it->kind == EntryKind::User) {
+                text = it->text;
+                break;
+            }
+    if (util::trim(text).empty() && images.empty()) return false;
+    // Nouveau processus : celui en place garde l'ancienne connexion en mémoire.
+    stop();
+    authFailed = false;
+    addSystemNote("Message renvoyé après la reconnexion.");
+    lastUserText_ = text;
+    lastUserImages_ = images;
+    if (!startProcess()) return false;
+    writeJson(userMessage(text, images));
+    turnStartTime = lastNow_;
+    state = SessionState::Busy;
+    statusText = "Envoi…";
+    thinkingTokens = 0;
+    return true;
 }
 
 json ClaudeSession::toJson() const {

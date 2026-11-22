@@ -5,6 +5,7 @@
 //   1 Décrire → 2 Clarifier (si Claude a des questions) → 3 Ajuster → 4 Créer
 // Le moteur (prompts, analyse, validation, fichiers) est dans claude/Designer.
 #include <algorithm>
+#include <cfloat>
 #include <filesystem>
 #include <iterator>
 
@@ -13,6 +14,7 @@
 
 #include "app/App.h"
 #include "ui/Anim.h"
+#include "ui/Icons.h"
 #include "ui/Theme.h"
 #include "util/Paths.h"
 #include "util/Strings.h"
@@ -209,6 +211,9 @@ void App::designerRun(bool refine) {
         }
         auto& d = designer_;
         if (r.hasDesign) {
+            claude::ProjectKind asked = claude::projectKindFromId(d.req.kind);
+            if (asked != claude::ProjectKind::Auto && asked != claude::ProjectKind::Question) r.design.kind = d.req.kind;
+            else if (refine && !d.design.kind.empty() && r.design.kind.empty()) r.design.kind = d.design.kind;
             if (!d.design.empty()) {
                 d.history.push_back(d.design);
                 if (d.history.size() > 10) d.history.erase(d.history.begin());
@@ -244,7 +249,7 @@ std::string App::designerSuggestedCwd() {
             parent = util::pathFromUtf8(p->cwd).parent_path();
             if (!parent.empty()) break;
         }
-    if (parent.empty()) parent = util::homeDir() / "Projets";
+    if (parent.empty()) parent = util::documentsDir() / "Projets";
     std::string name = util::sanitizeFileName(d.design.name);
     return util::pathToUtf8(parent / util::pathFromUtf8(name.empty() ? "Nouveau projet" : name));
 }
@@ -263,7 +268,7 @@ void App::designerCreate() {
     }
     for (auto& p : workspace_.projects())
         if (lowerStr(p->name) == lowerStr(util::trim(d.design.name))) {
-            toast("Un projet « " + p->name + " » existe déjà dans l'espace de travail : renommez celui-ci.", true);
+            toast("Un projet « " + p->name + " » existe déjà dans vos projets : renommez celui-ci.", true);
             return;
         }
     std::error_code ec;
@@ -280,6 +285,7 @@ void App::designerCreate() {
         return;
     }
     proj->notes = claude::projectNotes(d.design);
+    proj->projectKind = d.design.kind;
     workspace_.saveFolderMeta(proj);
     int agents = 0;
     for (auto& a : d.design.agents) {
@@ -328,6 +334,66 @@ void App::designerCreate() {
     if (d.startNow) orchestratorStart();
 }
 
+// ---------------------------------------------------------------------------
+// Types de projets : cartes de choix, « Juste une question »
+// ---------------------------------------------------------------------------
+
+float App::kindCardHeight(float width) {
+    const float fs = ImGui::GetFontSize();
+    const ImVec2 pad = ImGui::GetStyle().FramePadding;
+    float textW = width - fs * 2.6f - pad.x * 3;
+    float h = 0;
+    for (claude::ProjectKind k : claude::allProjectKinds())
+        h = std::max(h, fontUi->CalcTextSizeA(fs * 0.9f, FLT_MAX, textW, claude::projectKindInfo(k).tagline).y);
+    return h + ImGui::GetTextLineHeightWithSpacing() * 1.2f + pad.y * 4;
+}
+
+bool App::drawKindCard(claude::ProjectKind k, bool selected, float w, float h) {
+    const auto& pal = ui::palette();
+    const float fs = ImGui::GetFontSize();
+    const ImVec2 pad = ImGui::GetStyle().FramePadding;
+    const auto& info = claude::projectKindInfo(k);
+    ImGui::PushID((int)k);
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton("##kind", ImVec2(w, h));
+    bool hov = ImGui::IsItemHovered();
+    ImVec2 p1(p0.x + w, p0.y + h);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec4 bg = selected ? ImVec4(pal.accent.x, pal.accent.y, pal.accent.z, 0.18f) : pal.cardBg;
+    if (hov && !selected) bg.w = std::min(1.0f, bg.w + 0.15f);
+    dl->AddRectFilled(p0, p1, ui::col(bg), 8.0f);
+    dl->AddRect(p0, p1, ui::col(selected ? pal.accent : hov ? pal.dim : ImGui::GetStyleColorVec4(ImGuiCol_Border)), 8.0f, 0,
+                selected ? 2.0f : 1.0f);
+    float is = fs * 1.7f;
+    ui::drawIcon(dl, ui::projectKindIcon(k), ImVec2(p0.x + pad.x * 1.6f, p0.y + pad.y * 2.2f), is);
+    float tx = p0.x + pad.x * 1.6f + is + fs * 0.7f;
+    dl->AddText(fontBold, fs, ImVec2(tx, p0.y + pad.y * 2), ui::col(selected ? pal.accent : ImGui::GetStyleColorVec4(ImGuiCol_Text)),
+                info.label);
+    dl->AddText(fontUi, fs * 0.9f, ImVec2(tx, p0.y + pad.y * 2 + ImGui::GetTextLineHeightWithSpacing() * 1.1f), ui::col(pal.dim),
+                info.tagline, nullptr, p1.x - tx - pad.x * 1.5f);
+    if (hov) ImGui::SetTooltip("À la fin : %s", info.deliverable);
+    ImGui::PopID();
+    return clicked;
+}
+
+void App::openDesignerFor(claude::ProjectKind k) {
+    page_ = 3;
+    if (designerBusy()) return;
+    designer_.req.kind = claude::projectKindId(k);
+    if (designer_.step != 0 && designer_.design.empty()) designer_.step = 0;
+    if (designer_.design.empty()) designer_.step = 0;
+    designerDirty_ = true;
+}
+
+void App::askQuestion(const std::string& question) {
+    if (util::trim(question).empty()) return;
+    OpenConversation* oc = newConversation(defaultFolder());
+    if (!oc) return;
+    oc->draft = question;
+    sendDraft(*oc);
+    page_ = 0;
+}
+
 void App::designerReset() {
     claude::DesignerDraft fresh;
     // Les réglages du designer et des options de création sont gardés.
@@ -335,6 +401,7 @@ void App::designerReset() {
     fresh.effort = designer_.effort;
     fresh.permissionMode = designer_.permissionMode;
     fresh.req.budget = designer_.req.budget;
+    fresh.req.kind = designer_.req.kind;
     fresh.req.allowQuestions = designer_.req.allowQuestions;
     fresh.openOrchestrator = designer_.openOrchestrator;
     designer_ = fresh;
@@ -462,19 +529,70 @@ void App::drawDesignerPage() {
 
     // ======================= 1. Décrire =======================
     if (d.step == 0) {
+        const claude::ProjectKind kind = claude::projectKindFromId(d.req.kind);
+        const auto& kinfo = claude::projectKindInfo(kind);
+        const bool code = kind == claude::ProjectKind::Software;
+        // Quel type de projet ? (cartes)
+        cardTitle("Quel type de projet ?", fontBold);
+        {
+            const auto& kinds = claude::allProjectKinds();
+            float gap = ImGui::GetStyle().ItemSpacing.x;
+            int cols = avail > fs * 70 ? 4 : avail > fs * 36 ? 2 : 1;
+            float cw = (avail - gap * (cols - 1)) / cols - 1;
+            float ch = kindCardHeight(cw);
+            for (size_t i = 0; i < kinds.size(); ++i) {
+                if (i % cols) ImGui::SameLine(0, gap);
+                if (drawKindCard(kinds[i], kinds[i] == kind, cw, ch)) {
+                    d.req.kind = claude::projectKindId(kinds[i]);
+                    designerDirty_ = true;
+                }
+            }
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (kind == claude::ProjectKind::Question) {
+            // Pas d'équipe : une conversation suffit
+            float w = std::min(avail, fs * 46);
+            ImGui::BeginChild("##dsgquestion", ImVec2(w, 0));
+            cardTitle("Votre question", fontBold);
+            multiline("##q", designerQuestion_, 5, kinfo.examples);
+            ImGui::Spacing();
+            bool canAsk = !util::trim(designerQuestion_).empty() && !claudeExe_.empty();
+            ImGui::BeginDisabled(!canAsk);
+            ImGui::PushStyleColor(ImGuiCol_Button, pal.accent);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+            bool ask = ImGui::Button("Poser la question", ImVec2(std::min(fs * 14, ImGui::GetContentRegionAvail().x), fs * 2.2f));
+            ImGui::PopStyleColor(2);
+            ImGui::EndDisabled();
+            if (canAsk && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Enter)) ask = true;
+            if (ask && canAsk) {
+                askQuestion(designerQuestion_);
+                designerQuestion_.clear();
+            }
+            dimWrapped("Une conversation s'ouvre dans « Divers » et Claude répond aussitôt. Vous pourrez continuer à "
+                       "discuter, la déplacer dans un projet (glisser-déposer dans le panneau Projets), ou revenir ici "
+                       "choisir un type de projet si la question en devient un.");
+            ImGui::EndChild();
+            ImGui::EndDisabled();
+            ImGui::EndChild();
+            return;
+        }
+
         float leftW = wide ? std::max(fs * 30, avail * 0.58f) : avail;
         ImGui::BeginChild("##dsgdesc", ImVec2(leftW, 0));
-        cardTitle("Que voulez-vous construire ?", fontBold);
-        dirtyIf(multiline("##desc", d.req.description, 7,
-                          "Ex. : une application web de recettes avec planning de la semaine et liste de courses ; un "
-                          "jeu de Pong en C++ avec SDL3 ; un outil en ligne de commande qui renomme des photos d'après "
-                          "leur date… Plus c'est précis (public, plateforme, fonctionnalités clés), meilleure est l'équipe."));
+        cardTitle(code ? "Que voulez-vous construire ?" : "Décrivez votre projet", fontBold);
+        dirtyIf(multiline("##desc", d.req.description, 7, kinfo.examples));
         ImGui::Spacing();
-        cardTitle("Dossier de travail", fontBold);
+        cardTitle(code ? "Dossier de travail" : "Dossier du projet", fontBold);
         float browseW = ui::buttonWidth("Parcourir…");
         ImGui::SetNextItemWidth(std::max(fs * 8, ImGui::GetContentRegionAvail().x - browseW - ImGui::GetStyle().ItemSpacing.x));
         std::string before = d.req.folder;
-        if (dirtyIf(ImGui::InputTextWithHint("##folder", "Facultatif : un dossier existant à reprendre, ou à créer", &d.req.folder)))
+        if (dirtyIf(ImGui::InputTextWithHint("##folder",
+                                             code ? "Facultatif : un dossier existant à reprendre, ou à créer"
+                                                  : "Facultatif : le dossier qui contient déjà vos fichiers, ou à créer",
+                                             &d.req.folder)))
             if (folderState(d.req.folder) == 3 && folderState(before) != 3) d.req.analyzeFolder = true;
         ImGui::SameLine();
         if (ImGui::Button("Parcourir…"))
@@ -485,28 +603,37 @@ void App::drawDesignerPage() {
             });
         int count = 0;
         switch (folderState(d.req.folder, &count)) {
-            case 0: ImGui::TextDisabled("Vous pourrez aussi le choisir à la dernière étape."); break;
+            case 0:
+                ImGui::TextDisabled("Vous pourrez aussi le choisir à la dernière étape.");
+                if (kind == claude::ProjectKind::Data)
+                    ImGui::TextColored(pal.link, "Conseil : indiquez le dossier où sont vos fichiers de données (Excel, CSV…) : "
+                                                 "Claude les analysera sans jamais les modifier.");
+                break;
             case 1: ImGui::TextColored(pal.ok, "✚ Nouveau dossier : il sera créé avec le projet."); break;
             case 2: ImGui::TextDisabled("Dossier existant, vide."); break;
             case 3:
                 ImGui::TextDisabled("Dossier existant (%s%d éléments).", count >= 999 ? "plus de " : "", count);
                 dirtyIf(ImGui::Checkbox("Analyser son contenu", &d.req.analyzeFolder));
                 ImGui::SameLine();
-                ui::helpMarker("Le designer lit la structure, le README, les fichiers de build et le code principal\n"
-                               "(lecture seule, une quinzaine de fichiers au plus) pour bâtir l'équipe sur l'existant :\n"
-                               "les agents se partagent alors le code déjà là.");
+                ui::helpMarker("Le designer parcourt le dossier (documents, données, code ; lecture seule, une quinzaine\n"
+                               "de fichiers au plus) pour bâtir l'équipe sur l'existant : les agents se partagent alors\n"
+                               "ce qui est déjà là.");
                 break;
             default: ImGui::TextColored(pal.err, "Ce chemin n'est pas un dossier."); break;
         }
 
         ImGui::Spacing();
         if (ImGui::CollapsingHeader("Préférences (facultatif)", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextUnformatted("Technologies imposées");
+            ImGui::TextUnformatted(code ? "Technologies imposées" : "Outils ou formats souhaités");
             ImGui::SetNextItemWidth(-1);
-            dirtyIf(ImGui::InputTextWithHint("##tech", "Ex. : C++20 et SDL3 — vide : le designer choisit", &d.req.tech));
+            dirtyIf(ImGui::InputTextWithHint("##tech",
+                                             code ? "Ex. : C++20 et SDL3 — vide : le designer choisit"
+                                                  : "Ex. : rapport Word ; graphiques ; tableaux Excel — vide : le designer choisit",
+                                             &d.req.tech));
             ImGui::TextUnformatted("Contraintes");
             dirtyIf(multiline("##constraints", d.req.constraints, 2,
-                              "Ex. : doit tourner hors ligne ; aucune dépendance payante ; Windows et macOS"));
+                              code ? "Ex. : doit tourner hors ligne ; aucune dépendance payante ; Windows et macOS"
+                                   : "Ex. : pour la direction, 10 pages au plus ; ton neutre ; à rendre avant fin juin"));
             ImGui::TextUnformatted("Taille de l'équipe");
             for (int i = 0; i < 4; ++i) {
                 if (i) ui::sameLineIfFits(ImGui::CalcTextSize(kTeamSizes[i]).x + ImGui::GetFrameHeight() * 1.5f);
@@ -594,6 +721,12 @@ void App::drawDesignerPage() {
             beginCard("##dsgwhat");
             cardTitle("Ce que le designer va produire", fontBold);
             ImGui::Spacing();
+            ui::icon(ui::projectKindIcon(kind));
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, pal.accent);
+            ImGui::TextWrapped("À la fin : %s", kinfo.deliverable);
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
             auto item = [&](const char* icon, const char* title, const char* text) {
                 ImGui::TextColored(pal.accent, "%s", icon);
                 ImGui::SameLine();
@@ -605,14 +738,19 @@ void App::drawDesignerPage() {
                 ImGui::Unindent(fs * 1.4f);
                 ImGui::Spacing();
             };
-            item("◆", "Le projet", "Nom, résumé, technologies et conventions (build, tests, style).");
-            item("◆", "L'équipe d'agents", "En général 3 à 6 agents. Chacun possède une partie du dépôt et reçoit une "
-                                         "fiche de rôle : sa mission, ses fichiers, ses frontières, ses vérifications, le "
-                                         "modèle conseillé. Un agent peut être équipé du navigateur.");
+            item("◆", "Le projet", code ? "Nom, résumé, technologies et conventions (build, tests, style)."
+                                        : "Nom, résumé, outils et règles de travail (public, ton, structure des documents).");
+            item("◆", "L'équipe d'agents", code ? "En général 3 à 6 agents. Chacun possède une partie du dépôt et reçoit une "
+                                                "fiche de rôle : sa mission, ses fichiers, ses frontières, ses vérifications, le "
+                                                "modèle conseillé. Un agent peut être équipé du navigateur."
+                                              : "En général 2 à 4 agents, comme une petite équipe : par exemple recherche, "
+                                                "rédaction ou analyse, et un relecteur. Chacun reçoit une fiche de rôle (sa "
+                                                "mission, ses documents, comment il vérifie son travail).");
             item("◆", "L'orchestrateur", "Son objectif (livrable et critères de fin), les jalons dans l'ordre, le "
                                        "niveau de budget.");
-            item("◆", "Les fichiers de départ", "CLAUDE.md, docs/PLAN.md et une fiche par agent dans docs/agents/ — "
-                                              "jamais d'écrasement d'un fichier existant.");
+            item("◆", "Les fichiers de départ", "CLAUDE.md (les consignes que Claude relit), docs/PLAN.md (objectif et "
+                                              "étapes) et une fiche par agent dans docs/agents/ — jamais d'écrasement d'un "
+                                              "fichier existant.");
             ImGui::Separator();
             dimWrapped("Vous relisez et ajustez tout à l'étape 3, à la main ou en demandant à Claude d'affiner. Le "
                        "projet est créé à l'étape 4, prêt à être orchestré.");
@@ -719,6 +857,29 @@ void App::drawDesignerPage() {
         // Projet
         beginCard("##dsgproj");
         cardTitle("Projet", fontBold);
+        const bool dcode = claude::projectKindFromId(ds.kind) == claude::ProjectKind::Software;
+        {
+            claude::ProjectKind cur = claude::projectKindFromId(ds.kind);
+            ui::icon(ui::projectKindIcon(cur));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(std::min(fs * 16, ImGui::GetContentRegionAvail().x));
+            if (ImGui::BeginCombo("Type##kind", claude::projectKindInfo(cur).label)) {
+                for (claude::ProjectKind k : claude::allProjectKinds()) {
+                    if (k == claude::ProjectKind::Auto || k == claude::ProjectKind::Question) continue;
+                    if (ImGui::Selectable(claude::projectKindInfo(k).label, k == cur)) {
+                        ds.kind = claude::projectKindId(k);
+                        ds.visualChecks = claude::projectKindInfo(k).visualChecks;
+                        designerDirty_ = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", claude::projectKindInfo(k).tagline);
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ui::helpMarker("Le type guide l'orchestrateur et les agents : façon de découper le travail, de vérifier\n"
+                           "(tests pour du code, relecture et sources pour des documents, scripts relancés pour des\n"
+                           "données) et de livrer.");
+        }
         ImGui::SetNextItemWidth(-1);
         dirtyIf(ImGui::InputTextWithHint("##name", "Nom du projet", &ds.name));
         dirtyIf(multiline("##summary", ds.summary, 4, "Résumé : ce qui sera construit, les choix faits"));
@@ -726,15 +887,19 @@ void App::drawDesignerPage() {
             std::string stack;
             for (auto& s : ds.stack) stack += (stack.empty() ? "" : ", ") + s;
             ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputTextWithHint("##stack", "Technologies, séparées par des virgules", &stack)) {
+            if (ImGui::InputTextWithHint("##stack", dcode ? "Technologies, séparées par des virgules"
+                                                          : "Outils et formats, séparés par des virgules",
+                                         &stack)) {
                 ds.stack.clear();
                 for (auto& s : util::split(stack, ','))
                     if (!util::trim(s).empty()) ds.stack.push_back(util::trim(s));
                 designerDirty_ = true;
             }
         }
-        if (ImGui::TreeNode("Conventions (build, tests, style)")) {
-            dirtyIf(multiline("##conv", ds.conventions, 5, "Ex. : npm test doit passer ; textes en français"));
+        if (ImGui::TreeNode(dcode ? "Conventions (build, tests, style)###conv" : "Règles de travail (public, ton, structure)###conv")) {
+            dirtyIf(multiline("##conv", ds.conventions, 5,
+                              dcode ? "Ex. : npm test doit passer ; textes en français"
+                                    : "Ex. : écrit pour la direction ; phrases courtes ; chaque chiffre sourcé"));
             ImGui::TreePop();
         }
         ImGui::EndChild();
@@ -746,7 +911,7 @@ void App::drawDesignerPage() {
         ImGui::TextUnformatted("Objectif");
         ImGui::SameLine();
         ui::helpMarker("Ce que l'orchestrateur doit livrer et comment savoir que c'est fini. Un objectif vérifiable\n"
-                       "(« … avec les tests qui passent ») donne de meilleurs résultats.");
+                       "(« … avec les tests qui passent », « … relu et sourcé ») donne de meilleurs résultats.");
         dirtyIf(multiline("##objective", ds.objective, 5, "Livrable final, critères d'acceptation, priorités"));
         ImGui::TextUnformatted("Jalons, dans l'ordre");
         int removeAt = -1, upAt = -1;
@@ -789,8 +954,10 @@ void App::drawDesignerPage() {
         beginCard("##dsgrefine");
         cardTitle("Demander un changement à Claude", fontBold);
         dirtyIf(multiline("##feedback", d.feedback, 3,
-                          "Ex. : fusionne 03 et 04 ; ajoute un agent pour la documentation ; passe le moteur en Rust ; "
-                          "un jalon de démo jouable plus tôt…"));
+                          dcode ? "Ex. : fusionne 03 et 04 ; ajoute un agent pour la documentation ; passe le moteur en "
+                                  "Rust ; un jalon de démo jouable plus tôt…"
+                                : "Ex. : ajoute un agent de recherche web ; le rapport doit faire 10 pages ; un relecteur "
+                                  "plus exigeant ; une étape de validation du plan avec moi…"));
         bool canRefine = !util::trim(d.feedback).empty() && !busy;
         ImGui::BeginDisabled(!canRefine);
         bool refine = ImGui::Button("✦  Affiner");
@@ -885,7 +1052,7 @@ void App::drawDesignerPage() {
             ImGui::PushFont(fontBold, ImGui::GetStyle().FontSizeBase * 1.2f);
             ImGui::TextColored(pal.ok, "✓ Projet « %s » créé", ds.name.c_str());
             ImGui::PopFont();
-            dimWrapped("Ses agents sont les thèmes du projet dans l'espace de travail, et son orchestrateur est réglé. "
+            dimWrapped("Ses agents sont les thèmes du projet (panneau Projets), et son orchestrateur est réglé. "
                        "Relisez l'objectif dans la page Orchestrateur, puis lancez l'orchestration.");
             ImGui::Spacing();
             if (ImGui::Button("Ouvrir l'orchestrateur")) {
@@ -907,10 +1074,13 @@ void App::drawDesignerPage() {
             float leftW = wide ? std::max(fs * 28, avail * 0.48f) : avail;
             ImGui::BeginChild("##dsgcreate", ImVec2(leftW, 0), wide ? ImGuiChildFlags_None : ImGuiChildFlags_AutoResizeY);
             beginCard("##where");
-            cardTitle("Dossier de travail", fontBold);
+            const bool ccode = claude::projectKindFromId(ds.kind) == claude::ProjectKind::Software;
+            cardTitle(ccode ? "Dossier de travail" : "Dossier du projet", fontBold);
             float browseW = ui::buttonWidth("Parcourir…");
             ImGui::SetNextItemWidth(std::max(fs * 8, ImGui::GetContentRegionAvail().x - browseW - ImGui::GetStyle().ItemSpacing.x));
-            dirtyIf(ImGui::InputTextWithHint("##cwd", "Dossier du dépôt (créé s'il n'existe pas)", &d.cwd));
+            dirtyIf(ImGui::InputTextWithHint("##cwd", ccode ? "Dossier du dépôt (créé s'il n'existe pas)"
+                                                            : "Dossier des fichiers du projet (créé s'il n'existe pas)",
+                                             &d.cwd));
             ImGui::SameLine();
             if (ImGui::Button("Parcourir…##cwd"))
                 openFolderDialog([this](const std::string& p) {
@@ -919,7 +1089,8 @@ void App::drawDesignerPage() {
                 });
             int cnt = 0;
             switch (folderState(d.cwd, &cnt)) {
-                case 0: ImGui::TextColored(pal.err, "Choisissez où vivra le code du projet."); break;
+                case 0: ImGui::TextColored(pal.err, ccode ? "Choisissez où vivra le code du projet."
+                                                          : "Choisissez où ranger les fichiers du projet."); break;
                 case 1: ImGui::TextColored(pal.ok, "✚ Sera créé."); break;
                 case 2: ImGui::TextDisabled("Dossier existant, vide."); break;
                 case 3: ImGui::TextDisabled("Dossier existant (%d éléments) : rien n'y sera écrasé.", cnt); break;
@@ -931,7 +1102,7 @@ void App::drawDesignerPage() {
             beginCard("##what");
             cardTitle("Ce qui sera créé", fontBold);
             ImGui::Bullet();
-            ImGui::TextWrapped("Projet « %s » dans l'espace de travail, avec %d thèmes : un par agent, sa fiche en notes.",
+            ImGui::TextWrapped("Projet « %s » dans le panneau Projets, avec %d thèmes : un par agent, sa fiche en notes.",
                                ds.name.c_str(), (int)ds.agents.size());
             ImGui::Bullet();
             std::string browsers;
@@ -942,7 +1113,7 @@ void App::drawDesignerPage() {
                                (int)ds.milestones.size(), ds.visualChecks ? ", vérification visuelle" : "",
                                browsers.empty() ? "" : (", navigateur pour " + browsers).c_str());
             ImGui::Spacing();
-            ImGui::TextUnformatted("Fichiers de départ dans le dépôt");
+            ImGui::TextUnformatted(ccode ? "Fichiers de départ dans le dépôt" : "Fichiers de départ dans le dossier");
             fs::path root = util::pathFromUtf8(util::trim(d.cwd));
             std::error_code ec;
             auto exists = [&](const std::string& rel) { return !util::trim(d.cwd).empty() && fs::exists(root / util::pathFromUtf8(rel), ec); };
@@ -953,7 +1124,7 @@ void App::drawDesignerPage() {
                     ImGui::TextDisabled("(existe déjà : conservé)");
                 }
             };
-            fileBox("CLAUDE.md — consignes du dépôt et carte de l'équipe", d.writeClaudeMd, "CLAUDE.md");
+            fileBox("CLAUDE.md — consignes que Claude relit et carte de l'équipe", d.writeClaudeMd, "CLAUDE.md");
             fileBox("docs/PLAN.md — objectif et jalons", d.writePlan, "docs/PLAN.md");
             std::string agentsLbl = "docs/agents/ — une fiche par agent (" + std::to_string(ds.agents.size()) + ")";
             dirtyIf(ImGui::Checkbox(agentsLbl.c_str(), &d.writeAgentDocs));
@@ -987,7 +1158,7 @@ void App::drawDesignerPage() {
             ImGui::BeginChild("##dsgfiles", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
             cardTitle("Aperçu", fontBold);
             auto files = claude::scaffoldFiles(ds, true, true, true);
-            files.insert(files.begin(), claude::ScaffoldFile{"Notes du projet (espace de travail)", claude::projectNotes(ds)});
+            files.insert(files.begin(), claude::ScaffoldFile{"Notes du projet (panneau Projets)", claude::projectNotes(ds)});
             designerFilePreview_ = std::clamp(designerFilePreview_, 0, (int)files.size() - 1);
             ImGui::SetNextItemWidth(-1);
             if (ImGui::BeginCombo("##file", files[(size_t)designerFilePreview_].path.c_str())) {

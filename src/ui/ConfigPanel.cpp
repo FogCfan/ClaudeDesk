@@ -2,6 +2,7 @@
 // options avancées de la conversation active (ou réglages par défaut), et
 // préférences de l'application.
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 
 #include <SDL3/SDL.h>
@@ -55,6 +56,93 @@ void stringList(const char* id, std::vector<std::string>& list, std::string& buf
 }
 
 }  // namespace
+
+// Préréglages d'énergie : quatre cartes cliquables, l'alimentation actuelle, et le réglage du mode automatique.
+void App::drawEnergyPresets() {
+    const auto& pal = ui::palette();
+    const float fs = ImGui::GetFontSize();
+    ImGui::SeparatorText("Énergie");
+    ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+    ImGui::TextWrapped("Choisissez comment ClaudeDesk utilise la batterie et la carte graphique : un clic suffit, "
+                       "les réglages détaillés ci-dessous suivent.");
+    ImGui::PopStyleColor();
+    const int modes[] = {EnergyAuto, EnergyPerformance, EnergyBalanced, EnergySaver};
+    float avail = ImGui::GetContentRegionAvail().x;
+    float gap = ImGui::GetStyle().ItemSpacing.x;
+    int cols = avail > fs * 30 ? 2 : 1;
+    float cw = (avail - gap * (cols - 1)) / cols;
+    ImVec2 pad = ImGui::GetStyle().FramePadding;
+    // Hauteur commune : la plus grande description (avec retour à la ligne)
+    float ch = 0;
+    for (int m : modes) {
+        ImVec2 t = fontUi->CalcTextSizeA(fs * 0.92f, FLT_MAX, cw - pad.x * 3, energyModeSummary(m));
+        ch = std::max(ch, t.y);
+    }
+    ch += ImGui::GetTextLineHeightWithSpacing() * 1.25f + pad.y * 4;
+    for (int i = 0; i < 4; ++i) {
+        int m = modes[i];
+        if (i % cols) ImGui::SameLine(0, gap);
+        ImGui::PushID(m);
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        bool clicked = ImGui::InvisibleButton("##energy", ImVec2(cw, ch));
+        bool hov = ImGui::IsItemHovered();
+        bool active = settings_.energyMode == m;
+        ImVec2 p1(p0.x + cw, p0.y + ch);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec4 bg = active ? ImVec4(pal.accent.x, pal.accent.y, pal.accent.z, 0.20f) : pal.cardBg;
+        if (hov && !active) bg.w = std::min(1.0f, bg.w + 0.15f);
+        dl->AddRectFilled(p0, p1, ui::col(bg), 8.0f);
+        dl->AddRect(p0, p1, ui::col(active ? pal.accent : hov ? pal.dim : ImGui::GetStyleColorVec4(ImGuiCol_Border)), 8.0f, 0,
+                    active ? 2.0f : 1.0f);
+        ImVec2 tp(p0.x + pad.x * 1.5f, p0.y + pad.y * 2);
+        std::string title = std::string(active ? "● " : "") + energyModeLabel(m);
+        if (m == EnergyAuto && hasBattery_) title += "  (recommandé)";
+        dl->AddText(fontBold, fs, tp, ui::col(active ? pal.accent : ImGui::GetStyleColorVec4(ImGuiCol_Text)), title.c_str());
+        dl->AddText(fontUi, fs * 0.92f, ImVec2(tp.x, tp.y + ImGui::GetTextLineHeightWithSpacing() * 1.15f), ui::col(pal.dim),
+                    energyModeSummary(m), nullptr, cw - pad.x * 3);
+        if (clicked) setEnergyMode(m);
+        ImGui::PopID();
+    }
+    if (settings_.energyMode == EnergyCustom)
+        ImGui::TextColored(pal.link, "Réglages personnalisés. Cliquez un mode pour y revenir.");
+
+    // Alimentation actuelle
+    std::string power;
+    if (!hasBattery_ && !onBattery_) {
+        power = "Alimentation : secteur (pas de batterie détectée)";
+    } else {
+        power = onBattery_ ? "Alimentation : sur batterie" : "Alimentation : sur secteur";
+        if (batteryPct_ >= 0) power += " · batterie " + std::to_string(batteryPct_) + " %";
+        if (onBattery_ && batterySecs_ > 0) power += " · environ " + util::humanDuration(batterySecs_) + " restantes";
+    }
+    ImGui::TextDisabled("%s", power.c_str());
+    if (settings_.energyMode == EnergyAuto) {
+        ImGui::TextDisabled("Appliqué maintenant : %s", energyApplied_ > 0 ? energyModeLabel(energyApplied_) : "—");
+        const char* fixed[] = {"Performance", "Équilibré", "Économie de batterie"};
+        int ac = settings_.energyOnAc - 1, bat = settings_.energyOnBattery - 1;
+        ImGui::SetNextItemWidth(ui::fitItemWidth(fs * 11, "sur secteur"));
+        if (ImGui::Combo("sur secteur", &ac, fixed, 3)) {
+            settings_.energyOnAc = ac + 1;
+            tickEnergy(true);
+        }
+        ui::sameLineIfFits(fs * 18);
+        ImGui::SetNextItemWidth(ui::fitItemWidth(fs * 11, "sur batterie"));
+        if (ImGui::Combo("sur batterie", &bat, fixed, 3)) {
+            settings_.energyOnBattery = bat + 1;
+            tickEnergy(true);
+        }
+    }
+#ifdef _WIN32
+    if (hasBattery_) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+        ImGui::TextWrapped("Portable à deux cartes graphiques : ClaudeDesk demande la carte dédiée, plus gourmande. Pour "
+                           "économiser davantage sur batterie, choisissez « Économie d'énergie » pour ClaudeDesk dans les "
+                           "paramètres graphiques de Windows (effet au prochain lancement).");
+        ImGui::PopStyleColor();
+        if (ImGui::SmallButton("Ouvrir les paramètres graphiques de Windows")) util::openInShell("ms-settings:display-advancedgraphics");
+    }
+#endif
+}
 
 void App::drawConfigWindow() {
     if (!ImGui::Begin("Configuration", &showConfig_)) {
@@ -299,7 +387,7 @@ void App::drawConfigWindow() {
             ImGui::EndDisabled();
             if (oc) {
                 std::string ctx = oc->injectContext ? contextFor(*oc) : "";
-                if (ImGui::TreeNode(("Contexte cowork injecté (" + util::humanTokens((int64_t)ctx.size()) + " car.)###ctx").c_str())) {
+                if (ImGui::TreeNode(("Mémoire du projet injectée (" + util::humanTokens((int64_t)ctx.size()) + " car.)###ctx").c_str())) {
                     if (ctx.empty())
                         ImGui::TextDisabled("Aucun (désactivé ou conversation hors dossier).");
                     else
@@ -367,7 +455,7 @@ void App::drawConfigWindow() {
             ImGui::TextWrapped("Utilisé : %s", claudeExe_.empty() ? "introuvable" : claudeExe_.c_str());
             ImGui::PopStyleColor();
 
-            ImGui::SeparatorText("Espace de travail (mode cowork)");
+            ImGui::SeparatorText("Projets");
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
             ImGui::TextWrapped("Racine : %s", util::pathToUtf8(workspace_.root()).c_str());
             ImGui::PopStyleColor();
@@ -455,6 +543,7 @@ void App::drawConfigWindow() {
         if (ImGui::BeginTabItem("Graphismes", nullptr, tabFlags(6))) {
             ImGui::BeginChild("##c6", ImVec2(0, -footer));
             ImGuiIO& io = ImGui::GetIO();
+            drawEnergyPresets();
             ImGui::SeparatorText("Fluidité");
             char vs[96];
             std::snprintf(vs, sizeof vs, "Synchronisée sur l'écran (VSync, %.0f Hz)", displayHz_);
@@ -470,7 +559,13 @@ void App::drawConfigWindow() {
             ImGui::Checkbox("Économie d'énergie : ne redessiner qu'en cas d'activité", &settings_.ecoIdle);
             ui::helpMarker("Au repos (aucune animation, Claude inactif), l'interface attend vos actions au lieu de\n"
                            "redessiner en continu. Désactivé = animations toujours parfaitement fluides.");
-            ImGui::Checkbox("Limiter à 30 i/s quand ClaudeDesk n'a pas le focus", &settings_.ecoBackground);
+            ImGui::Checkbox("Cadence réduite quand ClaudeDesk n'a pas le focus (ou est réduit)", &settings_.ecoBackground);
+            if (settings_.ecoBackground) {
+                ImGui::Indent();
+                ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 10, "en arrière-plan"));
+                ImGui::SliderInt("en arrière-plan", &settings_.backgroundFps, 5, 60, "%d i/s");
+                ImGui::Unindent();
+            }
             ImGui::Checkbox("Afficher les images/seconde dans la barre d'état", &settings_.showFps);
             ImGui::TextDisabled("Actuellement : %.0f images/s (%.2f ms par image)", io.Framerate, 1000.0f / std::max(1.0f, io.Framerate));
 

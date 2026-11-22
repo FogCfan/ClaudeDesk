@@ -85,10 +85,13 @@ public:
 
     bool dirty = false;           // modifié depuis la dernière sauvegarde
     bool restartPending = false;  // config modifiée : redémarrage au prochain tour
+    // Le dernier message n'a pas été traité faute de connexion valide (cf. claude/Auth.h) ; effacé au prochain tour réussi.
+    bool authFailed = false;
 
     // Callbacks (optionnels)
     std::function<void(const nlohmann::json&)> onRateLimit;
     std::function<void(ClaudeSession&)> onTurnFinished;
+    std::function<void(ClaudeSession&)> onAuthError;  // tour refusé : pas (ou plus) connecté
 
     // --- Actions ---
     void send(const std::string& text, const std::vector<ImageAttachment>& images = {});
@@ -101,6 +104,8 @@ public:
                            const nlohmann::json& updatedInput = nullptr, bool alwaysAllow = false);
     void stop();
     void restart();               // arrêt + reprise (--resume) au prochain envoi
+    // Renvoie le dernier message (après une reconnexion) dans un processus neuf, sans le répéter dans le fil.
+    bool resendLast();
     void addSystemNote(const std::string& text, bool error = false);
 
     // À appeler à chaque image : lit les sorties du processus et met à jour l'état.
@@ -119,6 +124,7 @@ private:
     void writeJson(const nlohmann::json& j);
     void sendControl(const std::string& subtype, nlohmann::json extra = nlohmann::json::object());
     void flushPendingSends();
+    static nlohmann::json userMessage(const std::string& text, const std::vector<ImageAttachment>& images);
 
     void handleAssistant(const nlohmann::json& msg, const std::string& parent);
     void handleUser(const nlohmann::json& msg, const std::string& parent);
@@ -142,6 +148,7 @@ private:
     int streamingEntry_ = -1;      // index de l'entrée en cours de streaming
     double lastNow_ = 0;
     bool freshPrompt_ = false;     // prompt système modifié : ne pas réutiliser l'instantané
+    bool authErrorPending_ = false;  // message assistant « authentication_failed » reçu, résultat à venir
 };
 
 const char* stateLabel(SessionState s);

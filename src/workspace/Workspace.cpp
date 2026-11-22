@@ -98,6 +98,7 @@ void Workspace::loadFolderMeta(Folder& f) {
     f.recap = j.value("recap", "");
     f.recapTime = j.value("recapTime", (int64_t)0);
     f.icon = j.value("icon", "");
+    f.projectKind = j.value("projectKind", "");
 }
 
 bool Workspace::saveFolderMeta(Folder* f) {
@@ -107,6 +108,7 @@ bool Workspace::saveFolderMeta(Folder* f) {
               {"recap", f->recap},
               {"recapTime", f->recapTime},
               {"icon", f->icon}};
+    if (f->isProject && !f->projectKind.empty()) j["projectKind"] = f->projectKind;
     return util::writeFileAtomic(f->path / kMetaFile, j.dump(2));
 }
 
@@ -151,9 +153,12 @@ std::unique_ptr<Folder> Workspace::scanFolder(const fs::path& dir, Folder* paren
         } else if (isConversationFile(e.path())) {
             ConversationMeta m;
             if (readConversationMeta(e.path(), m)) f->conversations.push_back(std::move(m));
+        } else if (e.is_regular_file() && !isInternalFile(e.path())) {
+            f->files.push_back(e.path());
         }
     }
     std::sort(subdirs.begin(), subdirs.end());
+    std::sort(f->files.begin(), f->files.end());
     for (auto& s : subdirs) f->children.push_back(scanFolder(s, f.get(), false));
     std::sort(f->conversations.begin(), f->conversations.end(), [](auto& a, auto& b) {
         if (a.pinned != b.pinned) return a.pinned;
@@ -232,6 +237,48 @@ bool Workspace::renameFolder(Folder* f, const std::string& newName, std::string*
     }
     f->name = clean;
     repath(f, np);
+    return true;
+}
+
+bool Workspace::isInternalFile(const fs::path& p) {
+    std::string n = util::pathToUtf8(p.filename());
+    return n.empty() || n[0] == '.' || n[0] == '_' || isConversationFile(p) || util::endsWith(n, ".tmp") ||
+           n == "desktop.ini" || n == "Thumbs.db";
+}
+
+int Workspace::addFiles(Folder* f, const std::vector<fs::path>& sources, std::string* error) {
+    if (!f) return 0;
+    int n = 0;
+    for (auto& src : sources) {
+        std::error_code ec;
+        if (!fs::is_regular_file(src, ec)) {
+            if (error) *error = "Seuls les fichiers peuvent être ajoutés : " + util::pathToUtf8(src.filename());
+            continue;
+        }
+        fs::path dest = f->path / src.filename();
+        for (int i = 2; fs::exists(dest, ec) && i < 1000; ++i)
+            dest = f->path / util::pathFromUtf8(util::pathToUtf8(src.stem()) + " (" + std::to_string(i) + ")" +
+                                                util::pathToUtf8(src.extension()));
+        if (!fs::copy_file(src, dest, ec)) {
+            if (error) *error = "Copie impossible : " + util::pathToUtf8(src.filename()) + " (" + ec.message() + ")";
+            continue;
+        }
+        if (!isInternalFile(dest)) f->files.push_back(dest);
+        ++n;
+    }
+    std::sort(f->files.begin(), f->files.end());
+    return n;
+}
+
+bool Workspace::removeFile(Folder* f, const fs::path& file) {
+    fs::path trash = root_ / ".corbeille";
+    std::error_code ec;
+    fs::create_directories(trash, ec);
+    fs::path dest = trash / util::pathFromUtf8(util::pathToUtf8(file.stem()) + " (" + std::to_string(util::nowUnix()) + ")" +
+                                               util::pathToUtf8(file.extension()));
+    fs::rename(file, dest, ec);
+    if (ec) return false;
+    if (f) f->files.erase(std::remove(f->files.begin(), f->files.end(), file), f->files.end());
     return true;
 }
 
@@ -389,7 +436,7 @@ std::string Workspace::buildContext(const Folder* folder, const std::string& exc
     if (!folder) return {};
     const Folder* project = folder->project();
     std::string ctx;
-    ctx += "# Contexte de travail (ClaudeDesk — mode cowork)\n";
+    ctx += "# Contexte de travail (ClaudeDesk — mémoire du projet)\n";
     ctx += "Projet : " + project->name;
     if (!folder->effectiveCwd().empty()) ctx += " (dossier de travail : " + folder->effectiveCwd() + ")";
     ctx += "\nCette conversation est rangée dans : " + folder->displayPath() + "\n";
@@ -403,6 +450,14 @@ std::string Workspace::buildContext(const Folder* folder, const std::string& exc
         std::string label = f->isProject ? "du projet" : "du dossier « " + f->name + " »";
         if (!util::trim(f->notes).empty()) ctx += "\n## Notes " + label + "\n" + f->notes + "\n";
         if (!util::trim(f->recap).empty()) ctx += "\n## Synthèse " + label + "\n" + f->recap + "\n";
+    }
+
+    // Documents de référence déposés dans le dossier et ses parents : Claude les lit au besoin.
+    std::vector<fs::path> docs;
+    for (const Folder* f : chain) docs.insert(docs.end(), f->files.begin(), f->files.end());
+    if (!docs.empty()) {
+        ctx += "\n## Documents de référence (fichiers joints au projet par l'utilisateur, à lire au besoin)\n";
+        for (auto& d : docs) ctx += "- " + util::pathToUtf8(d) + "\n";
     }
 
     // Récaps des conversations précédentes du dossier (les plus récentes d'abord).

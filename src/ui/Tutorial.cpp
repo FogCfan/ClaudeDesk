@@ -51,14 +51,16 @@ const std::vector<TourStep>& tourSteps() {
          "- **Aide** : ce guide, la visite, le projet exemple, les raccourcis (F1).\n\n"
          "À droite : les **pages** (Cockpit / Tableau de bord) et votre usage de la fenêtre de 5 h.",
          "#menubar", 0},
-        {"Espace de travail : projets › thèmes › conversations",
+        {"Le panneau Projets : projets › thèmes › conversations",
          "Toutes vos conversations sont **enregistrées et rangées** ici, comme des fichiers dans des dossiers :\n\n"
-         "- un **projet** (◆) correspond à un dossier de code sur lequel Claude travaille ;\n"
-         "- il se découpe en **thèmes** (▪ Code, Infra, Docs…) et sous-thèmes ;\n"
-         "- chaque niveau contient des **conversations**.\n\n"
+         "- un **projet** (dossier orange) correspond à un dossier de code sur lequel Claude travaille ;\n"
+         "- il se découpe en **thèmes** (dossiers jaunes : Code, Infra, Docs…) et sous-thèmes ; dans un projet orchestré, chaque thème est un **agent** (icône de robot) ;\n"
+         "- chaque niveau contient des **conversations** (bulle bleue) et peut recevoir des **fichiers** de référence ;\n"
+         "- *Fichiers du dossier de travail* montre le code du projet, comme l'explorateur de VS Code.\n\n"
+         "Le bouton **?** du panneau rappelle la signification de chaque icône. "
          "Double-clic pour rouvrir, glisser-déposer pour ranger, clic droit pour tout le reste "
          "(renommer, statut, récap, déplacer…).",
-         "Espace de travail", 0},
+         "Projets", 0},
         {"L'inspecteur",
          "Il affiche les détails de ce que vous sélectionnez dans l'arbre :\n\n"
          "- pour un **dossier** : ses **notes** (que Claude recevra automatiquement) et sa **synthèse** ;\n"
@@ -112,10 +114,10 @@ const std::vector<TourStep>& tourSteps() {
          "**Ctrl+1** / **Ctrl+2** pour changer de page, **Ctrl+Maj+D** pour l'ouvrir dans une **fenêtre séparée** "
          "(idéal sur un deuxième écran).",
          "#none", 1},
-        {"Le mode cowork : la mémoire du projet",
+        {"Les projets : une mémoire pour Claude",
          "Claude ne se souvient de rien d'une conversation à l'autre. Sur un vrai projet, on finit soit par garder "
          "**une conversation géante** (lente, chère, confuse), soit par **tout réexpliquer** à chaque fois.\n\n"
-         "Le mode cowork règle ça comme une équipe le fait avec des comptes rendus :\n\n"
+         "Les projets règlent ça comme une équipe le fait avec des comptes rendus :\n\n"
          "1. **Ranger** chaque conversation dans un projet et un thème ;\n"
          "2. **Résumer** en fin de conversation (*Récap*, Ctrl+Maj+R) : objectif, décisions, fichiers, reste à faire ;\n"
          "3. **Réinjecter** : chaque nouvelle conversation d'un thème démarre en connaissant les notes, synthèses et "
@@ -123,7 +125,7 @@ const std::vector<TourStep>& tourSteps() {
          "Utile pour un projet qui **dure** et qui a **plusieurs facettes** ; inutile pour une question ponctuelle "
          "(rangez-la dans *Divers*). Le guide (section *Comprendre et bien utiliser*) détaille quand et comment "
          "s'en servir.",
-         "Espace de travail", 0},
+         "Projets", 0},
         {"La barre d'état",
          "En permanence : l'état de la conversation active (prête, en cours, durée du tour), le modèle, l'effort, "
          "le mode, le contexte utilisé et le coût. Les tâches de fond (récaps…) y apparaissent aussi.",
@@ -352,12 +354,12 @@ const std::vector<GuideSection>& guideSections() {
          "- un **vrai éditeur** (souris, copier-coller, historique) et un rendu lisible des réponses et des actions ;\n"
          "- l'**usage en direct** de votre forfait et du contexte ;\n"
          "- la **configuration en un clic** (modèle, effort, mode, outils, prompt système) ;\n"
-         "- une **mémoire de travail organisée** : le *mode cowork* ;\n"
+         "- une **mémoire de travail organisée** : les *projets* ;\n"
          "- le **suivi de plusieurs conversations en parallèle** : le *tableau de bord*.\n\n"
          "### Comment lire ce guide\n"
          "La partie **Mode d'emploi** explique *comment* faire : elle se lit en dix minutes.\n\n"
          "La partie **Comprendre et bien utiliser** explique *pourquoi* et *quand* se servir des fonctionnalités qui "
-         "ne sont pas évidentes : le mode cowork, les récaps, le travail en parallèle, le mode Plan… Aucune n'est "
+         "ne sont pas évidentes : les projets, les récaps, le travail en parallèle, le mode Plan… Aucune n'est "
          "obligatoire : on peut très bien utiliser ClaudeDesk comme un terminal confortable. Mais chacune répond à un "
          "**problème précis** qui finit toujours par arriver sur un vrai projet ; savoir le reconnaître, c'est ce qui "
          "permet de travailler avec Claude sur des semaines plutôt que sur une seule conversation.\n\n"
@@ -367,14 +369,14 @@ const std::vector<GuideSection>& guideSections() {
         // ------------------------------------------------------------------ Mode d'emploi
         {"Mode d'emploi", "Démarrer en 2 minutes",
          "## Démarrer en 2 minutes\n\n"
-         "1. **Créez un projet** : *+ Projet* dans l'espace de travail. Donnez-lui un nom et choisissez le dossier "
+         "1. **Créez un projet** : *+ Projet* dans le panneau Projets. Donnez-lui un nom et choisissez le dossier "
          "de votre code : c'est là que Claude lira et modifiera les fichiers. Des thèmes (Code, Infra, Docs, Idées) "
          "sont créés d'office.\n"
          "2. **Sélectionnez un thème** dans l'arbre, puis **Ctrl+N** : une conversation s'ouvre, rangée dans ce thème.\n"
          "3. **Écrivez** votre demande et appuyez sur **Entrée**. Claude répond en direct.\n"
          "4. Quand Claude veut **modifier un fichier** ou **lancer une commande**, autorisez-le (Alt+A) ou refusez (Alt+R).\n"
          "5. À la fin, cliquez **Récap** : la conversation est résumée et servira de mémoire aux suivantes "
-         "(voir *Le mode cowork : pourquoi ?*).\n\n"
+         "(voir *Les projets : pourquoi ?*).\n\n"
          "Tout est enregistré automatiquement : fermez l'application quand vous voulez, vos onglets seront rouverts.\n\n"
          "> Pas encore de code sous la main ? Le **projet exemple** est fait pour ça."},
         {"Mode d'emploi", "L'écran en un coup d'œil",
@@ -382,7 +384,7 @@ const std::vector<GuideSection>& guideSections() {
          "ClaudeDesk a **deux pages** (en haut à droite de la barre de menus) :\n\n"
          "### Page 1 — Cockpit (Ctrl+1)\n"
          "| Zone | Rôle |\n|---|---|\n"
-         "| Espace de travail (gauche) | vos projets, thèmes et conversations enregistrées |\n"
+         "| Projets (gauche) | vos projets, thèmes et conversations enregistrées |\n"
          "| Inspecteur (gauche, bas) | notes, synthèse, récap de la sélection |\n"
          "| Conversations (centre) | le fil, l'éditeur, les autorisations ; un onglet par conversation |\n"
          "| Usage (droite) | limites du forfait, contexte, coût, tâches de Claude |\n"
@@ -460,12 +462,12 @@ const std::vector<GuideSection>& guideSections() {
          "`/compact` ou repartez d'un récap.\n"
          "- Le **coût** affiché est l'équivalent au tarif de l'API : avec un abonnement, c'est le quota qui est "
          "consommé, pas de l'argent.\n\n"
-         "> Pourquoi le contexte compte autant : voir *Le mode cowork : pourquoi ?*"},
+         "> Pourquoi le contexte compte autant : voir *Les projets : pourquoi ?*"},
         {"Mode d'emploi", "Reprendre et importer",
          "## Reprendre et importer\n\n"
          "- Vos onglets sont **rouverts** au démarrage, et chaque conversation garde l'identifiant de sa session "
          "Claude Code : votre prochain message **reprend exactement** là où vous en étiez.\n"
-         "- **Importer depuis Claude Code** (bouton *Importer* de l'espace de travail) liste les sessions faites "
+         "- **Importer depuis Claude Code** (bouton *Importer* du panneau Projets) liste les sessions faites "
          "dans le **terminal** (`claude`), par dossier. *Importer* les range dans le dossier sélectionné : elles se "
          "reprennent telles quelles.\n"
          "- À l'inverse, *Session › Reprendre dans le terminal* copie la commande `claude --resume …`.\n"
@@ -473,8 +475,8 @@ const std::vector<GuideSection>& guideSections() {
         {"Mode d'emploi", "Raccourcis clavier", nullptr},
 
         // ------------------------------------------------------------------ Comprendre et bien utiliser
-        {"Comprendre et bien utiliser", "Le mode cowork : pourquoi ?",
-         "## Le mode cowork : pourquoi ?\n\n"
+        {"Comprendre et bien utiliser", "Les projets : pourquoi ?",
+         "## Les projets : pourquoi ?\n\n"
          "### Le problème\n"
          "Claude ne se souvient de rien d'une conversation à l'autre. Tout ce qu'il « sait » de votre projet tient "
          "dans sa **fenêtre de contexte** : les fichiers qu'il a lus et les messages échangés *dans cette "
@@ -487,7 +489,7 @@ const std::vector<GuideSection>& guideSections() {
          "l'objectif, les conventions, ce qui a été tenté et pourquoi ça a été abandonné.\n"
          "3. **Le grenier** : des dizaines de sessions sans titre, impossibles à retrouver. On ne sait plus où une "
          "décision a été prise.\n\n"
-         "### Ce que fait le mode cowork\n"
+         "### Ce que font les projets\n"
          "Il traite vos échanges avec Claude comme on traite le code : **rangés, résumés et réutilisables**.\n\n"
          "- **Ranger** : chaque conversation vit dans un projet et un thème, comme un fichier dans un dossier.\n"
          "- **Résumer** : un **récap** condense une conversation finie en quelques lignes (objectif, ce qui a été fait, "
@@ -507,13 +509,46 @@ const std::vector<GuideSection>& guideSections() {
          "### Quand ce n'est pas nécessaire\n"
          "- une question ponctuelle (« comment on fait X en Python ? ») : utilisez *Divers*, sans récap ;\n"
          "- une tâche courte qui tient en une conversation ;\n"
-         "- un sujet où vous voulez justement un regard neuf : décochez *Contexte cowork* dans la barre rapide.\n\n"
+         "- un sujet où vous voulez justement un regard neuf : décochez *Mémoire du projet* dans la barre rapide.\n\n"
          "### Ce que ça coûte\n"
          "Un récap est généré par Haiku : quelques secondes et une très petite part du quota. Le contexte injecté "
          "est plafonné (environ 10 000 jetons au maximum) et n'est envoyé qu'au **démarrage** d'une session. C'est en "
          "général bien moins cher que de prolonger une conversation géante.\n\n"
-         "> En résumé : le mode cowork transforme une suite de conversations isolées en **un projet qui a une "
+         "> En résumé : les projets transforment une suite de conversations isolées en **un projet qui a une "
          "mémoire**. Les sections suivantes expliquent comment l'organiser et l'entretenir."},
+        {"Comprendre et bien utiliser", "Quel type de projet choisir ?",
+         "## Quel type de projet choisir ?\n\n"
+         "ClaudeDesk ne sert pas qu'aux informaticiens. Claude peut organiser vos idées, analyser vos tableaux, rédiger "
+         "un rapport ou un audit, ou développer un logiciel. Le **type de projet** lui dit comment s'y prendre : comment "
+         "découper le travail, comment vérifier, quoi livrer.\n\n"
+         "| Type | Pour… | À la fin, vous obtenez |\n|---|---|---|\n"
+         "| **Juste une question** | une réponse rapide | une conversation, que vous pouvez poursuivre |\n"
+         "| **Idées et concept** | une stratégie, une offre, un cahier des charges, un univers | des documents clairs : "
+         "options comparées, décisions, plan d'action |\n"
+         "| **Analyse de données** | vos fichiers Excel ou CSV | des chiffres vérifiés, des graphiques, un rapport |\n"
+         "| **Rapport, audit ou étude** | un document de référence | un document structuré et sourcé (Word ou PDF) |\n"
+         "| **Logiciel ou application** | un programme, un site, un script | du code qui fonctionne, testé |\n"
+         "| **Projet hybride** | un peu de tout : conception puis prototype | des documents ET une réalisation |\n"
+         "| **Laisser Claude choisir** | quand vous hésitez | Claude détermine le type et l'organisation |\n\n"
+         "### Comment démarrer\n"
+         "- Sur l'écran d'accueil, cliquez le type de projet : le **Designer** s'ouvre. Décrivez ce que vous voulez en "
+         "quelques phrases (pour qui, quel résultat, quelles contraintes). Claude propose une petite équipe d'agents "
+         "(par exemple : recherche, rédaction, relecture) et les étapes du travail ; vous ajustez, puis vous créez le "
+         "projet.\n"
+         "- Pour une simple question, tapez-la directement dans la case « Une question ? » de l'accueil.\n"
+         "- Vous préférez tout faire vous-même ? *Projet sans Designer…* : choisissez le type, les thèmes proposés "
+         "s'adaptent (Données, Analyses, Graphiques, Rapport pour une analyse, par exemple).\n\n"
+         "### Ce que le type change\n"
+         "- **La méthode de Claude** : dans un projet d'analyse, il ne modifie jamais vos fichiers d'origine et refait "
+         "chaque calcul par un script ; dans un rapport, il cite ses sources et fait relire chaque partie ; dans un "
+         "logiciel, il vérifie par des tests.\n"
+         "- **L'orchestrateur** : il fait valider le plan d'un rapport avant la rédaction, vérifie l'environnement "
+         "avant une analyse, demande votre avis sur les choix qui vous reviennent.\n"
+         "- **Le vocabulaire** de l'interface : « dossier du projet » plutôt que « dépôt », « outils et formats » "
+         "plutôt que « technologies ».\n\n"
+         "Le type se change à tout moment : Inspecteur du projet › *Type de projet*.\n\n"
+         "> Analyse de données : Claude utilise Python. S'il n'est pas installé, il vous le dira et vous expliquera "
+         "comment l'installer (python.org, cocher « Add to PATH »)."},
         {"Comprendre et bien utiliser", "Bien organiser un projet",
          "## Bien organiser un projet\n\n"
          "### Un projet = un dossier de code\n"
@@ -555,7 +590,7 @@ const std::vector<GuideSection>& guideSections() {
          "3. les **récaps** des conversations précédentes du même dossier, les plus récentes d'abord, jusqu'à un "
          "plafond d'environ 40 000 caractères ;\n"
          "4. à la racine d'un projet, la liste des thèmes.\n\n"
-         "Vous pouvez le lire avant d'envoyer : *Configuration › Prompt système › Contexte cowork injecté*.\n\n"
+         "Vous pouvez le lire avant d'envoyer : *Configuration › Prompt système › Mémoire du projet injectée*.\n\n"
          "### Quand générer un récap\n"
          "- à la **fin** d'une conversation qui a produit quelque chose (une décision, du code, un diagnostic) ;\n"
          "- avant une **pause** longue ;\n"
@@ -717,7 +752,7 @@ const std::vector<GuideSection>& guideSections() {
          "3. **Ajuster** la conception : projet, objectif, jalons, budget, et une carte par agent (mission, modèle "
          "conseillé, navigateur, fiche de rôle). Tout est modifiable à la main ; *Demander un changement* fait refaire "
          "à Claude seulement ce que vous demandez, et *Version précédente* annule une génération.\n"
-         "4. **Créer** : le projet cowork, un thème par agent (sa fiche en notes), les fichiers de départ du dépôt "
+         "4. **Créer** : le projet, un thème par agent (sa fiche en notes), les fichiers de départ du dépôt "
          "(CLAUDE.md, docs/PLAN.md, docs/agents/ — jamais d'écrasement) et l'orchestrateur réglé. Il ne reste qu'à "
          "relire l'objectif et lancer l'orchestration.\n\n"
          "Le designer travaille par défaut en **mode Plan** : il lit, ne modifie rien. Modèle, effort et mode se "
@@ -797,7 +832,7 @@ const std::vector<GuideSection>& guideSections() {
          "Vérifiez le **dossier de travail** du projet (Inspecteur, sélection du projet) : Claude travaille dans ce "
          "dossier. Pour d'autres dossiers : *Configuration › Avancé › Dossiers supplémentaires*.\n\n"
          "### Claude ignore une décision prise dans une autre conversation\n"
-         "Le contexte cowork ne contient que ce qui est dans les **récaps** et les **notes**. Générez le récap de la "
+         "La mémoire du projet ne contient que ce qui est dans les **récaps** et les **notes**. Générez le récap de la "
          "conversation où la décision a été prise, vérifiez qu'elle y figure, ou ajoutez-la aux notes du dossier.\n\n"
          "### Le contexte est presque plein\n"
          "Cliquez **↻ Repartir du récap** (voir *Reprendre ou repartir ?*), ou tapez `/compact`.\n\n"
@@ -805,7 +840,7 @@ const std::vector<GuideSection>& guideSections() {
          "Cliquez *Appliquer à la conversation*. Pour l'effort, les outils et le prompt, la session redémarre au "
          "prochain message (historique conservé).\n\n"
          "### Où sont mes données ?\n"
-         "Conversations : le dossier de l'espace de travail (*Fichier › Ouvrir le dossier de l'espace de travail*). "
+         "Conversations : le dossier des projets (*Fichier › Ouvrir le dossier des projets*). "
          "Réglages : `%APPDATA%\\ClaudeDesk`. Les éléments supprimés vont dans `.corbeille`.\n\n"
          "### Revoir l'accueil des nouveaux utilisateurs\n"
          "*Configuration › Application › Accueil* : le guide s'ouvrira de nouveau au prochain lancement. "
@@ -916,12 +951,15 @@ void App::drawGuideWindow() {
             showHistory_ = true;
             histProjects_ = claude::listHistoryProjects();
         });
-    } else if (t == "Le mode cowork : pourquoi ?" || t == "Une journée type") {
+    } else if (t == "Les projets : pourquoi ?" || t == "Une journée type") {
         action("Voir un projet organisé (exemple)", [&] { createExampleProject(); });
         action("Créer mon projet…", [&] { openNewProject_ = true; });
+    } else if (t == "Quel type de projet choisir ?") {
+        action("Ouvrir le Designer", [&] { page_ = 3; });
+        action("Poser une question", [&] { openDesignerFor(claude::ProjectKind::Question); });
     } else if (t == "Bien organiser un projet") {
         action("Créer mon projet…", [&] { openNewProject_ = true; });
-        action("Ouvrir le dossier de l'espace de travail", [&] { util::openInShell(util::pathToUtf8(workspace_.root())); });
+        action("Ouvrir le dossier des projets", [&] { util::openInShell(util::pathToUtf8(workspace_.root())); });
     } else if (t == "Récaps, synthèses et contexte injecté") {
         action("Voir le contexte injecté", [&] { openConfig(3); });
         action("Récap automatique à la fermeture…", [&] { openConfig(5); });
@@ -1025,7 +1063,7 @@ void App::drawGuideReminder() {
     ImGui::PopFont();
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextUnformatted("Menu Aide › Guide de démarrage (Maj+F1), ou l'écran d'accueil quand aucune conversation "
-                           "n'est ouverte. Il explique aussi pourquoi et quand utiliser le mode cowork, les récaps et "
+                           "n'est ouverte. Il explique aussi pourquoi et quand utiliser les projets, les récaps et "
                            "le tableau de bord.");
     ImGui::PopTextWrapPos();
     ImGui::Dummy(ImVec2(0, 2));
@@ -1196,7 +1234,7 @@ void App::createExampleProject() {
             selectedFolder_ = util::pathToUtf8(p->path);
             selectedConv_.clear();
             page_ = 0;
-            toast("Le projet exemple existe déjà : il est sélectionné dans l'espace de travail.");
+            toast("Le projet exemple existe déjà : il est sélectionné dans le panneau Projets.");
             return;
         }
 

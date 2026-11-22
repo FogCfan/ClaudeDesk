@@ -58,13 +58,15 @@ const char* budgetText(const std::string& b) {
 
 std::string requestSection(const DesignRequest& r) {
     std::string m = "## Demande de l'humain\n" + util::trim(r.description) + "\n\n";
+    ProjectKind k = projectKindFromId(r.kind);
+    if (k != ProjectKind::Auto) m += std::string("Type de projet choisi par l'humain : ") + projectKindInfo(k).label + "\n";
     if (!util::trim(r.folder).empty())
         m += "Dossier de travail : `" + util::trim(r.folder) + "`" +
              (r.analyzeFolder ? " — dossier EXISTANT : la conception part de ce qui s'y trouve déjà.\n"
                               : " — dossier neuf (ou contenu à ignorer).\n");
     else
         m += "Dossier de travail : pas encore choisi (projet neuf).\n";
-    if (!util::trim(r.tech).empty()) m += "Technologies imposées : " + util::trim(r.tech) + "\n";
+    if (!util::trim(r.tech).empty()) m += "Technologies, outils ou formats imposés : " + util::trim(r.tech) + "\n";
     if (!util::trim(r.constraints).empty()) m += "Contraintes : " + util::trim(r.constraints) + "\n";
     m += std::string("Taille d'équipe : ") + teamSizeText(r.teamSize) + "\n";
     m += std::string("Budget : ") + budgetText(r.budget) + "\n";
@@ -80,18 +82,19 @@ std::string requestSection(const DesignRequest& r) {
 
 const char* kSchema = R"SCH(```json
 {"design": {
+  "kind": "software|concept|data|document|hybrid",
   "name": "Nom du projet (court, sans / \\ : * ? \" < > |)",
-  "summary": "2 à 4 phrases : ce qui sera construit, et les choix que tu as faits faute de précision",
-  "stack": ["langage", "bibliothèques", "outils de build/tests"],
+  "summary": "2 à 4 phrases, en langage simple : ce qui sera produit, et les choix que tu as faits faute de précision",
+  "stack": ["langages, bibliothèques et outils (logiciel) — ou outils et formats : Markdown, Excel, Python, export PDF…"],
   "objective": "objectif complet pour l'orchestrateur : livrable final, critères d'acceptation vérifiables, priorités (l'essentiel d'abord)",
   "milestones": ["Jalon 1 — livrable vérifiable", "Jalon 2 — …"],
-  "conventions": "build, tests, style, langue des textes — Markdown court",
+  "conventions": "règles de travail — code : build, tests, style ; documents : public, ton, structure, langue — Markdown court",
   "budget": "low|medium|high|max",
   "visualChecks": true,
   "agents": [
     {"name": "01 Fondations",
      "mission": "une phrase (120 caractères max)",
-     "role": "fiche Markdown adressée à l'agent : ## Mission, ## Possède (dossiers/fichiers), ## Frontières, ## Conventions, ## Vérifications",
+     "role": "fiche Markdown adressée à l'agent : ## Mission, ## Possède (dossiers, fichiers ou documents), ## Frontières, ## Conventions, ## Vérifications",
      "model": "haiku|sonnet|opus",
      "effort": "low|medium|high",
      "browser": false}
@@ -101,17 +104,19 @@ const char* kSchema = R"SCH(```json
 
 const char* kTeamRules = R"RULES(## Règles de conception de l'équipe
 - Fonctionnement : un ORCHESTRATEUR (le « cerveau », en lecture seule) découpe le travail et le délègue aux agents ;
-  chaque agent est une conversation Claude Code distincte dans le même dépôt, qui relit sa fiche à chaque tâche,
+  chaque agent est une conversation Claude Code distincte dans le même dossier de projet, qui relit sa fiche à chaque tâche,
   ne voit pas les autres conversations et rend un compte rendu court. Plusieurs agents travaillent en parallèle.
-- Chaque agent POSSÈDE une partie disjointe du dépôt (dossiers, fichiers) : c'est ce qui évite les conflits quand
-  ils travaillent en même temps. Les frontières doivent être nettes.
+- Chaque agent POSSÈDE une partie disjointe du dossier (dossiers, fichiers, documents ou sections) : c'est ce qui
+  évite les conflits quand ils travaillent en même temps. Les frontières doivent être nettes.
 - Pas d'agent « chef de projet » : c'est le rôle de l'orchestrateur. Un agent tests/qualité seulement si le projet
   le justifie. Une tâche ponctuelle ne justifie pas un agent : chaque agent ajoute du contexte et de la coordination.
 - Noms « NN Nom » (01, 02…), dans l'ordre où le travail démarre, courts, en français.
 - La fiche (role) est écrite POUR l'agent, autonome et précise : sa mission, ce qu'il possède, ce qui appartient aux
-  autres, les conventions, et comment il vérifie son travail (commandes de build/tests ; capture PNG pour le visuel).
-- model/effort conseillés : haiku pour le mécanique (docs, mise en forme), sonnet pour le développement courant,
-  opus seulement pour l'architecture délicate.
+  autres, les conventions, et comment il vérifie son travail (build/tests pour du code ; relecture et sources pour des
+  documents ; scripts relancés pour des données ; capture PNG pour le visuel).
+- model/effort conseillés : haiku pour le mécanique (mise en forme, tâches répétitives), sonnet pour le travail courant
+  (développement, rédaction, analyse), opus seulement pour le délicat (architecture, raisonnement, synthèse exigeante).
+- L'humain n'est pas forcément technicien : summary, missions et jalons en langage simple, sans jargon inutile.
 - browser: true seulement pour un agent qui doit ouvrir des pages web dans Chrome pour les vérifier.
 - milestones : 3 à 6 jalons ordonnés, chacun vérifiable. objective : ce que l'orchestrateur doit livrer, et comment
   savoir que c'est fini.
@@ -127,17 +132,20 @@ std::string DesignQuestion::answer() const {
 
 std::string designPrompt(const DesignRequest& r) {
     std::string p = "# Rôle : DESIGNER DE PROJET (ClaudeDesk)\n"
-                    "Tu conçois un projet logiciel ET l'équipe d'agents Claude Code qui va le réaliser, pilotée par "
-                    "l'orchestrateur de ClaudeDesk. Tu ne développes rien toi-même : tu produis la conception.\n\n";
+                    "Tu conçois un projet ET l'équipe d'agents Claude Code qui va le réaliser, pilotée par l'orchestrateur "
+                    "de ClaudeDesk. Le projet peut être un logiciel, mais aussi des idées et un concept, une analyse de "
+                    "données, un rapport ou un audit, ou un mélange. Tu ne réalises rien toi-même : tu produis la "
+                    "conception.\n\n";
     p += requestSection(r) + "\n";
+    p += designerKindGuidance(projectKindFromId(r.kind)) + "\n\n";
     p += "## Ce que tu dois faire\n";
     if (r.analyzeFolder && !util::trim(r.folder).empty())
         p += "- Examine d'abord le dossier de travail avec Read, Glob et Grep — lectures ciblées (structure, README, "
-             "fichiers de build, code principal), une quinzaine au plus — et bâtis la conception sur l'existant : "
-             "les agents se partagent le code qui existe déjà.\n";
+             "documents, fichiers de données ou de build, code principal), une quinzaine au plus — et bâtis la conception "
+             "sur l'existant : les agents se partagent ce qui existe déjà.\n";
     if (r.allowQuestions && r.answered.empty())
-        p += "- Si une information ESSENTIELLE manque et change vraiment la conception (plateforme cible, langage, "
-             "périmètre…), pose d'abord jusqu'à 4 questions, chacune avec 2 à 4 options et celle que tu recommandes. "
+        p += "- Si une information ESSENTIELLE manque et change vraiment la conception (public visé, format du "
+             "livrable, plateforme, périmètre…), pose d'abord jusqu'à 4 questions, chacune avec 2 à 4 options et celle que tu recommandes. "
              "Sinon, conçois directement en faisant des choix raisonnables (cite-les dans summary). Ne pose pas de "
              "question de détail.\n"
              "  Format des questions :\n"
@@ -158,6 +166,7 @@ std::string refinePrompt(const DesignRequest& r, const ProjectDesign& current, c
                     "Tu as conçu un projet et l'équipe d'agents qui va le réaliser. L'humain a pu modifier la conception "
                     "à la main, et te demande maintenant des changements.\n\n";
     p += requestSection(noQ) + "\n";
+    p += designerKindGuidance(projectKindFromId(current.kind.empty() ? r.kind : current.kind)) + "\n\n";
     p += "## Conception actuelle (modifications de l'humain comprises)\n```json\n" +
          json{{"design", toJson(current)}}.dump(1) + "\n```\n\n";
     p += "## Changements demandés\n" + util::trim(feedback) + "\n\n";
@@ -212,6 +221,12 @@ static DesignAgent agentFromJson(const json& a) {
 ProjectDesign designFromJson(const json& d) {
     ProjectDesign out;
     if (!d.is_object()) return out;
+    {
+        std::string k = lower(str(d, "kind"));
+        ProjectKind pk = projectKindFromId(k);
+        out.kind = pk == ProjectKind::Question || k.empty() ? "software" : (pk == ProjectKind::Auto ? "hybrid" : k);
+        if (pk == ProjectKind::Auto && k != "auto") out.kind = "software";  // valeur inconnue : comme avant les types
+    }
     out.name = cleanAgentName(str(d, "name"));
     out.summary = str(d, "summary");
     out.stack = strList(d, "stack");
@@ -306,9 +321,10 @@ DesignCheck checkDesign(const ProjectDesign& d) {
 }
 
 std::string projectNotes(const ProjectDesign& d) {
-    std::string n = util::trim(d.summary) + "\n";
+    ProjectKind k = projectKindFromId(d.kind);
+    std::string n = std::string("Type : ") + projectKindInfo(k).label + ".\n\n" + util::trim(d.summary) + "\n";
     if (!d.stack.empty()) {
-        n += "\n## Pile\n";
+        n += k == ProjectKind::Software ? "\n## Pile\n" : "\n## Outils\n";
         for (auto& s : d.stack) n += "- " + s + "\n";
     }
     if (!util::trim(d.conventions).empty()) n += "\n## Conventions\n" + util::trim(d.conventions) + "\n";
@@ -337,20 +353,27 @@ static std::string slugFile(const std::string& name) {
 
 std::vector<ScaffoldFile> scaffoldFiles(const ProjectDesign& d, bool claudeMd, bool plan, bool agentDocs) {
     std::vector<ScaffoldFile> v;
+    ProjectKind kind = projectKindFromId(d.kind);
     if (claudeMd) {
         std::string c = "# " + d.name + "\n\n" + util::trim(d.summary) + "\n";
+        if (kind != ProjectKind::Software) {
+            std::string hint = conversationKindHint(kind);
+            if (!hint.empty()) c += "\n## Méthode\n" + hint + "\n";
+        }
         if (!d.stack.empty()) {
-            c += "\n## Pile\n";
+            c += kind == ProjectKind::Software ? "\n## Pile\n" : "\n## Outils\n";
             for (auto& s : d.stack) c += "- " + s + "\n";
         }
         if (!util::trim(d.conventions).empty()) c += "\n## Conventions\n" + util::trim(d.conventions) + "\n";
-        c += "\n## Équipe (orchestrateur ClaudeDesk)\n"
-             "Le travail est réparti entre des agents qui possèdent chacun une partie du dépôt ; ne modifie pas ce qui "
-             "appartient à un autre agent sans que la tâche le demande. Fiches détaillées : `docs/agents/`.\n\n"
+        c += std::string("\n## Équipe (orchestrateur ClaudeDesk)\n"
+                         "Le travail est réparti entre des agents qui possèdent chacun une partie du ") +
+             projectFolderWord(kind) +
+             " ; ne modifie pas ce qui appartient à un autre agent sans que la tâche le demande. Fiches détaillées : "
+             "`docs/agents/`.\n\n"
              "| Agent | Mission |\n|---|---|\n";
         for (auto& a : d.agents) c += "| " + a.name + " | " + a.mission + " |\n";
         if (plan) c += "\nPlan et jalons : `docs/PLAN.md`.\n";
-        c += "\n## Captures\nLes captures de vérification visuelle vont dans `_captures/` (ignoré par git).\n";
+        if (d.visualChecks) c += "\n## Captures\nLes captures de vérification visuelle vont dans `_captures/` (ignoré par git).\n";
         v.push_back({"CLAUDE.md", c});
     }
     if (plan) {
@@ -391,6 +414,7 @@ void applyDesign(const ProjectDesign& d, OrchestratorSettings& s) {
         for (size_t i = 0; i < d.milestones.size(); ++i) o += std::to_string(i + 1) + ". " + d.milestones[i] + "\n";
     }
     s.objective = util::trim(o);
+    s.projectKind = d.kind.empty() ? "software" : d.kind;
     s.visualChecks = d.visualChecks;
     s.browserAgents.clear();
     for (auto& a : d.agents)
@@ -402,7 +426,7 @@ json toJson(const ProjectDesign& d) {
     for (auto& a : d.agents)
         agents.push_back({{"name", a.name},   {"mission", a.mission}, {"role", a.role},
                           {"model", a.model}, {"effort", a.effort},   {"browser", a.browser}});
-    return {{"name", d.name},       {"summary", d.summary},         {"stack", d.stack},
+    return {{"kind", d.kind},       {"name", d.name},               {"summary", d.summary},         {"stack", d.stack},
             {"objective", d.objective}, {"milestones", d.milestones}, {"conventions", d.conventions},
             {"budget", d.budget},   {"visualChecks", d.visualChecks}, {"agents", agents}};
 }
@@ -431,7 +455,7 @@ json DesignerDraft::toJson() const {
     for (auto& h : history) hist.push_back(claude::toJson(h));
     return {{"step", step},
             {"request",
-             {{"description", req.description}, {"folder", req.folder}, {"analyzeFolder", req.analyzeFolder},
+             {{"kind", req.kind}, {"description", req.description}, {"folder", req.folder}, {"analyzeFolder", req.analyzeFolder},
               {"tech", req.tech}, {"constraints", req.constraints}, {"teamSize", req.teamSize}, {"budget", req.budget},
               {"allowQuestions", req.allowQuestions}, {"answered", ans}}},
             {"questions", qs},
@@ -456,6 +480,7 @@ void DesignerDraft::fromJson(const json& j) {
     step = std::clamp(j.value("step", 0), 0, 3);
     if (j.contains("request") && j["request"].is_object()) {
         const json& r = j["request"];
+        req.kind = r.value("kind", "auto");
         req.description = r.value("description", "");
         req.folder = r.value("folder", "");
         req.analyzeFolder = r.value("analyzeFolder", false);
@@ -488,8 +513,49 @@ void DesignerDraft::fromJson(const json& j) {
     if (step >= 2 && design.empty()) step = 0;
 }
 
-ProjectDesign demoDesign() {
+ProjectDesign demoDesign(ProjectKind kind) {
     ProjectDesign d;
+    if (kind == ProjectKind::Document) {
+        d.kind = "document";
+        d.name = "Audit sécurité Atelier Martin";
+        d.summary = "Audit de la sécurité informatique d'une PME de 20 personnes (atelier de menuiserie) : état des lieux, "
+                    "risques classés et plan d'action chiffré, pour le gérant qui n'est pas informaticien. Choix faits : "
+                    "rapport Word d'une quinzaine de pages, résumé d'une page en tête.";
+        d.stack = {"Markdown", "Tableaux de risques", "Export Word (pandoc)"};
+        d.objective = "Livrer le rapport d'audit (rapport.md et rapport.docx) : résumé pour le gérant, constats par "
+                      "domaine (postes, sauvegardes, messagerie, réseau, accès), risques classés par gravité, "
+                      "recommandations priorisées avec coût et délai. Critères : chaque constat s'appuie sur un document "
+                      "ou une réponse au questionnaire ; relecture croisée faite ; vocabulaire accessible.";
+        d.milestones = {"Plan du rapport et questionnaire validés par l'humain", "Constats par domaine, sourcés",
+                        "Analyse des risques (gravité × probabilité)", "Recommandations chiffrées et priorisées",
+                        "Rédaction finale, relecture et export Word"};
+        d.conventions = "- Public : le gérant (non technicien) — phrases courtes, jargon expliqué\n"
+                        "- Chaque constat cite sa source (document fourni, réponse au questionnaire)\n"
+                        "- Sections dans `sections/`, assemblées dans `rapport.md`";
+        d.budget = "medium";
+        d.visualChecks = false;
+        d.agents = {
+            {"01 Collecte", "Rassemble les informations : documents fournis, questionnaire, inventaire.",
+             "## Mission\nRéunir les faits.\n\n## Possède\n- `sources/`, `questionnaire.md`\n\n## Frontières\nNe "
+             "rédige pas le rapport.\n\n## Vérifications\nChaque fait noté avec sa source.",
+             "sonnet", "medium", false},
+            {"02 Analyse", "Constats et risques par domaine, avec leur gravité.",
+             "## Mission\nTransformer les faits en constats et risques.\n\n## Possède\n- `sections/constats-*.md`, "
+             "`risques.md`\n\n## Vérifications\nChaque risque relié à au moins un constat sourcé.",
+             "opus", "medium", false},
+            {"03 Rédaction", "Rapport final clair pour le gérant, résumé et export Word.",
+             "## Mission\nRédiger et assembler.\n\n## Possède\n- `rapport.md`, `sections/resume.md`, "
+             "`sections/recommandations.md`\n\n## Vérifications\nPlan respecté, export Word ouvert sans erreur.",
+             "sonnet", "medium", false},
+            {"04 Relecture", "Relecture critique : exactitude, sources, clarté, cohérence.",
+             "## Mission\nRelire comme le gérant et comme un auditeur.\n\n## Possède\n- `relecture.md`\n\n"
+             "## Frontières\nSignale, ne réécrit pas les sections des autres.\n\n## Vérifications\nListe des "
+             "points corrigés ou ouverts.",
+             "sonnet", "high", false},
+        };
+        return d;
+    }
+    d.kind = "software";
     d.name = "Carnet de recettes";
     d.summary = "Application web de gestion de recettes : saisie, recherche par ingrédient, liste de courses générée "
                 "pour la semaine. Choix faits : front React + Vite, API Node/Express, base SQLite (un seul utilisateur).";

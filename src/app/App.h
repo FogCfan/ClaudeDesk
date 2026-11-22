@@ -14,11 +14,13 @@
 #include <imgui.h>
 
 #include "app/Settings.h"
+#include "claude/Auth.h"
 #include "claude/ClaudeSession.h"
 #include "claude/Designer.h"
 #include "claude/History.h"
 #include "claude/OneShot.h"
 #include "claude/Orchestrator.h"
+#include "claude/ProjectKind.h"
 #include "claude/UsageTracker.h"
 #include "ui/Markdown.h"
 #include "workspace/Workspace.h"
@@ -167,6 +169,36 @@ private:
     void drawInspector();                     // WorkspacePanel.cpp
     void drawMoveMenu(const std::string& convId, ws::Folder* f);
     void drawHistoryImport();                 // WorkspacePanel.cpp
+    // Panneau Projets : icônes, fichiers, explorateur du dossier de travail (WorkspacePanel.cpp)
+    void drawWorkDirNode(ws::Folder* project);
+    void drawDirListing(const std::string& dir, int depth);
+    void drawFileItem(const std::string& path, ws::Folder* owner);  // owner : dossier de projet (null = dossier de travail)
+    void drawFileInspector();
+    void drawIconLegend();
+    void addFilesTo(const std::string& folderPath, const std::vector<std::string>& files);
+    bool dropOnProjects(float x, float y, const std::string& file);  // fichier lâché sur un dossier du panneau Projets
+    bool projectOrchestrated(const ws::Folder* project);
+    bool isAgentFolder(const ws::Folder* f);
+    bool isBrainConversation(const ws::Folder* f, const ws::ConversationMeta& m);
+    struct DirEntry {
+        std::string name, path;
+        bool dir = false;
+    };
+    struct DirListing {
+        double time = -1e9;
+        std::vector<DirEntry> entries;
+        bool truncated = false;
+    };
+    std::map<std::string, DirListing> dirCache_;
+    std::map<std::string, std::pair<double, bool>> orchFileCache_;  // projet → (vérifié à, a un _orchestrateur.json)
+    struct DropZone {
+        float x0, y0, x1, y1;
+        std::string folder;
+    };
+    std::vector<DropZone> dropZones_;   // zones des dossiers du panneau Projets à la dernière image
+    float projectsRect_[4] = {0, 0, 0, 0};
+    std::string selectedFile_;          // fichier sélectionné (chemin UTF-8)
+    std::string selectedFileOwner_;     // dossier de projet qui le contient ("" = dossier de travail)
     void drawConversationArea();              // ConversationView.cpp
     void drawConversation(OpenConversation& oc);
     void drawEntry(OpenConversation& oc, int index, float width);
@@ -188,6 +220,9 @@ private:
     void drawOrchestratorStatus();
     void drawOrchestratorBudgetCard(bool subscription);
     void drawBudgetGauge(double fraction, double tolerance, float width, float height);
+    // Session de 5 h du compte (0 → 100 %) : usage hors orchestration, part de l'orchestration, budget alloué, plafond.
+    void drawSessionBar(double used, double base, double spent, double allowance, double tolerance, double ceiling,
+                        float width, float height);
     void drawOrchestratorQuestion();
     void drawOrchestratorPauseNote();  // pause décidée par l'orchestrateur (@@PAUSE)
     void drawOrchestratorSettings();
@@ -289,8 +324,51 @@ private:
     ws::Folder* orchProjectFolder();
     int indexOfConversation(const std::string& id) const;
 
+    // --- Énergie (préréglages : App.cpp ; interface : ConfigPanel.cpp) ---
+    void tickEnergy(bool force = false);      // source d'alimentation (mode automatique) et préréglage appliqué
+    void setEnergyMode(int mode);             // choix de l'utilisateur (menu, carte)
+    void drawEnergyPresets();                 // cartes de préréglages (ConfigPanel.cpp)
+    int energyApplied_ = -1;                  // préréglage fixe actuellement appliqué (-1 : aucun / personnalisé)
+    double energyChecked_ = -1e9;
+    bool onBattery_ = false, hasBattery_ = false;
+    int batteryPct_ = -1, batterySecs_ = -1;
+
+    // --- Connexion au compte Claude (LoginPanel.cpp) ---
+    void checkAuth();                         // `claude auth status` en arrière-plan
+    void tickAuth();                          // suit la vérification et la connexion en cours
+    void drawLoginWindow();
+    void openLogin(const std::string& reason = {});
+    void startLogin(bool console);            // `claude auth login` dans une fenêtre de terminal
+    void onAuthError(claude::ClaudeSession& s);
+    void onLoggedIn();
+    bool orchManages(const std::string& convId) const;  // conversation reprise par l'orchestrateur lui-même
+    std::vector<OpenConversation*> authFailedConversations(bool excludeOrch);
+    int resendAuthFailed();                   // renvoie les messages restés sans réponse ; renvoie leur nombre
+    void drawAuthErrorCard(OpenConversation& oc, int index, float width);  // ConversationView.cpp
+    void drawAuthStatusBadge();               // barre d'état (AppMenus.cpp)
+    claude::AuthStatus auth_;
+    std::unique_ptr<claude::AuthChecker> authCheck_;
+    double authLastCheck_ = -1e9;
+    bool authProblem_ = false;                // un envoi a échoué faute de connexion depuis la dernière connexion réussie
+    std::string authReason_;                  // message d'erreur qui a ouvert la fenêtre
+    bool showLogin_ = false, focusLogin_ = false;
+    std::unique_ptr<claude::TerminalProcess> loginTerm_;
+    double loginStartedAt_ = -1;              // < 0 : aucune connexion en cours
+    int64_t loginBaseline_ = 0;               // expiresAt avant la connexion (détecte une connexion neuve)
+    std::string loginBaselineEmail_;
+    bool loginJustSucceeded_ = false;
+    bool loginTermExited_ = false;            // la fenêtre de terminal s'est fermée (connexion finie ou abandonnée)
+    std::string loginError_;
+    bool orchPausedForAuth_ = false;
+
     // --- Designer (DesignerPanel.cpp) : projet + équipe d'agents + orchestrateur conçus à partir d'une description ---
     void drawDesignerPage();
+    // Carte de choix d'un type de projet (Designer, accueil) ; renvoie true au clic.
+    bool drawKindCard(claude::ProjectKind k, bool selected, float width, float height);
+    float kindCardHeight(float width);                 // hauteur commune des cartes pour cette largeur
+    void openDesignerFor(claude::ProjectKind k);       // Designer, étape « Décrire », type présélectionné
+    void askQuestion(const std::string& question);     // « Juste une question » : conversation dans Divers
+    std::string designerQuestion_;
     void designerRun(bool refine);  // conception (ou questions de clarification), ou affinage de la conception actuelle
     void designerCancel();
     void designerCreate();          // projet cowork, thèmes, fichiers de départ, orchestrateur réglé
@@ -403,6 +481,7 @@ private:
 
     // Nouveau projet
     std::string npName_, npCwd_, npFolders_ = "Code, Infra, Docs, Idées";
+    std::string npKind_ = "software";    // type du projet à créer (claude/ProjectKind)
 
     // Import d'historique
     std::vector<claude::HistoryProject> histProjects_;

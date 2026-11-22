@@ -130,7 +130,7 @@ void App::drawPageSwitch() {
         return r;
     };
     if (pageButton("Cockpit", page_ == 0 && !dash_)) page_ = 0;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Page principale : conversations, espace de travail, usage, configuration (Ctrl+1)");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Page principale : conversations, projets, usage, configuration (Ctrl+1)");
     std::string lbl = "Tableau de bord";
     if (working) lbl += "  ● " + std::to_string(working);
     if (attention) lbl += "  ⚠ " + std::to_string(attention);
@@ -242,7 +242,7 @@ void App::drawDashboard(bool detached) {
         OpenConversation* oc = newConversation(nullptr);
         oc->focusDashDraft = true;
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Créée dans le dossier sélectionné de l'espace de travail (ou « Divers »)");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Créée dans le dossier sélectionné du panneau Projets (ou « Divers »)");
     ImGui::SameLine();
     ImGui::TextDisabled("Afficher :");
     ImGui::SameLine();
@@ -291,7 +291,7 @@ void App::drawDashboard(bool detached) {
         ImGui::Dummy(ImVec2(0, fs));
         ImGui::TextColored(pal.dim, "Aucune conversation ouverte.");
         ImGui::TextWrapped("Le tableau de bord montre toutes les conversations ouvertes dans des onglets. Ouvrez-en "
-                           "depuis l'espace de travail (double-clic), ou créez-en une avec le bouton ci-dessus : vous "
+                           "depuis le panneau Projets (double-clic), ou créez-en une avec le bouton ci-dessus : vous "
                            "pourrez lancer plusieurs tâches en parallèle et les suivre d'ici.");
     }
     // Tri : ce qui demande votre attention d'abord.

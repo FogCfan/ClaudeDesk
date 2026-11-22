@@ -1743,3 +1743,56 @@ TEST_CASE("vérification visuelle : captures et agents équipés du navigateur")
     REQUIRE(q.settings.browserAgents.size() == 1);
     CHECK(q.settings.browserAgents[0] == "03 Check");
 }
+
+TEST_CASE("orchestrateur : usage consommé ailleurs après la fin, puis budget recalculé") {
+    // Cas réel : orchestration terminée à 19 % de la session ; l'usage monte à 28 % ailleurs. La zone de budget
+    // partait encore de 19 %, au milieu de ce qui était déjà consommé, et la limite figée (5 %) d'une relance
+    // précédente restait bloquée, le bouton « Relancer » étant grisé (rien de consommé).
+    FakeHost h;
+    h.sub = true;
+    h.usage = 0.19;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.sessionShare = 0.5;
+    o.settings.usagePause = 0.90;
+    REQUIRE(o.start(h));
+    CHECK(o.windowBase == doctest::Approx(0.19));
+    // Une relance alors que le reste était faible fige la limite à 5 %.
+    h.usage = 0.80;
+    o.tick(h);  // le cerveau travaille : consommé par l'orchestration
+    o.resetBudget(h);
+    CHECK(o.budgetOverridden());
+    double frozen = o.sessionAllowance();
+    CHECK(frozen == doctest::Approx(0.90 - 0.80));  // limite gardée, plafonnée par ce qui reste
+    // Fin de l'orchestration
+    h.answer("brain", "@@TERMINE\nFini.\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::Finished);
+    // Même session de 5 h : l'usage monte ailleurs pendant que l'orchestration est terminée.
+    h.t += 600;
+    h.usage = 0.85;
+    o.tick(h);  // terminée : l'écart est reporté sur l'usage hors orchestration
+    CHECK(o.windowBase == doctest::Approx(0.85));
+    CHECK(o.windowSpent == doctest::Approx(0.0));
+    // Rien de consommé depuis la relance : « Relancer » revient à la part du niveau sur ce qui reste.
+    o.resetBudget(h);
+    CHECK_FALSE(o.budgetOverridden());
+    CHECK(o.sessionAllowance() == doctest::Approx(0.5 * (0.90 - 0.85)));
+}
+
+TEST_CASE("orchestrateur : la reprise après une pause ne perd pas l'usage consommé ailleurs") {
+    FakeHost h;
+    h.sub = true;
+    h.usage = 0.20;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.sessionShare = 0.5;
+    o.settings.usagePause = 0.90;
+    REQUIRE(o.start(h));
+    o.pause("test");
+    h.usage = 0.30;  // pas de tick pendant la pause : la mesure n'a pas été suivie
+    o.resume(h);
+    CHECK(o.windowBase == doctest::Approx(0.30));
+    CHECK(o.windowSpent == doctest::Approx(0.0));
+    CHECK(o.sessionAllowance() == doctest::Approx(0.5 * (0.90 - 0.30)));
+}

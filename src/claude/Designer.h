@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include "claude/Orchestrator.h"
+#include "claude/ProjectKind.h"
 
 namespace claude {
 
@@ -26,12 +27,13 @@ struct DesignAgent {
 };
 
 struct ProjectDesign {
+    std::string kind = "software";  // type de projet (claude/ProjectKind) : software, concept, data, document, hybrid
     std::string name;
     std::string summary;      // 2–4 phrases, choix faits par le designer compris
-    std::vector<std::string> stack;
+    std::vector<std::string> stack;  // technologies (logiciel) ou outils et formats (autres types)
     std::string objective;    // objectif de l'orchestrateur : livrable, critères d'acceptation, priorités
     std::vector<std::string> milestones;
-    std::string conventions;  // build, tests, style (Markdown court)
+    std::string conventions;  // règles de travail : build, tests, style (code) ; ton, public, structure (documents)
     std::vector<DesignAgent> agents;
     std::string budget = "medium";  // low | medium | high | max
     bool visualChecks = true;
@@ -50,6 +52,7 @@ struct DesignQuestion {
 };
 
 struct DesignRequest {
+    std::string kind = "auto";  // type choisi par l'humain (« auto » : le designer détermine)
     std::string description;
     std::string folder;        // dossier de travail visé (existant ou à créer) ; vide = à décider
     bool analyzeFolder = false;
@@ -123,6 +126,7 @@ struct DesignerDraft {
     void fromJson(const nlohmann::json& j);
 };
 
-ProjectDesign demoDesign();  // conception d'exemple (captures de test, bouton « Exemple »)
+// Conception d'exemple (captures de test) : logiciel, ou rapport d'audit pour ProjectKind::Document.
+ProjectDesign demoDesign(ProjectKind kind = ProjectKind::Software);
 
 }  // namespace claude

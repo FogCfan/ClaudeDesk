@@ -216,4 +216,64 @@ std::vector<ProcessLine> Process::poll() {
     return out;
 }
 
+// --- TerminalProcess -------------------------------------------------------------------------------------------
+
+namespace {
+std::string shellQuote(const std::string& s) {
+    std::string r = "'";
+    for (char c : s) r += c == '\'' ? std::string("'\''") : std::string(1, c);
+    return r + "'";
+}
+std::string appleScriptString(const std::string& s) {
+    std::string r = "\"";
+    for (char c : s) {
+        if (c == '"' || c == '\') r += '\';
+        r += c;
+    }
+    return r + "\"";
+}
+}  // namespace
+
+TerminalProcess::~TerminalProcess() = default;
+
+bool TerminalProcess::start(const std::string& exe, const std::vector<std::string>& args, const std::string& /*title*/) {
+    error_.clear();
+    exitCode_ = -1;
+    std::string cmd = shellQuote(exe);
+    for (auto& a : args) cmd += " " + shellQuote(a);
+    std::vector<std::string> argv;
+#ifdef __APPLE__
+    argv = {"osascript", "-e", "tell application \"Terminal\" to do script " + appleScriptString(cmd),
+            "-e", "tell application \"Terminal\" to activate"};
+#else
+    argv = {"x-terminal-emulator", "-e", "sh", "-c", cmd + " || { echo; echo 'Échec : lisez le message ci-dessus.'; read r; }"};
+#endif
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        error_ = std::string("fork a échoué : ") + std::strerror(errno);
+        return false;
+    }
+    if (pid == 0) {
+        ::setsid();
+        std::vector<char*> cargv;
+        for (auto& a : argv) cargv.push_back(a.data());
+        cargv.push_back(nullptr);
+        ::execvp(cargv[0], cargv.data());
+        ::_exit(127);
+    }
+    // osascript rend la main tout de suite : la commande elle-même n'est pas suivie. On récupère juste le lanceur.
+    int status = 0;
+    for (int i = 0; i < 50 && ::waitpid(pid, &status, WNOHANG) == 0; ++i) ::usleep(20000);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+        error_ = "Impossible d'ouvrir une fenêtre de terminal (" + argv[0] + " introuvable)";
+        return false;
+    }
+    pid_ = -1;
+    return true;
+}
+
+bool TerminalProcess::running() const { return false; }
+
+bool TerminalProcess::tracked() const { return false; }
+
 }  // namespace claude

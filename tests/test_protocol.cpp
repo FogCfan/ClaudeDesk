@@ -44,7 +44,7 @@ TEST_CASE("appel d'outil, résultat et demande de permission") {
     s.handleLine(R"({"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"C:\\tmp\\a.txt","content":"hi"}}]},"parent_tool_use_id":null})");
     REQUIRE(s.entries.size() == 1);
     CHECK(s.entries[0].kind == EntryKind::ToolUse);
-    CHECK(s.entries[0].text == "Write · C:\\tmp\\a.txt");
+    CHECK(s.entries[0].text == "Création · C:\\tmp\\a.txt");  // nom de l'outil en clair
 
     s.handleLine(R"({"type":"control_request","request_id":"req-9","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"C:\\tmp\\a.txt","content":"hi"},"permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"tool_use_id":"toolu_1"}})");
     REQUIRE(s.permissions.size() == 1);

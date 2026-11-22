@@ -160,7 +160,8 @@ void App::drawPermissionPanel(OpenConversation& oc) {
     } else {
         // --- Autorisation d'un outil ---
         ImGui::PushFont(fontBold, 0.0f);
-        ImGui::TextColored(pal.warn, "Claude demande l'autorisation : %s", p.toolName.c_str());
+        ImGui::TextColored(pal.warn, "Claude demande l'autorisation de %s", claude::toolAction(p.toolName).c_str());
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Outil : %s", p.toolName.c_str());
         ImGui::PopFont();
         if (!p.description.empty() && p.description != p.toolName) {
             ImGui::SameLine();

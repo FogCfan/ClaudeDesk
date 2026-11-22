@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "claude/ProjectKind.h"
 #include "util/Strings.h"
 
 namespace claude {
@@ -745,7 +746,27 @@ void Orchestrator::beginWindow(double usage) {
     changed = true;
 }
 
+void Orchestrator::absorbUntracked(OrchestratorHost& h) {
+    double u = h.utilization("five_hour");
+    if (u < 0 || windowBase < 0) return;
+    if (lastFiveHour_ >= 0 && u > lastFiveHour_ + 1e-9) {
+        windowBase += u - lastFiveHour_;  // consommé hors orchestration (elle ne travaillait pas)
+        changed = true;
+    }
+    if (lastFiveHour_ < 0 || u > lastFiveHour_) lastFiveHour_ = u;
+    // (une baisse est laissée à trackUsage : nouvelle session de 5 h ou bruit de mesure)
+}
+
 void Orchestrator::resetBudget(OrchestratorHost& h) {
+    if (subscription && windowSpent <= 1e-9 && budgetOverridden()) {
+        // Rien de consommé depuis la dernière relance : on revient à la part normale du niveau.
+        absorbUntracked(h);
+        allowanceOverride_ = -1;
+        finalRequested_ = false;
+        changed = true;
+        addLog(&h, "Budget recalculé : " + pct(sessionAllowance()) + " de la fenêtre (part du niveau sur ce qui reste).", true);
+        return;
+    }
     if (subscription) {
         double keep = sessionAllowance();  // la limite actuelle est conservée…
         double u = h.utilization("five_hour");
@@ -884,7 +905,7 @@ int64_t Orchestrator::cacheTtlSeconds() const {
 }
 
 std::string Orchestrator::brainPrompt() const {
-    std::string p = systemPrompt(settings.brainReadOnly, settings.allowNewAgents, settings.visualChecks);
+    std::string p = systemPrompt(settings.brainReadOnly, settings.allowNewAgents, settings.visualChecks, settings.projectKind);
     if (!settings.browserAgents.empty()) {
         p += "\n\n## Agents équipés du navigateur (🌐)\n";
         for (auto& a : settings.browserAgents) p += "- " + a + "\n";
@@ -897,14 +918,17 @@ bool Orchestrator::isBrowserAgent(const std::string& agent) const {
     return std::find(settings.browserAgents.begin(), settings.browserAgents.end(), agent) != settings.browserAgents.end();
 }
 
-std::string Orchestrator::systemPrompt(bool brainReadOnly, bool canCreateAgents, bool visualChecks) {
+std::string Orchestrator::systemPrompt(bool brainReadOnly, bool canCreateAgents, bool visualChecks,
+                                      const std::string& projectKind) {
+    const ProjectKind kind = projectKindFromId(projectKind);
+    const std::string folder = projectFolderWord(kind);
     std::string role = brainReadOnly
-        ? "Tu ne développes pas toi-même : tu planifies, tu délègues, tu contrôles et tu décides de la suite. Tes outils sont en "
+        ? "Tu ne réalises pas le travail toi-même : tu planifies, tu délègues, tu contrôles et tu décides de la suite. Tes outils sont en "
           "LECTURE SEULE (Read, Glob, Grep) : tu ne lances ni tests, ni build, ni commandes. Pour exécuter une vérification, "
           "confie-la à un agent (souvent haiku, effort low : « lance X, rends le résultat en 5 lignes »), ou exige dans la "
           "tâche elle-même la preuve (commande lancée + résultat résumé)."
-        : "Tu ne développes pas toi-même : tu planifies, tu délègues, tu vérifies et tu décides de la suite. Tu peux lire le "
-          "dépôt et lancer des commandes de vérification (tests, build) pour contrôler le travail rapporté — avec parcimonie : "
+        : "Tu ne réalises pas le travail toi-même : tu planifies, tu délègues, tu vérifies et tu décides de la suite. Tu peux lire le "
+          "dossier et lancer des commandes de vérification (tests, build) pour contrôler le travail rapporté — avec parcimonie : "
           "tu es le modèle le plus coûteux et chaque sortie reste dans ton contexte.";
     std::string verify = brainReadOnly
         ? "- ClaudeDesk te transmet les comptes rendus des agents (au fil de l'eau, puis quand toute l'équipe a fini). Contrôle-les "
@@ -913,7 +937,7 @@ std::string Orchestrator::systemPrompt(bool brainReadOnly, bool canCreateAgents,
         : "- ClaudeDesk te transmet les comptes rendus des agents (au fil de l'eau, puis quand toute l'équipe a fini). Vérifie "
           "l'essentiel avant de considérer une étape comme faite ; renvoie une correction si besoin.";
     std::string p = R"(# Rôle : ORCHESTRATEUR (piloté par ClaudeDesk)
-Tu coordonnes des agents spécialisés. Chaque agent est une conversation Claude Code distincte, dans le même dépôt, avec son propre rôle (décrit dans les notes de son dossier). @@ROLE@@
+Tu coordonnes des agents spécialisés. Chaque agent est une conversation Claude Code distincte, dans le même @@FOLDER@@, avec son propre rôle (décrit dans les notes de son dossier). @@ROLE@@
 
 ## Protocole (obligatoire)
 Termine CHAQUE réponse à un message de ClaudeDesk par un ou plusieurs blocs de directives, chaque marqueur seul sur sa ligne :
@@ -971,8 +995,8 @@ marge pour les imprévus et les vérifications.
 Indique-les pour CHAQUE délégation (« | modele=… effort=… ») et choisis le plus économique qui suffit — la majorité des
 tâches d'un projet ne demandent pas le modèle le plus puissant :
 - haiku, effort low/medium : tâches mécaniques (renommage, documentation, mise en forme, vérification simple) ;
-- sonnet, effort medium/high : développement courant, tests, intégration ;
-- opus, effort high : conception, architecture, débogage difficile, sujets mal connus ;
+- sonnet, effort medium/high : travail courant (développement, rédaction, analyse, tests) ;
+- opus, effort high : conception, architecture, raisonnement délicat, débogage difficile, sujets mal connus ;
 - fable ou effort xhigh/max : seulement si une tentative plus économique a échoué.
 Les modèles autorisés et le budget rappelés par ClaudeDesk sont des limites, pas des consignes d'utilisation ; plus la
 fin du budget approche, plus tu économises.
@@ -980,7 +1004,7 @@ fin du budget approche, plus tu économises.
 ## Économie de contexte (ce qui coûte vraiment)
 Chaque appel d'outil d'un agent relit TOUT son contexte : une tâche de 100 appels sur 200 k jetons coûte bien plus que
 trois tâches nettes de 30 appels. ClaudeDesk indique sous chaque compte rendu les appels et le contexte consommés.
-- Des tâches ciblées : donne les chemins de fichiers et le critère de fin, pour que l'agent n'explore pas tout le dépôt.
+- Des tâches ciblées : donne les chemins de fichiers et le critère de fin, pour que l'agent n'explore pas tout le @@FOLDER@@.
   Une tâche qui dépasse ~60 appels est trop grosse : redécoupe la suite.
 - Garde le même modèle pour un agent quand c'est possible : changer le modèle (ou l'effort) d'une conversation déjà
   chargée oblige ClaudeDesk à repartir d'une conversation neuve (récap), le cache étant propre au modèle. Regroupe les
@@ -994,12 +1018,14 @@ Une seule question par bloc @@HUMAIN ; pour plusieurs questions, écris plusieur
 
 @@TEAM@@
 
+@@KIND@@
+
 ## Règles
 - Plusieurs @@DELEGUER vers des agents différents s'exécutent en parallèle : ne parallélise que des tâches indépendantes. Un agent ne reçoit qu'une tâche à la fois.
 - L'agent ne voit PAS cette conversation : donne-lui tout le contexte nécessaire dans la tâche.
 @@VERIFY@@
 - Découpe en étapes de taille raisonnable : une tâche ≈ un livrable vérifiable.
-- @@HUMAIN pour : décision majeure non tranchée, information manquante, action irréversible ou externe (commit, push, publication, achat, matériel physique). Ne demande jamais de commit ou de push aux agents.
+- @@HUMAIN pour : décision majeure non tranchée, information manquante, action irréversible ou externe (envoi, publication, commit, push, achat, matériel physique). Ne demande jamais de commit, de push ni d'envoi aux agents.
 - @@TERMINE seulement quand l'objectif est atteint et vérifié, ou quand ClaudeDesk annonce le budget épuisé.
 - En réponse à ClaudeDesk, sans directive, l'orchestration ne peut pas avancer.)";
     std::string team = canCreateAgents
@@ -1020,12 +1046,12 @@ Pourquoi : <le besoin, pourquoi aucun agent actuel ne le couvre, ce que ce nouve
   révise alors ta proposition et soumets-la de nouveau). Les autres agents peuvent continuer pendant ce temps.
 - Une tâche ponctuelle ne justifie pas un agent : confie-la à l'agent le plus proche. Chaque agent ajoute un contexte
   fixe et de la coordination.
-- Si le dépôt tient des fiches d'agents (ex. docs/agents/), fais-y ajouter la sienne une fois l'agent créé.)"
+- Si le dossier tient des fiches d'agents (ex. docs/agents/), fais-y ajouter la sienne une fois l'agent créé.)"
         : "## Équipe\nL'équipe est fixée par l'humain : tu ne peux pas créer d'agent. Si un besoin durable n'est couvert par "
           "aucun agent, signale-le (@@HUMAIN) en proposant le rôle à créer.";
     if (visualChecks)
         verify += "\n- Vérification VISUELLE : pour tout livrable visible (interface, page web, graphique, rendu), exige dans la "
-                  "tâche une capture PNG enregistrée dans `_captures/` à la racine du dépôt, que l'agent examine lui-même et "
+                  "tâche une capture PNG enregistrée dans `_captures/` à la racine du @@FOLDER@@, que l'agent examine lui-même et "
                   "dont il donne le chemin. Tu peux ouvrir une capture avec Read (les images s'affichent) pour juger "
                   "toi-même : ~1,5 k jetons par image, réserve-le aux livrables visuels importants ou douteux. Pour une page "
                   "web, confie la vérification à un agent équipé du navigateur (repéré « 🌐 navigateur » dans la liste des "
@@ -1033,6 +1059,8 @@ Pourquoi : <le besoin, pourquoi aucun agent actuel ne le couvre, ce que ce nouve
     util::replaceAll(p, "@@ROLE@@", role);
     util::replaceAll(p, "@@VERIFY@@", verify);
     util::replaceAll(p, "@@TEAM@@", team);
+    util::replaceAll(p, "@@KIND@@", orchestratorKindGuidance(kind));
+    util::replaceAll(p, "@@FOLDER@@", folder);
     return p;
 }
 
@@ -1054,29 +1082,38 @@ std::string Orchestrator::firstMessage(const std::vector<AgentInfo>& agents, con
         m += "Équipe de " + std::to_string(agents.size()) + " agents" +
              (settings.maxAgents > 0 ? " (au plus " + std::to_string(settings.maxAgents) + ")" : std::string()) +
              " : tu peux proposer un nouvel agent (@@NOUVEL_AGENT), soumis à l'accord de l'humain.\n";
-    m += "\nUtilise exactement les noms ci-dessus dans @@DELEGUER. Commence par examiner l'état du dépôt (plan, "
-         "documentation, code existant), puis donne tes premières directives.";
+    const ProjectKind kind = projectKindFromId(settings.projectKind);
+    m += std::string("\nUtilise exactement les noms ci-dessus dans @@DELEGUER. Commence par examiner l'état du ") +
+         projectFolderWord(kind) +
+         (kind == ProjectKind::Software ? " (plan, documentation, code existant)"
+                                        : " (plan, documents, données ou code déjà présents)") +
+         ", puis donne tes premières directives.";
     return m;
 }
 
-static std::string taskMessage(const OrchTask& t, bool visualChecks, bool browser) {
+static std::string taskMessage(const OrchTask& t, bool visualChecks, bool browser, ProjectKind kind) {
+    const std::string folder = projectFolderWord(kind);
+    const bool code = kind == ProjectKind::Software || kind == ProjectKind::Hybrid || kind == ProjectKind::Data;
     std::string visual;
     if (visualChecks)
         visual = "Si la tâche change quelque chose de visible (interface, page, graphique), fais-en une capture PNG dans "
-                 "`_captures/` à la racine du dépôt (crée le dossier au besoin, avec un `.gitignore` contenant `*`), "
+                 "`_captures/` à la racine du " + folder + " (crée le dossier au besoin, avec un `.gitignore` contenant `*`), "
                  "nommée d'après la tâche ; examine-la toi-même avec Read et donne son chemin dans **Vérifié**. " +
                  std::string(browser ? "Tu disposes du navigateur (outils Claude in Chrome) : pour une page web, ouvre-la, "
                                        "vérifie le rendu et la console, puis capture-la.\n"
                                      : "Utilise l'option de capture du projet s'il en a une.\n");
     return "[Tâche de l'orchestrateur — cycle " + std::to_string(t.cycle) + "]\n\n" + t.task +
            "\n\n---\nTravaille en autonomie jusqu'au bout de cette tâche (pas de question à l'humain sauf décision "
-           "irréversible ; ni commit ni push).\n"
-           "Économise ton contexte (chaque appel d'outil relit toute la conversation) : limite les sorties de commandes "
-           "(`| tail -n 30`, `grep`, options silencieuses), lis les fichiers par parties utiles, évite les boucles d'essais "
-           "à l'aveugle. Si la tâche s'avère bien plus grosse que prévu, livre une étape propre et arrête-toi : "
+           "irréversible ; ni commit, ni push, ni envoi).\n" +
+           std::string(code ? "Économise ton contexte (chaque appel d'outil relit toute la conversation) : limite les sorties de "
+                              "commandes (`| tail -n 30`, `grep`, options silencieuses), lis les fichiers par parties utiles, "
+                              "évite les boucles d'essais à l'aveugle."
+                            : "Économise ton contexte (chaque appel d'outil relit toute la conversation) : lis les documents "
+                              "par parties utiles, n'ouvre que ce qui sert la tâche.") +
+           " Si la tâche s'avère bien plus grosse que prévu, livre une étape propre et arrête-toi : "
            "l'orchestrateur redécoupera la suite.\n" + visual +
-           "Termine par un compte rendu de 15 lignes au plus, sans journaux ni code recopiés : **Fait**, **Vérifié** "
-           "(commande + résultat en une ligne), **Fichiers**, **Reste / bloquant**.";
+           "Termine par un compte rendu de 15 lignes au plus, sans journaux ni contenu recopiés : **Fait**, **Vérifié** "
+           "(" + taskVerifyHint(kind) + "), **Fichiers**, **Reste / bloquant**.";
 }
 
 int Orchestrator::tasksInFlight() const {
@@ -1521,7 +1558,7 @@ void Orchestrator::resume(OrchestratorHost& h) {
     if (!exhausted()) finalRequested_ = false;  // budget relevé : on repart normalement
     if (!brainConvId.empty()) h.ensureOpen(brainConvId);
     reviveTasks(h);
-    lastFiveHour_ = h.utilization("five_hour");
+    absorbUntracked(h);  // usage consommé ailleurs pendant la pause : il ne revient pas à l'orchestration
     state = to;
     changed = true;
     addLog(&h, "Reprise.", true);
@@ -1633,6 +1670,7 @@ void Orchestrator::tick(OrchestratorHost& h) {
         addLog(&h, "Abonnement détecté : le budget devient une part du quota de 5 h.", true);
     }
     if (state != OrchState::Idle && state != OrchState::Finished) trackUsage(h);
+    else if (state == OrchState::Finished && subscription) absorbUntracked(h);  // affichage et reprise à jour
     // L'équipe avance indépendamment du cerveau : on relève les tâches terminées et on envoie celles en file,
     // qu'il réfléchisse, attende une réponse humaine ou attende les agents.
     if (canDispatch()) {
@@ -1962,7 +2000,7 @@ void Orchestrator::dispatch(OrchestratorHost& h) {
         t.writeAtSend = st.cacheWriteTokens;
         t.outAtSend = st.outputTokens;
         const bool browser = isBrowserAgent(t.agent);
-        if (!h.send(id, taskMessage(t, settings.visualChecks, browser),
+        if (!h.send(id, taskMessage(t, settings.visualChecks, browser, projectKindFromId(settings.projectKind)),
                     SendOptions{settings.workerMode, model, effort, settings.leanAgents, browser})) {
             t.done = t.failed = true;
             t.report = "Envoi impossible (Claude Code introuvable ?).";
@@ -2162,7 +2200,7 @@ json Orchestrator::toJson() const {
               {"rollingReports", s.rollingReports},
               {"allowNewAgents", s.allowNewAgents},
               {"maxAgents", s.maxAgents},
-              {"visualChecks", s.visualChecks},
+              {"visualChecks", s.visualChecks}, {"projectKind", s.projectKind},
               {"browserAgents", s.browserAgents},
               {"workerMode", s.workerMode},
               {"brainMode", s.brainMode},
@@ -2241,6 +2279,7 @@ void Orchestrator::fromJson(const json& j) {
     st.allowNewAgents = s.value("allowNewAgents", st.allowNewAgents);
     st.maxAgents = std::max(0, s.value("maxAgents", st.maxAgents));
     st.visualChecks = s.value("visualChecks", st.visualChecks);
+    st.projectKind = s.value("projectKind", st.projectKind);
     st.browserAgents.clear();
     if (s.contains("browserAgents") && s["browserAgents"].is_array())
         for (auto& a : s["browserAgents"])

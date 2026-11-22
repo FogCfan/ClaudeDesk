@@ -6,7 +6,7 @@ vos réglages, CLAUDE.md, MCP, skills, hooks et votre abonnement s'appliquent
 exactement comme dans le terminal.
 
 En plus d'un vrai éditeur et du suivi en direct de l'usage, ClaudeDesk range le travail en
-**projets › thèmes › conversations** (mode cowork) et peut faire travailler une **équipe d'agents**
+**projets › thèmes › conversations** (panneau **Projets**) et peut faire travailler une **équipe d'agents**
 sur un objectif grâce à l'**orchestrateur** (page 3), dans un budget que vous fixez.
 
 Windows (MSYS2 UCRT64) et macOS (Homebrew) ; ClaudeDesk est lui-même développé depuis ClaudeDesk.
@@ -35,7 +35,7 @@ brew install cmake ninja sdl3 nlohmann-json freetype
 
 `claude` est cherché dans le PATH du shell de connexion (récupéré au démarrage, même lancé
 depuis le Finder), puis dans `~/.local/bin`, `/opt/homebrew/bin` et `/usr/local/bin`.
-Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/Documents/ClaudeDesk`.
+Réglages : `~/Library/Application Support/ClaudeDesk` ; projets : `~/Documents/ClaudeDesk`.
 
 ## Fonctionnalités
 
@@ -92,14 +92,22 @@ Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/
 - **Modèle** (liste fournie par le CLI), modèle de secours, **effort** (low → max), style de sortie.
 - **Mode** de permission (Normal, Accepter les modifs, Auto, Plan, Ne pas demander, Sans permissions).
 - **Outils** : disponibles / toujours autorisés / interdits, règles fines (`Bash(git *)`…).
-- **Prompt système** : ajouter ou remplacer, modèles réutilisables, aperçu du contexte cowork.
+- **Prompt système** : ajouter ou remplacer, modèles réutilisables, aperçu de la mémoire du projet injectée.
 - **Avancé** : dossiers supplémentaires (`--add-dir`), budget max, options libres.
-- **Application** : chemin de Claude Code, espace de travail, thème, taille du texte…
+- **Application** : chemin de Claude Code, dossier des projets, thème, taille du texte…
 
 Le modèle et le mode changent **à chaud**. Les autres réglages relancent la session en
 arrière-plan avec `--resume` : l'historique est conservé.
 
 ### Graphismes et fluidité (Configuration › Graphismes)
+- **Mode d'énergie** (aussi dans *Affichage › Mode d'énergie*), en un clic :
+  - **Automatique** (défaut) : Performance sur secteur, Économie dès que le portable passe sur batterie
+    (les deux réglables) ; une notification signale chaque bascule.
+  - **Performance** : rendu continu à la fréquence de l'écran, toutes les animations.
+  - **Équilibré** : ne redessine que s'il se passe quelque chose, 30 i/s en arrière-plan.
+  - **Économie de batterie** : 30 i/s maximum, 10 i/s en arrière-plan ou fenêtre réduite, sans animations ni
+    halos, rendu au repos (≈ 6 i/s quand rien ne bouge).
+  Modifier un réglage de détail fait passer en **Personnalisé**. La barre d'état rappelle le mode économe.
 - **Cadence** : synchronisée sur l'écran (VSync, défaut), limite personnalisée (30 → 480 i/s) ou illimitée.
   L'interface est redessinée en continu : les animations restent fluides même au repos (mode économie
   d'énergie optionnel, et 30 i/s en arrière-plan si souhaité). Une image coûte ~0,5 ms (≈ 2 000 i/s en illimité).
@@ -113,8 +121,28 @@ arrière-plan avec `--resume` : l'historique est conservé.
   relance automatique ; la carte graphique dédiée est demandée sur les portables hybrides. Compteur
   d'images/seconde optionnel dans la barre d'état.
 
-### Mode cowork : projets › thèmes › conversations
-L'espace de travail est une **vraie arborescence de dossiers** (par défaut `Documents\ClaudeDesk`) :
+### Pour tous les projets, pas seulement le code
+ClaudeDesk sert aussi bien à un développeur qu'à quelqu'un qui organise des idées, analyse des données ou rédige un
+audit. L'accueil propose deux entrées : **« Une question ? »** (Claude répond aussitôt, dans une conversation) et
+**« Démarrer un projet »**, par type :
+
+| Type | Livrable | Méthode de Claude |
+|---|---|---|
+| Idées et concept | documents structurés : options, décisions, plan | recherche, rédaction, relecture critique |
+| Analyse de données | chiffres vérifiés, graphiques, rapport | scripts Python reproductibles, données d'origine jamais modifiées |
+| Rapport, audit ou étude | document sourcé (Word/PDF) | plan validé d'abord, sources pour chaque fait, relecture croisée |
+| Logiciel ou application | programme testé | build, tests, captures |
+| Projet hybride | documents + réalisation | conception d'abord, puis réalisation |
+| Laisser Claude choisir | selon le projet | Claude détermine le type |
+
+Le type règle le **Designer** (équipe adaptée), l'**orchestrateur** (découpage, vérifications, livrables), les consignes
+des agents, la mémoire injectée dans les conversations du projet et le vocabulaire de l'interface (« dossier du
+projet » plutôt que « dépôt »…). Il se change dans l'Inspecteur du projet. Les actions de Claude s'affichent en clair
+(« Lecture », « Modification », « Commande », « Recherche web »…), et les autorisations aussi (« Claude demande
+l'autorisation de modifier un fichier »).
+
+### Projets : projets › thèmes › conversations
+Le panneau **Projets** montre une **vraie arborescence de dossiers** (par défaut `Documents\ClaudeDesk`) :
 
 ```
 ClaudeDesk\
@@ -130,6 +158,17 @@ ClaudeDesk\
   Divers\                        ← conversations rapides hors projet
   .corbeille\                    ← éléments supprimés
 ```
+
+Chaque élément a son **icône**, comme dans l'explorateur de VS Code (légende : bouton **?** du panneau) : projet
+(dossier orange), thème (dossier jaune), **agent** (robot : thème d'un projet orchestré), **orchestrateur**,
+conversation (bulle ; un point orange quand Claude travaille), fichiers (couleur selon le type : code, données,
+image, document).
+- **Dossier de travail** : sous chaque projet, l'explorateur du code (dossiers lourds comme `.git` ou
+  `node_modules` masqués) ; double-clic pour ouvrir un fichier, clic droit pour le **joindre à la conversation**,
+  aperçu des fichiers texte dans l'inspecteur.
+- **Fichiers de référence** : clic droit sur un dossier › *Ajouter des fichiers…*, ou glisser-déposer depuis
+  l'Explorateur sur un projet ou un thème. Ils sont copiés dans le dossier, et leur chemin est donné à Claude dans
+  les nouvelles conversations du dossier (« Documents de référence »).
 
 - Chaque conversation enregistre son transcript, ses stats, son **récap** et l'identifiant
   de session Claude Code. **Reprendre** = votre prochain message continue la session (`--resume`).
@@ -148,7 +187,7 @@ ClaudeDesk\
   (`~/.claude/projects`) s'importent dans un dossier et se reprennent telles quelles.
 
 ### Orchestrateur : une équipe d'agents sur un objectif
-Une conversation **« Orchestrateur »** (le cerveau), à la racine d'un projet cowork, pilote les conversations
+Une conversation **« Orchestrateur »** (le cerveau), à la racine d'un projet, pilote les conversations
 de ses thèmes : **chaque thème est un agent**, les notes du dossier décrivent son rôle. Ouverture : Ctrl+3,
 le bouton de page *Orchestrateur*, ou **Orchestrer…** dans l'inspecteur d'un projet.
 
@@ -192,7 +231,7 @@ le bouton de page *Orchestrateur*, ou **Orchestrer…** dans l'inspecteur d'un p
   La barre des tâches clignote.
 - **Contexte et cache maîtrisés** (chaque appel d'outil relit tout le contexte ; c'est là que part le quota) :
   avant d'envoyer un message, une conversation est récapitulée puis remplacée par une conversation neuve du
-  même thème (qui reçoit la mémoire cowork) si son contexte dépasse **120 k jetons** (seuil en jetons, pas en
+  même thème (qui reçoit la mémoire du projet) si son contexte dépasse **120 k jetons** (seuil en jetons, pas en
   % d'une fenêtre de 1 M), après 6 tâches, si son **cache a expiré** (≈ 1 h sous abonnement : reprendre
   froid réécrirait tout le contexte au prix fort), ou si l'on s'apprête à **changer son modèle ou son effort**
   (le cache est propre au modèle). Idem pour le cerveau, dont le message attend la fin du récap.
@@ -227,7 +266,7 @@ Page 4 (Ctrl+4, ou *Fichier › Concevoir un projet avec le Designer…*), en qu
    vérification visuelle) et une carte par agent (nom, mission, modèle/effort conseillés, navigateur, fiche de
    rôle). Tout s'édite à la main ; **Demander un changement** fait affiner par Claude (il garde vos
    modifications) ; **Version précédente** annule une génération. Points bloquants en rouge, conseils en orange.
-4. **Créer** : projet cowork + un thème par agent (fiche en notes, mission + modèle conseillé en tête pour le
+4. **Créer** : projet + un thème par agent (fiche en notes, mission + modèle conseillé en tête pour le
    résumé vu par l'orchestrateur), fichiers de départ dans le dépôt (`CLAUDE.md`, `docs/PLAN.md`,
    `docs/agents/*.md`, jamais d'écrasement), `_orchestrateur.json` réglé (niveau de budget, objectif + jalons,
    visuel, agents navigateur). Ouvre ensuite la page Orchestrateur ; démarrage immédiat en option.
@@ -251,7 +290,7 @@ captures : `--panel designer[:questions|:demo|:creer]`, `designer:creer!` crée 
   - *Mode d'emploi* : premiers pas, écran, éditeur, suivi de Claude, autorisations, configuration, usage,
     reprise/import, raccourcis ;
   - *Comprendre et bien utiliser* : les fonctionnalités non triviales, expliquées par le problème qu'elles
-    résolvent, quand elles servent et quand elles sont inutiles, avec exemples et pièges — le mode cowork
+    résolvent, quand elles servent et quand elles sont inutiles, avec exemples et pièges — les projets
     (pourquoi), organiser un projet, récaps/synthèses/contexte injecté, reprendre ou repartir, travailler en
     parallèle, doser l'autonomie et la réflexion (mode Plan, modes, effort, modèles, prompts), une journée type,
     FAQ. Chaque section a des boutons pour passer à la pratique.
@@ -297,7 +336,7 @@ src/
                               tâches, comptes rendus au fil de l'eau, budget, rotation
                Designer       conception projet + équipe : prompts, analyse JSON,
                               validation, fichiers de départ, réglages de l'orchestrateur
-  workspace/   Workspace      arborescence cowork sur disque + contexte injecté
+  workspace/   Workspace      arborescence des projets sur disque + contexte injecté
   app/         App (boucle SDL, actions), AppMenus, Settings
   ui/          ConversationView, PromptEditor, PermissionPanel, UsagePanel,
                ConfigPanel, WorkspacePanel, Dashboard (page 2 + fil d'activité),
