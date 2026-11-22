@@ -9,6 +9,43 @@ static std::string str(const nlohmann::json& j, const char* key) {
     return {};
 }
 
+std::string toolLabel(const std::string& name) {
+    if (name == "Read") return "Lecture";
+    if (name == "Write") return "Création";
+    if (name == "Edit" || name == "MultiEdit") return "Modification";
+    if (name == "NotebookEdit") return "Modification du notebook";
+    if (name == "Bash" || name == "PowerShell") return "Commande";
+    if (name == "Glob") return "Recherche de fichiers";
+    if (name == "Grep") return "Recherche dans les fichiers";
+    if (name == "WebFetch") return "Page web";
+    if (name == "WebSearch") return "Recherche web";
+    if (name == "Task" || name == "Agent") return "Sous-agent";
+    if (name == "TodoWrite") return "Liste de tâches";
+    if (name == "Skill") return "Savoir-faire";
+    if (name == "ExitPlanMode") return "Plan";
+    if (name == "AskUserQuestion") return "Question";
+    if (util::startsWith(name, "mcp__claude-in-chrome__")) return "Navigateur";
+    if (util::startsWith(name, "mcp__")) {  // mcp__serveur__outil → « serveur : outil »
+        std::string rest = name.substr(5);
+        size_t sep = rest.find("__");
+        return sep == std::string::npos ? rest : rest.substr(0, sep) + " : " + rest.substr(sep + 2);
+    }
+    return name;
+}
+
+std::string toolAction(const std::string& name) {
+    if (name == "Read") return "lire un fichier";
+    if (name == "Write") return "créer un fichier";
+    if (name == "Edit" || name == "MultiEdit" || name == "NotebookEdit") return "modifier un fichier";
+    if (name == "Bash" || name == "PowerShell") return "exécuter une commande";
+    if (name == "Glob" || name == "Grep") return "chercher dans vos fichiers";
+    if (name == "WebFetch") return "ouvrir une page web";
+    if (name == "WebSearch") return "faire une recherche sur le web";
+    if (name == "Task" || name == "Agent") return "lancer un sous-agent";
+    if (util::startsWith(name, "mcp__claude-in-chrome__")) return "utiliser le navigateur";
+    return "utiliser « " + toolLabel(name) + " »";
+}
+
 std::string toolSummary(const std::string& name, const nlohmann::json& in) {
     auto shortPath = [](std::string p) {
         auto pos = p.find_last_of("/\\");
@@ -40,7 +77,8 @@ std::string toolSummary(const std::string& name, const nlohmann::json& in) {
             }
     }
     detail = util::firstLine(detail, 90);
-    return detail.empty() ? name : name + " · " + detail;
+    std::string label = toolLabel(name);
+    return detail.empty() ? label : label + " · " + detail;
 }
 
 static const char* kindName(EntryKind k) {

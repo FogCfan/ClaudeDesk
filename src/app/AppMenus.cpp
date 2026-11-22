@@ -24,6 +24,7 @@ void App::drawMenuBar() {
     if (ImGui::BeginMenu("Fichier")) {
         if (ImGui::MenuItem("Nouvelle conversation", "Ctrl+N")) newConversation(nullptr);
         if (ImGui::MenuItem("Nouveau projet…")) openNewProject_ = true;
+        if (ImGui::MenuItem("Concevoir un projet avec le Designer…", "Ctrl+4")) page_ = 3;
         if (ImGui::MenuItem("Importer depuis Claude Code…")) {
             showHistory_ = true;
             histProjects_ = claude::listHistoryProjects();
@@ -34,7 +35,7 @@ void App::drawMenuBar() {
             settings_.save(settingsPath_);
         }
         if (ImGui::MenuItem("Exporter la conversation (Markdown)", nullptr, false, oc != nullptr)) exportMarkdown(*oc);
-        if (ImGui::MenuItem("Ouvrir le dossier de l'espace de travail")) util::openInShell(util::pathToUtf8(workspace_.root()));
+        if (ImGui::MenuItem("Ouvrir le dossier des projets")) util::openInShell(util::pathToUtf8(workspace_.root()));
         ImGui::Separator();
         if (ImGui::MenuItem("Quitter", "Alt+F4")) running_ = false;
         ImGui::EndMenu();
@@ -105,10 +106,11 @@ void App::drawMenuBar() {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Affichage")) {
-        ImGui::MenuItem("Espace de travail", nullptr, &showWorkspace_);
+        ImGui::MenuItem("Projets", nullptr, &showWorkspace_);
         ImGui::MenuItem("Inspecteur", nullptr, &showInspector_);
         ImGui::MenuItem("Usage", nullptr, &showUsage_);
         ImGui::MenuItem("Configuration", nullptr, &showConfig_);
+        if (ImGui::MenuItem("Compte Claude et connexion…")) openLogin();
         ImGui::MenuItem("Journal du CLI", nullptr, &showLog_);
         ImGui::Separator();
         if (ImGui::MenuItem("Cockpit", "Ctrl+1", page_ == 0 && !dash_)) page_ = 0;
@@ -121,7 +123,18 @@ void App::drawMenuBar() {
             else openDashboardWindow();
         }
         if (ImGui::MenuItem("Orchestrateur (agents automatiques)", "Ctrl+3", page_ == 2)) page_ = 2;
+        if (ImGui::MenuItem("Designer (concevoir un projet et son équipe)", "Ctrl+4", page_ == 3)) page_ = 3;
         ImGui::Separator();
+        if (ImGui::BeginMenu("Mode d'énergie")) {
+            for (int m : {EnergyAuto, EnergyPerformance, EnergyBalanced, EnergySaver}) {
+                if (ImGui::MenuItem(energyModeLabel(m), nullptr, settings_.energyMode == m)) setEnergyMode(m);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", energyModeSummary(m));
+            }
+            if (settings_.energyMode == EnergyCustom) ImGui::MenuItem("Personnalisé", nullptr, true, false);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Réglages détaillés…")) showConfig_ = true, configTab_ = 6;
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Thème")) {
             const char* themes[] = {"Sombre", "Clair", "Crépuscule"};
             for (int i = 0; i < 3; ++i)
@@ -173,11 +186,12 @@ void App::drawMenuBar() {
 
     // À droite : rappel de l'usage 5 h
     if (auto* w = usage_.find("five_hour")) {
+        const double used = w->current(util::nowUnix());
         char buf[64];
-        std::snprintf(buf, sizeof buf, "5 h : %d %%", (int)(w->utilization * 100 + 0.5));
+        std::snprintf(buf, sizeof buf, "5 h : %d %%", (int)(used * 100 + 0.5));
         float width = ImGui::GetFontSize() * 6;
         ImGui::SameLine(ImGui::GetWindowWidth() - width - 12);
-        ui::usageBar((float)w->utilization, buf, ImGui::GetTextLineHeight(), -1, "##mb5h");
+        ui::usageBar((float)used, buf, ImGui::GetTextLineHeight(), -1, "##mb5h");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Usage de la fenêtre de 5 h (détails dans le panneau Usage)");
         if (ImGui::IsItemClicked()) showUsage_ = true;
     }
@@ -242,6 +256,20 @@ void App::drawStatusBar() {
             if (claudeExe_.empty()) {
                 ImGui::Separator();
                 ImGui::TextColored(pal.err, "Claude Code introuvable");
+            } else {
+                drawAuthStatusBadge();
+            }
+            // Mode d'énergie économe : rappel discret (un clic ouvre les réglages)
+            if (energyApplied_ == EnergySaver || energyApplied_ == EnergyBalanced) {
+                ImGui::Separator();
+                std::string e = std::string(energyApplied_ == EnergySaver ? "Économie d'énergie" : "Énergie : équilibré") +
+                                (onBattery_ ? " · sur batterie" : "");
+                ImGui::PushStyleColor(ImGuiCol_Text, energyApplied_ == EnergySaver ? pal.ok : pal.dim);
+                if (ImGui::Selectable(e.c_str(), false, ImGuiSelectableFlags_None, ImGui::CalcTextSize(e.c_str())))
+                    showConfig_ = true, configTab_ = 6;
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Mode d'énergie : %s\nCliquez pour le changer.", energyModeLabel(settings_.energyMode));
             }
             if (settings_.showFps) {
                 char buf[96];
@@ -304,6 +332,8 @@ void App::drawShortcutTables() {
                               {"Alt+A / Alt+T / Alt+R", "Autoriser / toujours / refuser"}});
     section("Pages", {{"Ctrl+1", "Cockpit (page principale)"},
                       {"Ctrl+2", "Tableau de bord des conversations"},
+                      {"Ctrl+3", "Orchestrateur"},
+                      {"Ctrl+4", "Designer"},
                       {"Ctrl+Maj+D", "Tableau de bord dans une fenêtre séparée"}});
     section("Application", {{"Ctrl+S", "Tout enregistrer"},
                             {"Ctrl+,", "Configuration"},
@@ -326,7 +356,7 @@ void App::drawAboutWindow() {
     ImGui::Separator();
     ImGui::Text("Claude Code : %s", claudeExe_.empty() ? "introuvable" : claudeExe_.c_str());
     if (auto* oc = active(); oc && !oc->session->cliVersion.empty()) ImGui::Text("Version : %s", oc->session->cliVersion.c_str());
-    ImGui::Text("Espace de travail : %s", util::pathToUtf8(workspace_.root()).c_str());
+    ImGui::Text("Dossier des projets : %s", util::pathToUtf8(workspace_.root()).c_str());
     ImGui::Text("Réglages : %s", settingsPath_.c_str());
     ImGui::Text("Dear ImGui %s", IMGUI_VERSION);
     ImGui::End();

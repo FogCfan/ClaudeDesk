@@ -26,6 +26,14 @@ TEST_CASE("utilitaires texte") {
     CHECK(util::humanTokens(12345) == "12,3 k");
     CHECK(util::newUuid().size() == 36);
     CHECK(util::unixFromIso("1970-01-01T00:01:00.000Z") == 60);
+    CHECK(util::unixFromIso("1970-01-01T00:01:00.853610+00:00") == 60);
+    CHECK(util::unixFromIso("1970-01-01T02:01:00+02:00") == 60);
+    CHECK(util::unixFromIso("1969-12-31T23:01:00-01:00") == 60);
+    int64_t t = util::nowUnix();
+    CHECK(util::humanWhen(t).rfind("aujourd'hui ", 0) == 0);
+    CHECK(util::humanWhen(t + 86400).rfind("demain ", 0) == 0);
+    CHECK(util::localMinuteOfDay(t) >= 0);
+    CHECK(util::localMinuteOfDay(t) < 1440);
 }
 
 TEST_CASE("encodage des dossiers de projet Claude Code") {

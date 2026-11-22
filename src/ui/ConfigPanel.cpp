@@ -2,6 +2,7 @@
 // options avancées de la conversation active (ou réglages par défaut), et
 // préférences de l'application.
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 
 #include <SDL3/SDL.h>
@@ -24,8 +25,7 @@ bool radioChoice(const claude::Choice& c, std::string& value) {
         value = c.value;
         changed = true;
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", c.help);
+    ui::sideNote(c.help);
     return changed;
 }
 
@@ -57,6 +57,93 @@ void stringList(const char* id, std::vector<std::string>& list, std::string& buf
 
 }  // namespace
 
+// Préréglages d'énergie : quatre cartes cliquables, l'alimentation actuelle, et le réglage du mode automatique.
+void App::drawEnergyPresets() {
+    const auto& pal = ui::palette();
+    const float fs = ImGui::GetFontSize();
+    ImGui::SeparatorText("Énergie");
+    ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+    ImGui::TextWrapped("Choisissez comment ClaudeDesk utilise la batterie et la carte graphique : un clic suffit, "
+                       "les réglages détaillés ci-dessous suivent.");
+    ImGui::PopStyleColor();
+    const int modes[] = {EnergyAuto, EnergyPerformance, EnergyBalanced, EnergySaver};
+    float avail = ImGui::GetContentRegionAvail().x;
+    float gap = ImGui::GetStyle().ItemSpacing.x;
+    int cols = avail > fs * 30 ? 2 : 1;
+    float cw = (avail - gap * (cols - 1)) / cols;
+    ImVec2 pad = ImGui::GetStyle().FramePadding;
+    // Hauteur commune : la plus grande description (avec retour à la ligne)
+    float ch = 0;
+    for (int m : modes) {
+        ImVec2 t = fontUi->CalcTextSizeA(fs * 0.92f, FLT_MAX, cw - pad.x * 3, energyModeSummary(m));
+        ch = std::max(ch, t.y);
+    }
+    ch += ImGui::GetTextLineHeightWithSpacing() * 1.25f + pad.y * 4;
+    for (int i = 0; i < 4; ++i) {
+        int m = modes[i];
+        if (i % cols) ImGui::SameLine(0, gap);
+        ImGui::PushID(m);
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        bool clicked = ImGui::InvisibleButton("##energy", ImVec2(cw, ch));
+        bool hov = ImGui::IsItemHovered();
+        bool active = settings_.energyMode == m;
+        ImVec2 p1(p0.x + cw, p0.y + ch);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec4 bg = active ? ImVec4(pal.accent.x, pal.accent.y, pal.accent.z, 0.20f) : pal.cardBg;
+        if (hov && !active) bg.w = std::min(1.0f, bg.w + 0.15f);
+        dl->AddRectFilled(p0, p1, ui::col(bg), 8.0f);
+        dl->AddRect(p0, p1, ui::col(active ? pal.accent : hov ? pal.dim : ImGui::GetStyleColorVec4(ImGuiCol_Border)), 8.0f, 0,
+                    active ? 2.0f : 1.0f);
+        ImVec2 tp(p0.x + pad.x * 1.5f, p0.y + pad.y * 2);
+        std::string title = std::string(active ? "● " : "") + energyModeLabel(m);
+        if (m == EnergyAuto && hasBattery_) title += "  (recommandé)";
+        dl->AddText(fontBold, fs, tp, ui::col(active ? pal.accent : ImGui::GetStyleColorVec4(ImGuiCol_Text)), title.c_str());
+        dl->AddText(fontUi, fs * 0.92f, ImVec2(tp.x, tp.y + ImGui::GetTextLineHeightWithSpacing() * 1.15f), ui::col(pal.dim),
+                    energyModeSummary(m), nullptr, cw - pad.x * 3);
+        if (clicked) setEnergyMode(m);
+        ImGui::PopID();
+    }
+    if (settings_.energyMode == EnergyCustom)
+        ImGui::TextColored(pal.link, "Réglages personnalisés. Cliquez un mode pour y revenir.");
+
+    // Alimentation actuelle
+    std::string power;
+    if (!hasBattery_ && !onBattery_) {
+        power = "Alimentation : secteur (pas de batterie détectée)";
+    } else {
+        power = onBattery_ ? "Alimentation : sur batterie" : "Alimentation : sur secteur";
+        if (batteryPct_ >= 0) power += " · batterie " + std::to_string(batteryPct_) + " %";
+        if (onBattery_ && batterySecs_ > 0) power += " · environ " + util::humanDuration(batterySecs_) + " restantes";
+    }
+    ImGui::TextDisabled("%s", power.c_str());
+    if (settings_.energyMode == EnergyAuto) {
+        ImGui::TextDisabled("Appliqué maintenant : %s", energyApplied_ > 0 ? energyModeLabel(energyApplied_) : "—");
+        const char* fixed[] = {"Performance", "Équilibré", "Économie de batterie"};
+        int ac = settings_.energyOnAc - 1, bat = settings_.energyOnBattery - 1;
+        ImGui::SetNextItemWidth(ui::fitItemWidth(fs * 11, "sur secteur"));
+        if (ImGui::Combo("sur secteur", &ac, fixed, 3)) {
+            settings_.energyOnAc = ac + 1;
+            tickEnergy(true);
+        }
+        ui::sameLineIfFits(fs * 18);
+        ImGui::SetNextItemWidth(ui::fitItemWidth(fs * 11, "sur batterie"));
+        if (ImGui::Combo("sur batterie", &bat, fixed, 3)) {
+            settings_.energyOnBattery = bat + 1;
+            tickEnergy(true);
+        }
+    }
+#ifdef _WIN32
+    if (hasBattery_) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+        ImGui::TextWrapped("Portable à deux cartes graphiques : ClaudeDesk demande la carte dédiée, plus gourmande. Pour "
+                           "économiser davantage sur batterie, choisissez « Économie d'énergie » pour ClaudeDesk dans les "
+                           "paramètres graphiques de Windows (effet au prochain lancement).");
+        ImGui::PopStyleColor();
+        if (ImGui::SmallButton("Ouvrir les paramètres graphiques de Windows")) util::openInShell("ms-settings:display-advancedgraphics");
+    }
+#endif
+}
+
 void App::drawConfigWindow() {
     if (!ImGui::Begin("Configuration", &showConfig_)) {
         ImGui::End();
@@ -80,15 +167,20 @@ void App::drawConfigWindow() {
         lastMode = base.permissionMode;
     }
 
-    ImGui::TextColored(pal.dim, "%s", s ? ("Conversation : " + util::truncateUtf8(s->title, 50)).c_str()
-                                         : "Réglages par défaut des nouvelles conversations");
+    ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+    ImGui::TextWrapped("%s", s ? ("Conversation : " + util::truncateUtf8(s->title, 50)).c_str()
+                               : "Réglages par défaut des nouvelles conversations");
+    ImGui::PopStyleColor();
 
     int selectTab = configTab_;
     configTab_ = -1;
     auto tabFlags = [&](int idx) { return selectTab == idx ? ImGuiTabItemFlags_SetSelected : 0; };
-    float footer = ImGui::GetFrameHeightWithSpacing() * 2.2f;
+    // Hauteur réservée au pied (état + boutons) : mesurée à l'image précédente, car les boutons passent à la ligne
+    // quand le panneau est étroit (sinon ils sortaient du panneau, hors de vue).
+    static float footerMeasured = 0.0f;
+    float footer = footerMeasured > 0 ? footerMeasured : ImGui::GetFrameHeightWithSpacing() * 2.2f;
 
-    if (ImGui::BeginTabBar("##cfgtabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
+    if (ImGui::BeginTabBar("##cfgtabs", ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_TabListPopupButton)) {
         // ---------------------------------------------------------------- Modèle
         if (ImGui::BeginTabItem("Modèle", nullptr, tabFlags(0))) {
             ImGui::BeginChild("##c0", ImVec2(0, -footer));
@@ -97,15 +189,14 @@ void App::drawConfigWindow() {
                 for (auto& m : s->models) {
                     std::string v = m.value == "default" ? "" : m.value;
                     if (ImGui::RadioButton(m.displayName.c_str(), editConfig_.model == v)) editConfig_.model = v;
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("%s", m.description.c_str());
+                    ui::sideNote(m.description.c_str());
                 }
             } else {
                 for (auto& c : claude::modelChoices()) radioChoice(c, editConfig_.model);
             }
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 16, "Identifiant personnalisé"));
             ImGui::InputTextWithHint("Identifiant personnalisé", "ex. claude-opus-5-5", &editConfig_.model);
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 16, "Modèle de secours"));
             ImGui::InputTextWithHint("Modèle de secours", "si le principal est surchargé", &editConfig_.fallbackModel);
 
             ImGui::SeparatorText("Effort de réflexion");
@@ -115,7 +206,7 @@ void App::drawConfigWindow() {
             std::vector<std::string> styles = {"default", "Concise", "Explanatory", "Learning", "Proactive"};
             if (s && !s->outputStyles.empty()) styles = s->outputStyles;
             std::string cur = editConfig_.outputStyle.empty() ? "default" : editConfig_.outputStyle;
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 12, "Style de sortie"));
             if (ImGui::BeginCombo("Style de sortie", cur.c_str())) {
                 for (auto& st : styles)
                     if (ImGui::Selectable(st.c_str(), st == cur)) editConfig_.outputStyle = st == "default" ? "" : st;
@@ -238,14 +329,21 @@ void App::drawConfigWindow() {
         if (ImGui::BeginTabItem("Prompt système", nullptr, tabFlags(3))) {
             ImGui::BeginChild("##c3", ImVec2(0, -footer));
             int mode = (int)editConfig_.systemPromptMode;
+            auto radioW = [](const char* l) {
+                return ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(l).x;
+            };
             ImGui::RadioButton("Par défaut", &mode, 0);
-            ImGui::SameLine();
+            ui::sameLineIfFits(radioW("Ajouter au prompt de Claude Code"));
             ImGui::RadioButton("Ajouter au prompt de Claude Code", &mode, 1);
-            ImGui::SameLine();
+            ui::sameLineIfFits(radioW("Remplacer entièrement"));
             ImGui::RadioButton("Remplacer entièrement", &mode, 2);
             editConfig_.systemPromptMode = (claude::SystemPromptMode)mode;
             if (mode == 2)
-                ImGui::TextColored(pal.warn, "Remplacer retire les instructions de Claude Code (outils, sécurité, style) : à manier avec soin.");
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, pal.warn);
+                ImGui::TextWrapped("Remplacer retire les instructions de Claude Code (outils, sécurité, style) : à manier avec soin.");
+                ImGui::PopStyleColor();
+            }
 
             // Modèles de prompts
             static int preset = -1;
@@ -262,11 +360,11 @@ void App::drawConfigWindow() {
                     }
                 ImGui::EndCombo();
             }
-            ImGui::SameLine();
             static std::string presetName;
+            ui::sameLineIfFits(ImGui::GetFontSize() * 10);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
             ImGui::InputTextWithHint("##pname", "Nom du modèle", &presetName);
-            ImGui::SameLine();
+            ui::sameLineIfFits(ui::buttonWidth("Enregistrer comme modèle"));
             if (ImGui::Button("Enregistrer comme modèle") && !util::trim(presetName).empty()) {
                 bool found = false;
                 for (auto& p : settings_.promptPresets)
@@ -276,7 +374,7 @@ void App::drawConfigWindow() {
                 toast("Modèle enregistré : " + presetName);
             }
             if (preset >= 0 && preset < (int)settings_.promptPresets.size()) {
-                ImGui::SameLine();
+                ui::sameLineIfFits(ui::buttonWidth("Supprimer le modèle"));
                 if (ImGui::Button("Supprimer le modèle")) {
                     settings_.promptPresets.erase(settings_.promptPresets.begin() + preset);
                     preset = -1;
@@ -289,7 +387,7 @@ void App::drawConfigWindow() {
             ImGui::EndDisabled();
             if (oc) {
                 std::string ctx = oc->injectContext ? contextFor(*oc) : "";
-                if (ImGui::TreeNode(("Contexte cowork injecté (" + util::humanTokens((int64_t)ctx.size()) + " car.)###ctx").c_str())) {
+                if (ImGui::TreeNode(("Mémoire du projet injectée (" + util::humanTokens((int64_t)ctx.size()) + " car.)###ctx").c_str())) {
                     if (ctx.empty())
                         ImGui::TextDisabled("Aucun (désactivé ou conversation hors dossier).");
                     else
@@ -326,7 +424,7 @@ void App::drawConfigWindow() {
             if (ImGui::SmallButton("Choisir un dossier…"))
                 openFolderDialog([this](const std::string& p) { editConfig_.addDirs.push_back(p); });
             ImGui::SeparatorText("Limites");
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 8, "Budget max ($, 0 = illimité)"));
             ImGui::InputDouble("Budget max ($, 0 = illimité)", &editConfig_.maxBudgetUsd, 0.5, 1.0, "%.2f");
             ImGui::SeparatorText("Options supplémentaires");
             ImGui::SetNextItemWidth(-1);
@@ -353,13 +451,16 @@ void App::drawConfigWindow() {
                 settings_.claudeExe.clear();
                 claudeExe_ = claude::findClaudeExecutable();
             }
-            ImGui::TextColored(claudeExe_.empty() ? pal.err : pal.dim, "Utilisé : %s",
-                               claudeExe_.empty() ? "introuvable" : claudeExe_.c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, claudeExe_.empty() ? pal.err : pal.dim);
+            ImGui::TextWrapped("Utilisé : %s", claudeExe_.empty() ? "introuvable" : claudeExe_.c_str());
+            ImGui::PopStyleColor();
 
-            ImGui::SeparatorText("Espace de travail (mode cowork)");
-            ImGui::TextDisabled("Racine : %s", util::pathToUtf8(workspace_.root()).c_str());
+            ImGui::SeparatorText("Projets");
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("Racine : %s", util::pathToUtf8(workspace_.root()).c_str());
+            ImGui::PopStyleColor();
             if (ImGui::Button("Ouvrir dans l'Explorateur")) util::openInShell(util::pathToUtf8(workspace_.root()));
-            ImGui::SameLine();
+            ui::sameLineIfFits(ui::buttonWidth("Changer de dossier…"));
             if (ImGui::Button("Changer de dossier…"))
                 openFolderDialog([this](const std::string& p) {
                     settings_.workspaceRoot = p;
@@ -373,10 +474,10 @@ void App::drawConfigWindow() {
             if (ImGui::Button("Parcourir…##cwd")) openFolderDialog([this](const std::string& p) { settings_.defaultCwd = p; });
             ImGui::Checkbox("Injecter le contexte du dossier dans les nouvelles conversations", &settings_.injectContext);
             ImGui::Checkbox("Récap automatique à la fermeture d'une conversation", &settings_.autoRecap);
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 8, "Modèle des récaps"));
             ImGui::InputText("Modèle des récaps", &settings_.recapModel);
             ui::helpMarker("Haiku suffit et consomme très peu de quota.");
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 8, "Sauvegarde auto (s)"));
             ImGui::SliderInt("Sauvegarde auto (s)", &settings_.autosaveSeconds, 1, 60);
 
             ImGui::SeparatorText("Éditeur");
@@ -385,9 +486,9 @@ void App::drawConfigWindow() {
 
             ImGui::SeparatorText("Affichage");
             const char* themes[] = {"Sombre", "Clair", "Crépuscule"};
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 10, "Thème"));
             if (ImGui::Combo("Thème", &settings_.theme, themes, 3)) applyTheme();
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 10, "Taille du texte"));
             if (ImGui::SliderFloat("Taille du texte", &settings_.fontSize, 11, 32, "%.0f px")) {
                 ImGui::GetStyle().FontSizeBase = settings_.fontSize;
                 for (auto& o : open_) o->cache.clear();
@@ -398,21 +499,23 @@ void App::drawConfigWindow() {
             ImGui::Checkbox("Faire clignoter la barre des tâches quand Claude a fini", &settings_.notifyOnFinish);
             ImGui::Checkbox("Actualiser l'usage automatiquement", &settings_.autoRefreshUsage);
             ImGui::SameLine();
-            ui::helpMarker("Au lancement, puis quand la mesure date de plus de 15 min (ou que la fenêtre de 5 h\n"
-                           "s'est réinitialisée) sans échange en cours. Chaque actualisation envoie une requête\n"
-                           "minuscule à Haiku. Pendant que Claude travaille, l'usage se met à jour tout seul\n"
-                           "à chaque réponse, sans requête supplémentaire.");
+            ui::helpMarker("Au lancement, puis quand la mesure date de plus de 5 min ou qu'une limite vient de\n"
+                           "se réinitialiser. L'actualisation lance la commande /usage de Claude Code : gratuite,\n"
+                           "sans quota consommé, et elle répond même quand la limite est atteinte. Pendant que\n"
+                           "Claude travaille, l'usage se met aussi à jour à chaque réponse.");
             ImGui::Checkbox("Confirmer le mode « sans permissions »", &settings_.confirmBypass);
 
             ImGui::SeparatorText("Accueil");
-            ImGui::TextDisabled("Lancements : %d. Le guide s'ouvre au 1er lancement, puis un rappel s'affiche les 10 suivants.",
-                                settings_.launchCount);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("Lancements : %d. Le guide s'ouvre au 1er lancement, puis un rappel s'affiche les 10 suivants.",
+                               settings_.launchCount);
+            ImGui::PopStyleColor();
             if (ImGui::Button("Revoir l'accueil des nouveaux utilisateurs")) {
                 settings_.launchCount = 0;
                 settings_.save(settingsPath_);
                 toast("Le guide s'ouvrira au prochain lancement, puis les rappels reprendront.");
             }
-            ImGui::SameLine();
+            ui::sameLineIfFits(ui::buttonWidth("Ouvrir le guide maintenant"));
             if (ImGui::Button("Ouvrir le guide maintenant")) {
                 showGuide_ = true;
                 guideSection_ = 0;
@@ -440,6 +543,7 @@ void App::drawConfigWindow() {
         if (ImGui::BeginTabItem("Graphismes", nullptr, tabFlags(6))) {
             ImGui::BeginChild("##c6", ImVec2(0, -footer));
             ImGuiIO& io = ImGui::GetIO();
+            drawEnergyPresets();
             ImGui::SeparatorText("Fluidité");
             char vs[96];
             std::snprintf(vs, sizeof vs, "Synchronisée sur l'écran (VSync, %.0f Hz)", displayHz_);
@@ -448,21 +552,27 @@ void App::drawConfigWindow() {
             ImGui::RadioButton("Limite personnalisée", &settings_.fpsMode, 1);
             if (settings_.fpsMode == 1) {
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+                ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 10));
                 ImGui::SliderInt("##cap", &settings_.fpsCap, 30, 480, "%d i/s");
             }
             ImGui::RadioButton("Illimitée (charge maximale du processeur graphique)", &settings_.fpsMode, 2);
             ImGui::Checkbox("Économie d'énergie : ne redessiner qu'en cas d'activité", &settings_.ecoIdle);
             ui::helpMarker("Au repos (aucune animation, Claude inactif), l'interface attend vos actions au lieu de\n"
                            "redessiner en continu. Désactivé = animations toujours parfaitement fluides.");
-            ImGui::Checkbox("Limiter à 30 i/s quand ClaudeDesk n'a pas le focus", &settings_.ecoBackground);
+            ImGui::Checkbox("Cadence réduite quand ClaudeDesk n'a pas le focus (ou est réduit)", &settings_.ecoBackground);
+            if (settings_.ecoBackground) {
+                ImGui::Indent();
+                ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 10, "en arrière-plan"));
+                ImGui::SliderInt("en arrière-plan", &settings_.backgroundFps, 5, 60, "%d i/s");
+                ImGui::Unindent();
+            }
             ImGui::Checkbox("Afficher les images/seconde dans la barre d'état", &settings_.showFps);
             ImGui::TextDisabled("Actuellement : %.0f images/s (%.2f ms par image)", io.Framerate, 1000.0f / std::max(1.0f, io.Framerate));
 
             ImGui::SeparatorText("Animations");
             ImGui::Checkbox("Animations activées", &settings_.animations);
             ImGui::BeginDisabled(!settings_.animations);
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 10, "Vitesse"));
             ImGui::SliderFloat("Vitesse", &settings_.animSpeed, 0.5f, 2.0f, "x %.2f");
             ImGui::Checkbox("Défilement fluide (molette, Page préc./suiv., Début/Fin)", &settings_.smoothScroll);
             ImGui::Checkbox("Halos lumineux (cartes actives, visite guidée)", &settings_.glowEffects);
@@ -479,7 +589,7 @@ void App::drawConfigWindow() {
             if (ImGui::Checkbox("Courbes et coins arrondis haute définition", &settings_.highQuality)) applyTheme();
             const char* fr[] = {"FreeType, lissage léger (recommandé, net)", "FreeType, sans alignement sur la grille (plus doux)",
                                 "stb_truetype (moteur de base d'ImGui)"};
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 20);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 20, "Rendu du texte"));
             if (ImGui::Combo("Rendu du texte", &settings_.fontRenderer, fr, 3)) fontReloadPending_ = true;
             ImGui::TextDisabled("Avec FreeType, les emoji s'affichent en couleur.");
 
@@ -499,7 +609,7 @@ void App::drawConfigWindow() {
             };
             static std::string pendingDriver = "#";
             if (pendingDriver == "#") pendingDriver = settings_.renderDriver;
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 20);
+            ImGui::SetNextItemWidth(ui::fitItemWidth(ImGui::GetFontSize() * 20, "Moteur"));
             if (ImGui::BeginCombo("Moteur", label(pendingDriver).c_str())) {
                 if (ImGui::Selectable(label("").c_str(), pendingDriver.empty())) pendingDriver.clear();
                 for (int i = 0; i < SDL_GetNumRenderDrivers(); ++i) {
@@ -514,10 +624,12 @@ void App::drawConfigWindow() {
                     settings_.renderDriver = pendingDriver;
                     restartApp();
                 }
-                ImGui::SameLine();
+                ui::sameLineIfFits(ui::buttonWidth("Annuler##drv"));
                 if (ImGui::Button("Annuler##drv")) pendingDriver = settings_.renderDriver;
             }
-            ImGui::TextDisabled("Sur les portables à double carte graphique, ClaudeDesk demande la carte dédiée.");
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("Sur les portables à double carte graphique, ClaudeDesk demande la carte dédiée.");
+            ImGui::PopStyleColor();
             ImGui::Dummy(ImVec2(0, 4));
             if (ImGui::Button("Enregistrer les préférences##gfx")) {
                 settings_.save(settingsPath_);
@@ -532,10 +644,13 @@ void App::drawConfigWindow() {
     // --- Pied : appliquer ---
     bool changed = nlohmann::json(editConfig_) != nlohmann::json(base);
     bool restart = s && s->processRunning() && editConfig_.needsRestartComparedTo(base);
+    float footerTop = ImGui::GetCursorPosY();
     ImGui::Separator();
     if (changed) {
-        ImGui::TextColored(pal.warn, restart ? "Modifications non appliquées — la session sera relancée (historique conservé)."
-                                             : "Modifications non appliquées.");
+        ImGui::PushStyleColor(ImGuiCol_Text, pal.warn);
+        ImGui::TextWrapped("%s", restart ? "Modifications non appliquées — la session sera relancée (historique conservé)."
+                                         : "Modifications non appliquées.");
+        ImGui::PopStyleColor();
     } else {
         ImGui::TextDisabled("À jour.");
     }
@@ -547,17 +662,18 @@ void App::drawConfigWindow() {
             settings_.save(settingsPath_);
         }
     }
-    ImGui::SameLine();
+    ui::sameLineIfFits(ui::buttonWidth("Annuler"));
     if (ImGui::Button("Annuler")) editConfig_ = base;
     ImGui::EndDisabled();
     if (s) {
-        ImGui::SameLine();
+        ui::sameLineIfFits(ui::buttonWidth("Enregistrer comme défaut"));
         if (ImGui::Button("Enregistrer comme défaut")) {
             settings_.defaultConfig = editConfig_;
             settings_.save(settingsPath_);
             toast("Réglages par défaut enregistrés pour les nouvelles conversations.");
         }
     }
+    footerMeasured = ImGui::GetCursorPosY() - footerTop;
     ImGui::End();
 }
 

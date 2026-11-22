@@ -161,7 +161,7 @@ void App::drawQuickBar(OpenConversation& oc) {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Joindre des images ou référencer des fichiers (glisser-déposer marche aussi)");
     ImGui::SameLine();
-    ImGui::Checkbox("Contexte cowork", &oc.injectContext);
+    ImGui::Checkbox("Mémoire du projet", &oc.injectContext);
     if (ImGui::IsItemHovered()) {
         ImGui::BeginTooltip();
         ImGui::TextUnformatted("Injecte dans le prompt système les notes du projet, les synthèses et les récaps\n"

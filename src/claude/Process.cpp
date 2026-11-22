@@ -151,4 +151,46 @@ std::vector<ProcessLine> Process::poll() {
     return out;
 }
 
+// --- TerminalProcess -------------------------------------------------------------------------------------------
+
+TerminalProcess::~TerminalProcess() {
+    if (process_) CloseHandle((HANDLE)process_);
+}
+
+bool TerminalProcess::start(const std::string& exe, const std::vector<std::string>& args, const std::string& title) {
+    if (process_) {
+        CloseHandle((HANDLE)process_);
+        process_ = nullptr;
+    }
+    error_.clear();
+    exitCode_ = -1;
+    // cmd /s /c "…" : la fenêtre se ferme d'elle-même si la commande réussit, et reste ouverte (pause) sinon.
+    std::wstring comspec = L"cmd.exe";
+    if (const wchar_t* c = _wgetenv(L"ComSpec"); c && *c) comspec = c;
+    std::string inner = "title " + title + " & " + buildCommandLine(exe, args) +
+                        " || (echo. & echo La commande n'a pas abouti : lisez le message ci-dessus. & pause)";
+    std::wstring cmd = L"\"" + comspec + L"\" /s /c \"" + util::widen(inner) + L"\"";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT,
+                        nullptr, nullptr, &si, &pi)) {
+        error_ = "Impossible d'ouvrir une fenêtre de terminal (erreur Windows " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    process_ = pi.hProcess;
+    return true;
+}
+
+bool TerminalProcess::running() const {
+    if (!process_) return false;
+    DWORD code = 0;
+    if (GetExitCodeProcess((HANDLE)process_, &code) && code == STILL_ACTIVE) return true;
+    exitCode_ = (int)code;
+    return false;
+}
+
+bool TerminalProcess::tracked() const { return process_ != nullptr; }
+
 }  // namespace claude

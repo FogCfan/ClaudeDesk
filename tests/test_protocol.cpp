@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 
 #include "claude/ClaudeSession.h"
+#include "util/Strings.h"
 
 using namespace claude;
 
@@ -43,7 +44,7 @@ TEST_CASE("appel d'outil, résultat et demande de permission") {
     s.handleLine(R"({"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"C:\\tmp\\a.txt","content":"hi"}}]},"parent_tool_use_id":null})");
     REQUIRE(s.entries.size() == 1);
     CHECK(s.entries[0].kind == EntryKind::ToolUse);
-    CHECK(s.entries[0].text == "Write · C:\\tmp\\a.txt");
+    CHECK(s.entries[0].text == "Création · C:\\tmp\\a.txt");  // nom de l'outil en clair
 
     s.handleLine(R"({"type":"control_request","request_id":"req-9","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"C:\\tmp\\a.txt","content":"hi"},"permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"tool_use_id":"toolu_1"}})");
     REQUIRE(s.permissions.size() == 1);
@@ -63,6 +64,26 @@ TEST_CASE("limites d'usage") {
     REQUIRE(u.windows.size() == 2);
     CHECK(u.windows[0].name == "five_hour");  // trié : 5 h d'abord
     CHECK(u.find("seven_day")->utilization == doctest::Approx(0.24));
+    CHECK(u.history.size() == 1);
+}
+
+TEST_CASE("limites d'usage : rapport de la commande /usage") {
+    UsageTracker u;
+    // Extrait réel de `claude -p "/usage" --output-format stream-json` (CLI 2.1.330).
+    auto rl = nlohmann::json::parse(R"({"limits":[
+        {"kind":"session","group":"session","percent":100,"resets_at":"2026-11-22T06:09:59.853610+00:00","severity":"normal","is_active":false},
+        {"kind":"weekly_all","group":"weekly","percent":28,"resets_at":"2026-11-28T05:59:59.853630+00:00","severity":"normal","is_active":true}],
+        "extra_usage":{"is_enabled":false,"monthly_limit":4000,"used_credits":0,"utilization":0,"currency":"EUR"}})");
+    REQUIRE(u.onUsageReport(rl));
+    REQUIRE(u.windows.size() == 2);
+    CHECK(u.windows[0].name == "five_hour");
+    CHECK(u.windows[0].utilization == doctest::Approx(1.0));
+    CHECK(u.windows[0].status == "rejected");
+    CHECK(u.windows[0].resetsAt == util::unixFromIso("2026-11-22T06:09:59Z"));
+    CHECK(u.find("seven_day")->utilization == doctest::Approx(0.28));
+    CHECK(u.find("seven_day")->status == "allowed");
+    CHECK(u.history.size() == 1);
+    CHECK_FALSE(u.onUsageReport(nlohmann::json::object()));
     CHECK(u.history.size() == 1);
 }
 

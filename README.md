@@ -6,7 +6,7 @@ vos réglages, CLAUDE.md, MCP, skills, hooks et votre abonnement s'appliquent
 exactement comme dans le terminal.
 
 En plus d'un vrai éditeur et du suivi en direct de l'usage, ClaudeDesk range le travail en
-**projets › thèmes › conversations** (mode cowork) et peut faire travailler une **équipe d'agents**
+**projets › thèmes › conversations** (panneau **Projets**) et peut faire travailler une **équipe d'agents**
 sur un objectif grâce à l'**orchestrateur** (page 3), dans un budget que vous fixez.
 
 Windows (MSYS2 UCRT64) et macOS (Homebrew) ; ClaudeDesk est lui-même développé depuis ClaudeDesk.
@@ -35,7 +35,7 @@ brew install cmake ninja sdl3 nlohmann-json freetype
 
 `claude` est cherché dans le PATH du shell de connexion (récupéré au démarrage, même lancé
 depuis le Finder), puis dans `~/.local/bin`, `/opt/homebrew/bin` et `/usr/local/bin`.
-Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/Documents/ClaudeDesk`.
+Réglages : `~/Library/Application Support/ClaudeDesk` ; projets : `~/Documents/ClaudeDesk`.
 
 ## Fonctionnalités
 
@@ -63,7 +63,7 @@ Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/
 - Repère discret « ── hh:mm ── » dans le fil à chaque changement de minute.
 - La barre des tâches clignote quand Claude a fini ou attend une décision.
 
-### Trois pages : Cockpit, Tableau de bord, Orchestrateur
+### Quatre pages : Cockpit, Tableau de bord, Orchestrateur, Designer
 - **Cockpit** (Ctrl+1) : la page principale décrite ci-dessus.
 - **Tableau de bord des conversations** (Ctrl+2) : toutes les conversations ouvertes en cartes, triées
   par urgence (⚠ attend votre décision, en cours, prête, en veille). Chaque carte montre l'état et la durée,
@@ -74,14 +74,17 @@ Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/
   contexte ImGui), à poser sur un deuxième écran. Son état est mémorisé au redémarrage.
 - **Orchestrateur** (Ctrl+3) : le chef de projet automatique et son équipe (voir plus bas). Quand une
   orchestration existe, le tableau de bord l'affiche en tête (carte « Orchestration » + équipe).
+- **Designer** (Ctrl+4) : conçoit un projet et son équipe d'agents à partir d'une description (voir plus bas).
 
 ### Usage en direct (équivalent de `/usage`)
 - Limites du forfait : fenêtre de 5 h et semaine, % utilisé, heure de réinitialisation,
-  historique sur 24 h. Mis à jour à chaque réponse (événements `rate_limit_event` du CLI) ;
-  bouton **Actualiser** (requête minuscule à Haiku).
-- **Actualisation automatique** (Configuration › Application) : au lancement si la mesure date de plus de 2 min,
-  puis si elle date de plus de 15 min ou que la fenêtre de 5 h s'est réinitialisée — au plus une requête toutes
-  les 10 min, jamais pendant qu'une session travaille ni quand la fenêtre n'est pas regardée.
+  historique sur 24 h (heures locales, session en cours surlignée, détail au survol). Mis à jour à chaque
+  réponse (événements `rate_limit_event` du CLI) ; bouton **Actualiser** = commande locale `/usage` du CLI
+  (`claude -p "/usage"` → `usage_report.rate_limits`) : aucun appel au modèle, donc gratuite, et elle répond
+  même quand la limite est atteinte. Une date de réinitialisation dépassée s'affiche « réinitialisée » (0 %).
+- **Actualisation automatique** (Configuration › Application) : au lancement si la mesure date de plus de 1 min,
+  puis si elle date de plus de 5 min (fenêtre regardée, aucune session au travail), et dès qu'une limite s'est
+  réinitialisée — au plus une fois par minute.
 - Conversation active : coût équivalent API, jetons (dont cache), tours, temps API,
   **remplissage de la fenêtre de contexte**, coût par tour, tâches de Claude, serveurs MCP.
 
@@ -89,14 +92,22 @@ Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/
 - **Modèle** (liste fournie par le CLI), modèle de secours, **effort** (low → max), style de sortie.
 - **Mode** de permission (Normal, Accepter les modifs, Auto, Plan, Ne pas demander, Sans permissions).
 - **Outils** : disponibles / toujours autorisés / interdits, règles fines (`Bash(git *)`…).
-- **Prompt système** : ajouter ou remplacer, modèles réutilisables, aperçu du contexte cowork.
+- **Prompt système** : ajouter ou remplacer, modèles réutilisables, aperçu de la mémoire du projet injectée.
 - **Avancé** : dossiers supplémentaires (`--add-dir`), budget max, options libres.
-- **Application** : chemin de Claude Code, espace de travail, thème, taille du texte…
+- **Application** : chemin de Claude Code, dossier des projets, thème, taille du texte…
 
 Le modèle et le mode changent **à chaud**. Les autres réglages relancent la session en
 arrière-plan avec `--resume` : l'historique est conservé.
 
 ### Graphismes et fluidité (Configuration › Graphismes)
+- **Mode d'énergie** (aussi dans *Affichage › Mode d'énergie*), en un clic :
+  - **Automatique** (défaut) : Performance sur secteur, Économie dès que le portable passe sur batterie
+    (les deux réglables) ; une notification signale chaque bascule.
+  - **Performance** : rendu continu à la fréquence de l'écran, toutes les animations.
+  - **Équilibré** : ne redessine que s'il se passe quelque chose, 30 i/s en arrière-plan.
+  - **Économie de batterie** : 30 i/s maximum, 10 i/s en arrière-plan ou fenêtre réduite, sans animations ni
+    halos, rendu au repos (≈ 6 i/s quand rien ne bouge).
+  Modifier un réglage de détail fait passer en **Personnalisé**. La barre d'état rappelle le mode économe.
 - **Cadence** : synchronisée sur l'écran (VSync, défaut), limite personnalisée (30 → 480 i/s) ou illimitée.
   L'interface est redessinée en continu : les animations restent fluides même au repos (mode économie
   d'énergie optionnel, et 30 i/s en arrière-plan si souhaité). Une image coûte ~0,5 ms (≈ 2 000 i/s en illimité).
@@ -110,8 +121,28 @@ arrière-plan avec `--resume` : l'historique est conservé.
   relance automatique ; la carte graphique dédiée est demandée sur les portables hybrides. Compteur
   d'images/seconde optionnel dans la barre d'état.
 
-### Mode cowork : projets › thèmes › conversations
-L'espace de travail est une **vraie arborescence de dossiers** (par défaut `Documents\ClaudeDesk`) :
+### Pour tous les projets, pas seulement le code
+ClaudeDesk sert aussi bien à un développeur qu'à quelqu'un qui organise des idées, analyse des données ou rédige un
+audit. L'accueil propose deux entrées : **« Une question ? »** (Claude répond aussitôt, dans une conversation) et
+**« Démarrer un projet »**, par type :
+
+| Type | Livrable | Méthode de Claude |
+|---|---|---|
+| Idées et concept | documents structurés : options, décisions, plan | recherche, rédaction, relecture critique |
+| Analyse de données | chiffres vérifiés, graphiques, rapport | scripts Python reproductibles, données d'origine jamais modifiées |
+| Rapport, audit ou étude | document sourcé (Word/PDF) | plan validé d'abord, sources pour chaque fait, relecture croisée |
+| Logiciel ou application | programme testé | build, tests, captures |
+| Projet hybride | documents + réalisation | conception d'abord, puis réalisation |
+| Laisser Claude choisir | selon le projet | Claude détermine le type |
+
+Le type règle le **Designer** (équipe adaptée), l'**orchestrateur** (découpage, vérifications, livrables), les consignes
+des agents, la mémoire injectée dans les conversations du projet et le vocabulaire de l'interface (« dossier du
+projet » plutôt que « dépôt »…). Il se change dans l'Inspecteur du projet. Les actions de Claude s'affichent en clair
+(« Lecture », « Modification », « Commande », « Recherche web »…), et les autorisations aussi (« Claude demande
+l'autorisation de modifier un fichier »).
+
+### Projets : projets › thèmes › conversations
+Le panneau **Projets** montre une **vraie arborescence de dossiers** (par défaut `Documents\ClaudeDesk`) :
 
 ```
 ClaudeDesk\
@@ -128,6 +159,17 @@ ClaudeDesk\
   .corbeille\                    ← éléments supprimés
 ```
 
+Chaque élément a son **icône**, comme dans l'explorateur de VS Code (légende : bouton **?** du panneau) : projet
+(dossier orange), thème (dossier jaune), **agent** (robot : thème d'un projet orchestré), **orchestrateur**,
+conversation (bulle ; un point orange quand Claude travaille), fichiers (couleur selon le type : code, données,
+image, document).
+- **Dossier de travail** : sous chaque projet, l'explorateur du code (dossiers lourds comme `.git` ou
+  `node_modules` masqués) ; double-clic pour ouvrir un fichier, clic droit pour le **joindre à la conversation**,
+  aperçu des fichiers texte dans l'inspecteur.
+- **Fichiers de référence** : clic droit sur un dossier › *Ajouter des fichiers…*, ou glisser-déposer depuis
+  l'Explorateur sur un projet ou un thème. Ils sont copiés dans le dossier, et leur chemin est donné à Claude dans
+  les nouvelles conversations du dossier (« Documents de référence »).
+
 - Chaque conversation enregistre son transcript, ses stats, son **récap** et l'identifiant
   de session Claude Code. **Reprendre** = votre prochain message continue la session (`--resume`).
 - **Récap** (bouton, Ctrl+Maj+R, ou automatique à la fermeture) : objectif, ce qui a été fait,
@@ -136,14 +178,16 @@ ClaudeDesk\
   d'abord générés (3 en parallèle), l'inspecteur affiche « récaps x / n ».
 - **Contexte injecté** : une nouvelle conversation reçoit dans son prompt système les notes et
   synthèses du projet et des thèmes parents, plus les récaps des échanges précédents du dossier.
-  « Repartir de ce contexte » ouvre une conversation neuve, légère, mais informée.
+  « ↻ Repartir du récap » (en-tête de conversation ou Inspecteur) génère le récap s'il manque, ouvre une
+  conversation neuve, légère mais informée, avec les mêmes réglages, et range l'ancienne en « Terminée ».
+  Sur la discussion de l'orchestrateur, le cerveau suit la nouvelle conversation (rappel de l'objectif inclus).
 - Glisser-déposer pour ranger une conversation, statuts (Idée, En cours, Bloqué, Terminé),
   épingles, recherche dans les titres et récaps.
 - **Importer depuis Claude Code** : les sessions faites dans le terminal
   (`~/.claude/projects`) s'importent dans un dossier et se reprennent telles quelles.
 
 ### Orchestrateur : une équipe d'agents sur un objectif
-Une conversation **« Orchestrateur »** (le cerveau), à la racine d'un projet cowork, pilote les conversations
+Une conversation **« Orchestrateur »** (le cerveau), à la racine d'un projet, pilote les conversations
 de ses thèmes : **chaque thème est un agent**, les notes du dossier décrivent son rôle. Ouverture : Ctrl+3,
 le bouton de page *Orchestrateur*, ou **Orchestrer…** dans l'inspecteur d'un projet.
 
@@ -160,6 +204,12 @@ le bouton de page *Orchestrateur*, ou **Orchestrer…** dans l'inspecteur d'un p
   aussitôt les agents libres ; une tâche confiée à un agent occupé part après la sienne. L'équipe continue
   aussi pendant qu'il réfléchit ou qu'une question vous attend (la réponse lui transmet ce qui a avancé).
   Désactivable : *Réglages avancés › Exécution › Comptes rendus au fil de l'eau*.
+- **Équipe évolutive** : quand un besoin durable n'est couvert par aucun agent, le cerveau peut proposer un
+  nouvel agent (`@@NOUVEL_AGENT <nom>`, avec « Pourquoi : … » et sa fiche de rôle). **Rien n'est créé sans votre
+  accord** : la proposition vous est soumise comme une question (*Créer* / *Ne pas créer* / *Autre* : vos
+  précisions, qu'il intègre avant de la soumettre de nouveau). Une fois accepté, l'agent devient un nouveau thème
+  du projet, avec sa fiche dans les notes (et vos précisions éventuelles). Pendant que vous décidez, les autres
+  agents continuent. Réglages : *Exécution › L'orchestrateur peut proposer de nouveaux agents*, plafond 12 par défaut.
 - **Budget** — la contrainte principale, toujours un **plafond** (le cerveau optimise : Haiku pour la
   mécanique, Sonnet pour le courant, Opus pour le difficile). Quatre niveaux simples :
 
@@ -179,14 +229,55 @@ le bouton de page *Orchestrateur*, ou **Orchestrer…** dans l'inspecteur d'un p
 - **Questions** : un bloc `@@HUMAIN` devient un formulaire (questions numérotées séparées, options
   cliquables `- [ ]`, la recommandée présélectionnée, réponses suggérées, « Laisse-le décider », Ctrl+Entrée).
   La barre des tâches clignote.
-- **Contexte maîtrisé** : avant d'envoyer une tâche, une conversation d'agent trop chargée (45 % de contexte
-  ou 6 tâches par défaut) est récapitulée puis remplacée par une conversation neuve du même thème, qui reçoit
-  la mémoire cowork. Idem pour le cerveau.
+- **Contexte et cache maîtrisés** (chaque appel d'outil relit tout le contexte ; c'est là que part le quota) :
+  avant d'envoyer un message, une conversation est récapitulée puis remplacée par une conversation neuve du
+  même thème (qui reçoit la mémoire du projet) si son contexte dépasse **120 k jetons** (seuil en jetons, pas en
+  % d'une fenêtre de 1 M), après 6 tâches, si son **cache a expiré** (≈ 1 h sous abonnement : reprendre
+  froid réécrirait tout le contexte au prix fort), ou si l'on s'apprête à **changer son modèle ou son effort**
+  (le cache est propre au modèle). Idem pour le cerveau, dont le message attend la fin du récap.
+  **En fin de phase** (`@@TERMINE`, pause de l'orchestrateur ou du budget jusqu'à la session suivante), les
+  conversations de l'équipe sont récapitulées sans être fermées : la mémoire du projet suit le travail fait, et à
+  la reprise (cache expiré), une rotation repart aussitôt du récap déjà prêt. Pas lors d'une pause sur le plafond
+  du compte. Réglage : *Exécution › Récaps de l'équipe en fin de phase*.
+- **Économie** : conversations **allégées** (`--disable-slash-commands`, sans sous-agents ni serveurs MCP :
+  contexte fixe d'un agent de 29,7 k à 17,6 k jetons sur E7 Twin, appliqué aux conversations neuves) ;
+  le cerveau est en **lecture seule** (Read, Glob, Grep) et délègue tests et builds ; les
+  agents reçoivent des consignes d'économie et rendent un compte rendu de 15 lignes, transmis avec ses
+  mesures (appels, contexte final, jetons relus/écrits) et tronqué par le début au-delà de 3 000 caractères ;
+  **garde-fous** par tâche (150 appels, 250 k de contexte) : l'agent est interrompu et le cerveau redécoupe.
+- **Vérification visuelle** (*Exécution*, activée par défaut) : tout changement visible est livré avec une capture
+  PNG dans `_captures/` à la racine du dépôt (dossier auto-ignoré par git), que l'agent examine ; le cerveau, même en
+  lecture seule, peut l'ouvrir avec Read (~1,5 k jetons par image). **Agents équipés du navigateur** : cochés dans
+  *Exécution*, ils reçoivent `--chrome` (outils Claude in Chrome : ouvrir une page, cliquer, console, capture),
+  compatible avec les conversations allégées ; marqués « 🌐 navigateur » pour le cerveau.
 - **La page** : cartes Avancement et Budget (jauge, repère 75 %, cible, tolérance), l'équipe (statut, modèle,
   contexte de chaque agent), réglages, journal, et la discussion du cerveau à droite, rendue en cartes
   (tâches confiées, questions, bilan) — vous pouvez lui écrire directement. Onglet « Bilan ✓ » à la fin.
 - **Persistance** : `<projet>/_orchestrateur.json`, rechargé au démarrage ; une orchestration interrompue par
   la fermeture reste en pause jusqu'à *Reprendre* (les tâches interrompues sont renvoyées).
+
+### Designer : de l'idée à l'équipe d'agents
+Page 4 (Ctrl+4, ou *Fichier › Concevoir un projet avec le Designer…*), en quatre étapes :
+1. **Décrire** : ce qu'on veut construire ; facultatif : un dossier (existant → Claude lit le code, en lecture
+   seule, pour bâtir l'équipe sur l'existant), technologies imposées, contraintes, taille d'équipe, niveau de budget.
+2. **Clarifier** (seulement si besoin) : jusqu'à 4 questions de Claude, réponses à cliquer, la recommandée
+   présélectionnée ; « Laisser Claude trancher ».
+3. **Ajuster** : projet (nom, résumé, pile, conventions), orchestrateur (objectif, jalons ordonnés, budget,
+   vérification visuelle) et une carte par agent (nom, mission, modèle/effort conseillés, navigateur, fiche de
+   rôle). Tout s'édite à la main ; **Demander un changement** fait affiner par Claude (il garde vos
+   modifications) ; **Version précédente** annule une génération. Points bloquants en rouge, conseils en orange.
+4. **Créer** : projet + un thème par agent (fiche en notes, mission + modèle conseillé en tête pour le
+   résumé vu par l'orchestrateur), fichiers de départ dans le dépôt (`CLAUDE.md`, `docs/PLAN.md`,
+   `docs/agents/*.md`, jamais d'écrasement), `_orchestrateur.json` réglé (niveau de budget, objectif + jalons,
+   visuel, agents navigateur). Ouvre ensuite la page Orchestrateur ; démarrage immédiat en option.
+
+Le designer est un appel `claude -p` (stream-json, fil d'activité en direct, annulable) en **mode Plan par
+défaut** ; modèle (Opus par défaut), effort et mode réglables. Réponse attendue : un bloc JSON (`questions` ou
+`design`) ; en mode plan, un plan rendu par ExitPlanMode est aussi accepté. Brouillon persistant :
+`designer.json` dans le dossier de données. Moteur testé : `src/claude/Designer` (`tests/test_designer.cpp`).
+Test réel : `--design "<description>"` (réglages lus dans le `designer.json` du dossier de données de test) ;
+captures : `--panel designer[:questions|:demo|:creer]`, `designer:creer!` crée le projet d'exemple dans
+`<espace de test>/../depot-test`.
 
 ### Prise en main
 - **Premier lancement** : le guide s'ouvre sur sa page *Bienvenue*. **Lancements 2 à 11** : une bulle animée,
@@ -199,7 +290,7 @@ le bouton de page *Orchestrateur*, ou **Orchestrer…** dans l'inspecteur d'un p
   - *Mode d'emploi* : premiers pas, écran, éditeur, suivi de Claude, autorisations, configuration, usage,
     reprise/import, raccourcis ;
   - *Comprendre et bien utiliser* : les fonctionnalités non triviales, expliquées par le problème qu'elles
-    résolvent, quand elles servent et quand elles sont inutiles, avec exemples et pièges — le mode cowork
+    résolvent, quand elles servent et quand elles sont inutiles, avec exemples et pièges — les projets
     (pourquoi), organiser un projet, récaps/synthèses/contexte injecté, reprendre ou repartir, travailler en
     parallèle, doser l'autonomie et la réflexion (mode Plan, modes, effort, modèles, prompts), une journée type,
     FAQ. Chaque section a des boutons pour passer à la pratique.
@@ -220,7 +311,7 @@ F1 dans l'application affiche la liste complète.
 | Ctrl+F | Rechercher dans la conversation |
 | Ctrl+Maj+C | Copier la dernière réponse |
 | Ctrl+Maj+R | Générer le récap |
-| Ctrl+1 / Ctrl+2 / Ctrl+3 | Cockpit / tableau de bord / orchestrateur |
+| Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 | Cockpit / tableau de bord / orchestrateur / designer |
 | Ctrl+Maj+D | Tableau de bord dans une fenêtre séparée |
 | Maj+F1 | Guide de démarrage |
 | Ctrl+S | Tout enregistrer |
@@ -243,7 +334,9 @@ src/
                History        lecture des sessions de ~/.claude/projects
                Orchestrator   moteur de l'orchestrateur, sans UI : directives, file de
                               tâches, comptes rendus au fil de l'eau, budget, rotation
-  workspace/   Workspace      arborescence cowork sur disque + contexte injecté
+               Designer       conception projet + équipe : prompts, analyse JSON,
+                              validation, fichiers de départ, réglages de l'orchestrateur
+  workspace/   Workspace      arborescence des projets sur disque + contexte injecté
   app/         App (boucle SDL, actions), AppMenus, Settings
   ui/          ConversationView, PromptEditor, PermissionPanel, UsagePanel,
                ConfigPanel, WorkspacePanel, Dashboard (page 2 + fil d'activité),

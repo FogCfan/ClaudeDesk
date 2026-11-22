@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
@@ -199,13 +200,24 @@ int64_t unixFromIso(std::string_view iso) {
     if (std::sscanf(str.c_str(), "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &m, &s) < 3) return 0;
     tm.tm_year = Y - 1900; tm.tm_mon = M - 1; tm.tm_mday = D;
     tm.tm_hour = h; tm.tm_min = m; tm.tm_sec = s; tm.tm_isdst = -1;
-    // Les horodatages Claude Code finissent par 'Z' (UTC) ; les nôtres sont locaux.
-    if (!str.empty() && str.back() == 'Z') {
+    // Les horodatages Claude Code finissent par 'Z' ou '+00:00' (UTC, éventuellement décalé) ;
+    // les nôtres, sans suffixe, sont locaux.
+    auto utc = [&]() -> int64_t {
 #ifdef _WIN32
         return (int64_t)_mkgmtime(&tm);
 #else
         return (int64_t)timegm(&tm);
 #endif
+    };
+    if (!str.empty() && str.back() == 'Z') return utc();
+    size_t tpos = str.find('T');
+    if (tpos != std::string::npos) {
+        size_t sign = str.find_first_of("+-", tpos);
+        int oh = 0, om = 0;
+        if (sign != std::string::npos && std::sscanf(str.c_str() + sign + 1, "%d:%d", &oh, &om) >= 1) {
+            int64_t off = (int64_t)oh * 3600 + (int64_t)om * 60;
+            return utc() - (str[sign] == '-' ? -off : off);
+        }
     }
     return (int64_t)std::mktime(&tm);
 }
@@ -222,6 +234,32 @@ std::string humanDate(int64_t t) {
     else
         std::strftime(buf, sizeof buf, "%d/%m/%Y", &tm);
     return buf;
+}
+
+std::string humanWhen(int64_t t) {
+    if (t <= 0) return "—";
+    std::tm tm = localTm(t);
+    std::tm now = localTm(nowUnix());
+    // Écart en jours calendaires (minuit local à minuit local).
+    std::tm a = tm, b = now;
+    a.tm_hour = b.tm_hour = 12;
+    a.tm_min = b.tm_min = a.tm_sec = b.tm_sec = 0;
+    a.tm_isdst = b.tm_isdst = -1;
+    long long days = (long long)std::llround(std::difftime(std::mktime(&a), std::mktime(&b)) / 86400.0);
+    char hm[16];
+    std::strftime(hm, sizeof hm, "%H:%M", &tm);
+    if (days == 0) return std::string("aujourd'hui ") + hm;
+    if (days == 1) return std::string("demain ") + hm;
+    if (days == -1) return std::string("hier ") + hm;
+    static const char* jours[] = {"dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."};
+    char buf[48];
+    std::snprintf(buf, sizeof buf, "%s %02d/%02d %s", jours[tm.tm_wday % 7], tm.tm_mday, tm.tm_mon + 1, hm);
+    return buf;
+}
+
+int localMinuteOfDay(int64_t t) {
+    std::tm tm = localTm(t);
+    return tm.tm_hour * 60 + tm.tm_min;
 }
 
 std::string humanDuration(int64_t s) {

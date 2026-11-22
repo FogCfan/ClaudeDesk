@@ -47,9 +47,16 @@ struct Folder {
     std::string recap;   // synthèse générée des conversations du dossier
     int64_t recapTime = 0;
     std::string icon;    // petite étiquette affichée (« code », « infra »…), optionnel
+    // Projets : type de projet (claude/ProjectKind : software, concept, data, document, hybrid ; vide = non précisé,
+    // traité comme un logiciel pour les projets d'avant les types).
+    std::string projectKind;
     Folder* parent = nullptr;
     std::vector<std::unique_ptr<Folder>> children;
     std::vector<ConversationMeta> conversations;
+    // Autres fichiers déposés dans le dossier (documents de référence : cahier des charges, schémas, images…).
+    // Leur chemin est donné à Claude dans le contexte des conversations du dossier. Les fichiers internes
+    // (« _dossier.json », « .… ») n'y figurent pas.
+    std::vector<fs::path> files;
 
     std::string displayPath() const;  // « Projet › Code › Rendu »
     const Folder* project() const;
@@ -71,6 +78,11 @@ public:
     bool renameFolder(Folder* f, const std::string& newName, std::string* error = nullptr);
     bool removeFolder(Folder* f);  // déplacé dans .corbeille
     bool saveFolderMeta(Folder* f);
+    // Copie des fichiers dans le dossier (documents de référence) ; renvoie le nombre copié. Un fichier du même nom
+    // n'est pas écrasé : la copie reçoit un suffixe « (2) ».
+    int addFiles(Folder* f, const std::vector<fs::path>& sources, std::string* error = nullptr);
+    bool removeFile(Folder* f, const fs::path& file);  // déplacé dans .corbeille
+    static bool isInternalFile(const fs::path& p);    // _dossier.json, conversations, fichiers cachés…
 
     // Conversations
     // Écrit la conversation (JSON complet produit par ClaudeSession::toJson, enrichi ici).

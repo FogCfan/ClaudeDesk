@@ -9,7 +9,11 @@ namespace claude {
 bool OneShot::start(const std::string& exe, const std::string& model, const std::string& prompt, const std::string& cwd) {
     process_ = std::make_unique<Process>();
     std::vector<std::string> args = {"-p", "--output-format", streamJson ? "stream-json" : "json",
-                                     "--no-session-persistence", "--tools", "", "--disable-slash-commands"};
+                                     "--no-session-persistence", "--strict-mcp-config"};
+    if (!defaultTools) args.insert(args.end(), {"--tools", ""});
+    if (!slashCommands) args.push_back("--disable-slash-commands");
+    if (!permissionMode.empty()) args.insert(args.end(), {"--permission-mode", permissionMode});
+    if (!effort.empty()) args.insert(args.end(), {"--effort", effort});
     if (streamJson) args.push_back("--verbose");
     if (!model.empty()) args.insert(args.end(), {"--model", model});
     if (!process_->start(exe, args, cwd)) {
@@ -21,6 +25,15 @@ bool OneShot::start(const std::string& exe, const std::string& model, const std:
     process_->write(prompt);
     process_->closeStdin();
     return true;
+}
+
+void OneShot::cancel() {
+    if (finished_) return;
+    if (process_) process_->shutdown(0);
+    finished_ = true;
+    ok_ = false;
+    error_ = "Annulé";
+    if (onDone) onDone(*this);
 }
 
 void OneShot::update() {

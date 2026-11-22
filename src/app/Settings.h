@@ -13,6 +13,17 @@ struct PromptPreset {
     std::string text;
 };
 
+// Préréglages d'énergie (valeurs de Settings::energyMode).
+enum EnergyMode { EnergyAuto = 0, EnergyPerformance = 1, EnergyBalanced = 2, EnergySaver = 3, EnergyCustom = 4 };
+const char* energyModeLabel(int mode);
+const char* energyModeSummary(int mode);
+
+struct Settings;
+// Applique un préréglage fixe (Performance, Équilibré, Économie) aux réglages graphiques.
+void applyEnergyPreset(Settings& s, int preset);
+// Les réglages graphiques correspondent-ils exactement à ce préréglage ?
+bool energyPresetMatches(const Settings& s, int preset);
+
 struct Settings {
     std::string claudeExe;              // vide = détection automatique
     std::string workspaceRoot;          // vide = Documents\ClaudeDesk
@@ -38,7 +49,8 @@ struct Settings {
     int fpsMode = 0;                    // 0 VSync (fréquence de l'écran), 1 limite personnalisée, 2 illimité
     int fpsCap = 144;
     bool ecoIdle = false;               // ne redessiner qu'en cas d'activité
-    bool ecoBackground = false;         // 30 i/s quand l'application n'a pas le focus
+    bool ecoBackground = false;         // cadence réduite (backgroundFps) quand l'application n'a pas le focus
+    int backgroundFps = 30;             // cadence en arrière-plan (et réduite) quand ecoBackground
     bool showFps = false;
     bool animations = true;
     float animSpeed = 1.0f;
@@ -47,6 +59,11 @@ struct Settings {
     bool highQuality = true;            // courbes / cercles plus finement tessellés
     int fontRenderer = 0;               // 0 FreeType léger, 1 FreeType sans grille, 2 stb_truetype
     std::string renderDriver;           // "" = auto ; direct3d12, direct3d11, vulkan, opengl, gpu, software          // premier lancement : proposer la visite guidée
+    // Énergie : préréglage choisi (EnergyMode). Automatique = Performance sur secteur, Économie sur batterie
+    // (réglables). Modifier un réglage de détail fait passer en « Personnalisé ».
+    int energyMode = 0;
+    int energyOnAc = 1;                 // préréglage sur secteur (mode automatique)
+    int energyOnBattery = 3;            // préréglage sur batterie (mode automatique)
     bool dashDetached = false;          // tableau de bord dans sa propre fenêtre
     bool dashShowIdle = true;
 

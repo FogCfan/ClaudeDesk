@@ -11,15 +11,32 @@ doctest · FreeType. Chaîne MSYS2 UCRT64 (gcc, cmake, ninja), presets dans `CMa
 Code, commentaires et textes d'interface en **français**.
 
 ## Carte du code
-- `src/app` — `App` (boucle, onglets, fenêtres), `AppMenus`, `Settings` (settings.json)
+- `src/app` — `App` (boucle, onglets, fenêtres), `AppMenus`, `Settings` (settings.json ; préréglages d'énergie
+  `applyEnergyPreset` / `energyPresetMatches`, mode automatique selon `SDL_GetPowerInfo` dans `App::tickEnergy`)
 - `src/claude` — `ClaudeSession` (protocole stream-json), `Process`, `CommandLine`,
-  `SessionConfig`, `History`, `Transcript`, `UsageTracker` (rate_limit_event), `OneShot` (récaps),
-  `Orchestrator` (moteur de l'orchestrateur, sans UI : directives `@@DELEGUER/@@HUMAIN/@@ATTENDRE/@@TERMINE`, comptes rendus au fil de l'eau, garde-fous)
+  `SessionConfig`, `Auth` (connexion : `isAuthErrorText`, `claude auth status --json` → `AuthChecker`),
+  `History`, `Transcript`, `UsageTracker` (rate_limit_event + rapport de `/usage` : `claude -p "/usage"` est une commande locale, gratuite,
+  qui répond même limite atteinte → `usage_report.rate_limits`), `OneShot` (récaps),
+  `Designer` (conception projet + équipe d'agents à partir d'une description : prompts, JSON, validation, fichiers de départ),
+  `ProjectKind` (types de projets — logiciel, idées et concept, analyse de données, rapport/audit, hybride, auto, question :
+  ClaudeDesk n'est PAS réservé aux développeurs. Le type règle le Designer, le prompt de l'orchestrateur (« Nature du
+  projet »), les consignes et le « Vérifié » des tâches d'agents, la mémoire injectée et les libellés. Enregistré dans
+  `_dossier.json` (`projectKind`) et `OrchestratorSettings::projectKind` ; défaut « software » pour l'existant),
+  `Orchestrator` (moteur de l'orchestrateur, sans UI : directives `@@DELEGUER/@@HUMAIN/@@ATTENDRE/@@TERMINE/@@NOUVEL_AGENT`, comptes rendus au fil de l'eau, garde-fous ;
+  un nouvel agent n'est JAMAIS créé sans l'accord de l'humain : `pendingAgents` → question → `OrchestratorHost::createAgent`)
 - `src/ui` — panneaux ImGui : `ConversationView`, `PromptEditor`, `ConfigPanel`,
-  `WorkspacePanel`, `Dashboard`, `UsagePanel`, `PermissionPanel`, `Markdown`, `Theme`, `Anim`, `Tutorial`,
+  `WorkspacePanel` (panneau « Projets » — l'ancien « Espace de travail » / « mode cowork », renommé : ne plus écrire
+  « cowork » dans l'interface ; arbre à icônes, explorateur du dossier de travail, fichiers de référence
+  `Folder::files`, dépôt de fichiers `dropOnProjects`), `Icons` (icônes vectorielles dessinées à la main : les emoji
+  ne s'affichent pas dans les libellés ; `ui::iconTreeNode`, `ui::icon`, `ui::fileIcon`), `Dashboard`, `UsagePanel`, `PermissionPanel`, `Markdown`, `Theme`, `Anim`, `Tutorial`,
   `OrchestratorPanel` (page 2 « Orchestrateur », Ctrl+3, + `AppOrchHost`, l'adaptateur moteur ↔ conversations ; état dans
   `<projet>/_orchestrateur.json`). La discussion du cerveau est exclue des onglets (`isOrchBrain`) et rendue en cartes
   (`drawBrainEntry`) ; le tableau de bord l'affiche en tête avec son équipe (`drawOrchestrationHero`).
+  `LoginPanel` (fenêtre « Connexion à Claude » : `claude auth login` lancé dans une fenêtre de terminal via
+  `TerminalProcess`, connexion détectée par `auth status` toutes les 2 s, puis renvoi des messages refusés
+  (`ClaudeSession::resendLast`) ; l'orchestrateur est mis en pause à l'échec et repris après ; un tour refusé
+  faute de connexion ne compte pas dans `stats.turns`). Carte d'erreur : `drawAuthErrorCard`.
+  `DesignerPanel` (page 3 « Designer », Ctrl+4 : Décrire → Clarifier → Ajuster → Créer ; brouillon `designer.json`).
 - `src/workspace` — `Workspace` : vrais dossiers + `_dossier.json` + `*.conv.json`, corbeille, `buildContext`
 - `src/util` — chemins, chaînes, fichiers
 - `tests/` — doctest (`desk_tests`) : protocole, workspace, chaînes
@@ -49,9 +66,17 @@ Le workflow `.github/workflows/macos.yml` compile et teste sur macOS à chaque p
 ## Vérification visuelle (instance isolée)
 ```
 build\debug\ClaudeDesk.exe --data-dir <tmp>\data --workspace <tmp>\ws ^
-    [--cwd <dossier>] [--panel history|light|dashboard|detached|guide|welcome|example|tour<N>] ^
-    [--send "message"] --nowait --screenshot <tmp>\capture.bmp --after 3
+    [--cwd <dossier>] [--panel history|light|dashboard|detached|guide|welcome|example|tour<N>|config[:<onglet>]] ^
+    [--size 900x600] [--send "message"] --nowait --screenshot <tmp>\capture.bmp --after 3
 ```
+`--size` réduit la fenêtre pour vérifier les panneaux étroits (helpers `ui::sameLineIfFits`, `ui::fitItemWidth`,
+`ui::sideNote` dans `Theme.h` : les boutons passent à la ligne au lieu de sortir du panneau).
+Projets : `--panel projets:legende|projets:fichiers` (légende des icônes, explorateur du dossier de travail déplié).
+Connexion : `--panel login|login:attente|login:ok|login:conv` (fenêtre ou carte de conversation, sans rien lancer).
+Designer : `--panel designer[:questions|:demo|:doc|:type-<id>|:creer|:creer!]` (`doc` = conception d'audit ; `type-data`… =
+étape 1, type présélectionné ; `creer!` crée le projet d'exemple dans `<ws>/../depot-test`),
+`--design "<description>"` lance une vraie conception (mettre `{"model":"haiku","request":{"kind":"data"}}` dans
+`<tmp>\data\designer.json`) — SANS `--nowait`, sinon la capture n'attend pas la fin de la conception.
 Orchestrateur : `--panel orchestrator[:budget|:modeles|:execution|:discussion]` ouvre la page ; `--orchestrate "<objectif>"` la lance sur le premier
 projet à thèmes de l'espace de test (la capture attend la fin de l'orchestration, 2 min max après `--after`).
 La capture ne contient que la fenêtre ; la lire ensuite pour vérifier. Pour tester un vrai
@@ -67,7 +92,10 @@ La capture ne contient que la fenêtre ; la lire ensuite pour vérifier. Pour te
 ## Pièges connus
 - ImGui : une fenêtre `NoBringToFrontOnFocus` passe derrière l'hôte du dockspace.
 - Écrire les scripts (Python, etc.) avec l'outil Write, pas en heredoc bash : les `"\n"` cassent
-  les chaînes C++ générées.
+  les chaînes C++ générées. Dans un script Python qui génère du C++, doubler les antislashs (`'\\\\'`) ou utiliser
+  une chaîne brute `r'''…'''`.
+- `Process_posix.cpp` et les branches `#else` de `_WIN32` ne sont PAS compilés sous Windows : une erreur n'y apparaît
+  qu'au build macOS de la CI. Les relire avec soin après modification.
 
 ## Git
 Dépôt public `FogCfan/ClaudeDesk`, branche `main`. `gh.exe` : `"/c/Program Files/GitHub CLI/gh.exe"`

@@ -18,6 +18,12 @@ public:
     std::function<void(OneShot&)> onDone;
     std::function<void(const nlohmann::json&)> onEvent;  // mode flux : chaque message JSON
     bool streamJson = false;
+    bool slashCommands = false;  // laisse le CLI interpréter les commandes (« /usage » : locale, sans appel au modèle)
+    bool defaultTools = false;   // outils par défaut du CLI (sinon aucun outil : --tools "")
+    std::string permissionMode;  // --permission-mode (plan, default…) ; vide = celui du CLI
+    std::string effort;          // --effort ; vide = celui du CLI
+
+    void cancel();  // arrête le processus ; onDone est appelé avec l'erreur « Annulé »
 
     bool start(const std::string& exe, const std::string& model, const std::string& prompt, const std::string& cwd);
     void update();        // appelle onDone quand c'est fini

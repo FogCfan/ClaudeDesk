@@ -26,6 +26,29 @@ const char* kDefaultObjective =
     "Terminer la construction du logiciel en suivant le plan du projet (docs/PLAN.md s'il existe), "
     "phase par phase, avec des tests qui passent à chaque étape.";
 
+// Objectif proposé par défaut selon le type de projet (l'humain le précise ensuite).
+std::string defaultObjective(claude::ProjectKind k) {
+    switch (k) {
+        case claude::ProjectKind::Concept:
+            return "Mener la réflexion du projet jusqu'à des documents clairs dans le dossier du projet : synthèse, "
+                   "options comparées, décisions argumentées et plan d'action, relus et cohérents.";
+        case claude::ProjectKind::Data:
+            return "Analyser les données du dossier du projet (sans jamais modifier les fichiers d'origine) et livrer un "
+                   "rapport de conclusions avec graphiques, chaque chiffre produit par un script reproductible.";
+        case claude::ProjectKind::Document:
+            return "Produire le document du projet (plan validé d'abord), structuré et sourcé, relu de façon croisée, "
+                   "et exporté au format demandé.";
+        case claude::ProjectKind::Hybrid:
+            return "Mener le projet de la conception (besoins, choix, maquette) à la réalisation, en suivant le plan "
+                   "(docs/PLAN.md s'il existe), avec documents et réalisation vérifiés et cohérents.";
+        case claude::ProjectKind::Auto:
+            return "Mener le projet à son terme en suivant son plan (docs/PLAN.md s'il existe), étape par étape, chaque "
+                   "livrable vérifié.";
+        default:
+            return kDefaultObjective;
+    }
+}
+
 // Résumé du rôle d'un agent : premières lignes utiles des notes de son dossier.
 // Phrases entières (coupées à la fin d'une phrase, sinon d'un mot), sans Markdown :
 // le résumé est inséré dans un message, un « ** » ou un « ` » orphelin casserait la mise en forme.
@@ -65,6 +88,9 @@ std::string clockOf(int64_t t) {
 }
 
 std::string pctText(double f) { return std::to_string((int)std::lround(f * 100)) + " %"; }
+// Pourcentage entier (arrondi stable : 0,145 calculé en 0,14499… donne 15, pas 14).
+int pctInt(double f) { return (int)std::lround(f * 100 + 1e-6); }
+std::string pctOf(int v) { return std::to_string(v) + " %"; }
 
 struct Alias {
     const char* value;
@@ -96,7 +122,8 @@ public:
         return v;
     }
 
-    std::string openBrain(const std::string& hint, const std::string& systemPrompt) override {
+    std::string openBrain(const std::string& hint, const std::string& systemPrompt,
+                          const std::vector<std::string>& tools) override {
         OpenConversation* oc = nullptr;
         if (!hint.empty() && ensureOpen(hint)) oc = find(hint);
         if (!oc) {
@@ -109,10 +136,12 @@ public:
             oc->meta.status = "active";
         }
         auto& s = *oc->session;
-        if (s.config.systemPrompt != systemPrompt || s.config.systemPromptMode != claude::SystemPromptMode::Append) {
+        if (s.config.systemPrompt != systemPrompt || s.config.systemPromptMode != claude::SystemPromptMode::Append ||
+            s.config.enabledTools != tools) {
             claude::SessionConfig cfg = s.config;
             cfg.systemPromptMode = claude::SystemPromptMode::Append;
             cfg.systemPrompt = systemPrompt;
+            cfg.enabledTools = tools;  // lecture seule : ni tests ni build sur le modèle le plus cher
             if (s.processRunning()) s.applyConfig(cfg);
             else s.config = cfg;
         }
@@ -139,6 +168,22 @@ public:
         return oc->session->localId;
     }
 
+    void recapConversations(const std::vector<std::string>& ids) override { app.requestRecaps(ids); }
+
+    // Nouvel agent accepté par l'humain : un thème de plus dans le projet, la fiche de rôle en notes.
+    std::string createAgent(const std::string& name, const std::string& notes, std::string& error) override {
+        ws::Folder* p = app.orchProjectFolder();
+        if (!p) {
+            error = "le projet n'existe plus dans vos projets";
+            return {};
+        }
+        ws::Folder* f = app.workspace_.createFolder(p, name, &error);
+        if (!f) return {};
+        f->notes = notes;
+        app.workspace_.saveFolderMeta(f);
+        return f->name;
+    }
+
     bool ensureOpen(const std::string& id) override {
         if (id.empty()) return false;
         return find(id) || app.openConversation(id, false);
@@ -152,11 +197,23 @@ public:
             if (s.processRunning()) s.setPermissionMode(opt.permissionMode);
             else s.config.permissionMode = opt.permissionMode;
         }
-        // Le modèle se change à chaud ; l'effort relance la session (--resume) avant l'envoi.
+        // Conversation neuve (jamais démarrée) : version allégée. Une conversation en cours garde ses réglages
+        // (changer ses outils invaliderait tout son cache) ; elle sera allégée à sa prochaine rotation.
+        if (opt.lean && s.claudeSessionId.empty() && !s.processRunning()) {
+            for (const char* t : {"Agent", "Task"})
+                if (std::find(s.config.disallowedTools.begin(), s.config.disallowedTools.end(), t) == s.config.disallowedTools.end())
+                    s.config.disallowedTools.push_back(t);
+            for (const char* f : {"--disable-slash-commands", "--strict-mcp-config"})
+                if (s.config.extraArgs.find(f) == std::string::npos)
+                    s.config.extraArgs += (util::trim(s.config.extraArgs).empty() ? "" : " ") + std::string(f);
+            s.dirty = true;
+        }
+        // Le modèle se change à chaud ; l'effort et le navigateur relancent la session (--resume) avant l'envoi.
         if (!opt.model.empty() && s.config.model != opt.model) s.setModel(opt.model);
-        if (!opt.effort.empty() && s.config.effort != opt.effort) {
+        if ((!opt.effort.empty() && s.config.effort != opt.effort) || s.config.chrome != opt.chrome) {
             claude::SessionConfig cfg = s.config;
-            cfg.effort = opt.effort;
+            if (!opt.effort.empty()) cfg.effort = opt.effort;
+            cfg.chrome = opt.chrome;
             s.applyConfig(cfg);
         }
         if (oc->meta.status.empty() || oc->meta.status == "idea") oc->meta.status = "active";
@@ -176,6 +233,14 @@ public:
         st.turns = s.stats.turns;
         st.costUsd = s.stats.costUsd;
         st.context = s.stats.contextWindow > 0 ? (double)s.stats.contextTokens / (double)s.stats.contextWindow : 0.0;
+        st.contextTokens = s.stats.contextTokens;
+        st.lastTurnAt = s.stats.turnHistory.empty() ? 0 : s.stats.turnHistory.back().time;
+        st.model = !s.config.model.empty() ? s.config.model : s.stats.lastModel;
+        st.effort = s.config.effort;
+        st.apiCalls = s.stats.apiCalls;
+        st.cacheReadTokens = s.stats.cacheReadTokens;
+        st.cacheWriteTokens = s.stats.cacheWriteTokens;
+        st.outputTokens = s.stats.outputTokens;
         if (!st.busy) st.lastText = claude::lastTurnText(s.entries);
         return st;
     }
@@ -197,8 +262,13 @@ public:
     std::string rotate(const std::string& agent, const std::string& convId) override {
         if (!app.rotating_.count(convId)) {
             app.rotating_.insert(convId);
-            app.requestRecap(convId);
-            return {};
+            // Récap déjà à jour (fait en fin de phase, rien de neuf depuis) : on repart tout de suite.
+            OpenConversation* oc = find(convId);
+            if (oc && oc->session->dirty) app.saveConversation(*oc);
+            if (!oc || App::needsRecap(oc->meta)) {
+                app.requestRecap(convId);
+                return {};
+            }
         }
         for (auto& j : app.jobs_)
             if (j->target == convId && !j->finished()) return {};  // récap en cours
@@ -209,28 +279,14 @@ public:
         if (!agent.empty())
             for (auto& ch : p->children)
                 if (ch->name == agent) folder = ch.get();
-        OpenConversation* old = find(convId);
-        OpenConversation* oc = app.newConversation(folder, {}, false);
-        if (!oc) return {};
-        auto& s = *oc->session;
-        if (old) s.config = old->session->config;  // modèle, effort, mode, prompt système
-        s.title = agent.empty() ? "Orchestrateur" : "Tâches de l'orchestrateur";
-        if (agent.empty()) {
-            oc->meta.pinned = true;
-            s.config.systemPromptMode = claude::SystemPromptMode::Append;
-            s.config.systemPrompt = claude::Orchestrator::systemPrompt();
-        }
-        oc->meta.status = "active";
-        oc->injectContext = true;
-        std::string nid = s.localId;
-        if (old) {
-            old->meta.status = "done";
-            old->meta.pinned = false;
-            app.saveConversation(*old);
-            int idx = app.indexOfConversation(convId);
-            if (idx >= 0) app.closeConversation(idx);  // libère son processus ; elle reste dans l'espace de travail
-        }
-        return nid;
+        OpenConversation* oc =
+            app.replaceConversation(convId, folder, agent.empty() ? "Orchestrateur" : "Tâches de l'orchestrateur");
+        return oc ? oc->session->localId : std::string();
+    }
+
+    void interrupt(const std::string& id) override {
+        if (OpenConversation* oc = find(id))
+            if (oc->session->state == claude::SessionState::Busy) oc->session->interrupt();
     }
 
     void onEvent(const std::string& text, bool important) override {
@@ -271,8 +327,16 @@ bool App::loadOrchestrator(ws::Folder* project) {
         }
     } else {
         claude::applyBudgetPreset(orch_->settings, claude::BudgetPreset::Medium);
+        // Nouvel orchestrateur : réglé d'après le type du projet
+        if (!project->projectKind.empty()) {
+            const auto& info = claude::projectKindInfo(claude::projectKindFromId(project->projectKind));
+            orch_->settings.visualChecks = info.visualChecks;
+        }
     }
-    if (orch_->settings.objective.empty()) orch_->settings.objective = kDefaultObjective;
+    // Le type du projet fait foi (il peut avoir été changé depuis l'Inspecteur)
+    if (!project->projectKind.empty()) orch_->settings.projectKind = project->projectKind;
+    if (orch_->settings.objective.empty())
+        orch_->settings.objective = defaultObjective(claude::projectKindFromId(orch_->settings.projectKind));
     orchSeenQuestion_ = orch_->questionSeq;
     return true;
 }
@@ -303,13 +367,39 @@ void App::orchestratorResume() {
     saveOrchestrator();
 }
 
+void App::orchestratorRefreshBrain() {
+    if (!orch_ || orch_->brainConvId.empty()) return;
+    AppOrchHost h(*this);
+    // Sans effet si rien n'a changé ; sinon la session repart (--resume, historique gardé) au prochain message.
+    h.openBrain(orch_->brainConvId, orch_->brainPrompt(), orch_->brainTools());
+}
+
+bool App::orchestratorAnswer(const std::string& answer) {
+    if (!orch_) return false;
+    AppOrchHost h(*this);
+    if (!orch_->answerHuman(h, answer)) return false;
+    saveOrchestrator();
+    return true;
+}
+
 void App::tickOrchestrator() {
     if (!orch_) return;
     if (!orchProjectFolder()) {
-        if (orch_->running()) orch_->pause("le projet n'existe plus dans l'espace de travail");
+        if (orch_->running()) orch_->pause("le projet n'existe plus dans vos projets");
         return;
     }
     AppOrchHost h(*this);
+    // Option cliquée dans le fil : réponse à la question en attente, sinon simple message au cerveau (orchestration
+    // en pause ou arrêtée : ses directives seront appliquées à la reprise).
+    if (!orchQuickAnswer_.empty()) {
+        std::string a = std::move(orchQuickAnswer_), id = std::move(orchQuickAnswerConv_);
+        orchQuickAnswer_.clear();
+        if (orch_->state == claude::OrchState::WaitingHuman && id == orch_->brainConvId) {
+            if (!orchestratorAnswer(a)) toast("Réponse impossible pour l'instant : l'orchestrateur est occupé.", true);
+        } else if (int idx = indexOfConversation(id); idx >= 0) {
+            sendText(*open_[idx], a);
+        }
+    }
     orch_->tick(h);
     // Nouvelle question : la fenêtre système clignote ; la barre d'état et le sélecteur de pages le signalent.
     if (orch_->state == claude::OrchState::WaitingHuman && orch_->questionSeq != orchSeenQuestion_) {
@@ -409,75 +499,119 @@ void App::drawOrchestratorBudgetCard(bool sub) {
     bool limited = sub ? o.settings.sessionShare > 0 : o.settings.maxCostUsd > 0;
     double spent = sub ? o.windowSpent : o.budgetSpentUsd();
     if (!idle && limited) {
-        const char* lbl = "↺ Relancer le budget";
+        // Rien de consommé mais une limite figée par une relance précédente : on peut revenir à la part du niveau.
+        bool recalc = sub && spent <= 1e-9 && o.budgetOverridden();
+        const char* lbl = recalc ? "↺ Recalculer le budget" : "↺ Relancer le budget";
         ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(lbl).x -
                                                              ImGui::GetStyle().FramePadding.x * 2));
-        ImGui::BeginDisabled(spent <= 1e-9);
+        ImGui::BeginDisabled(spent <= 1e-9 && !recalc);
         if (ImGui::SmallButton(lbl)) {
             o.resetBudget(host);
             saveOrchestrator();
         }
         ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Remet le compteur à 0 pour prolonger le travail au même niveau.\n"
-                              "La limite reste la même, sauf s'il reste moins que cela dans la session :\n"
-                              "elle est alors ramenée à ce qui reste (abonnement).");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (recalc) {
+                double u5 = five ? five->current(nowT) : -1;
+                double room = u5 >= 0 ? std::max(0.0, o.ceiling() - (u5 - o.windowSpent)) : -1;
+                ImGui::SetTooltip("La limite actuelle (%s) vient d'une relance précédente.\n"
+                                  "Revenir à la part normale du niveau : %s de ce qui reste%s.",
+                                  pctText(o.sessionAllowance()).c_str(), pctText(o.settings.sessionShare).c_str(),
+                                  room >= 0 ? (", soit ≈ " + pctText(o.settings.sessionShare * room) + " de la fenêtre").c_str() : "");
+            } else if (spent <= 1e-9) {
+                ImGui::SetTooltip("Rien n'a encore été consommé : le budget prévu (zone bleue) est entier.");
+            } else {
+                ImGui::SetTooltip("Remet le compteur à 0 pour prolonger le travail au même niveau.\n"
+                                  "La limite reste la même, sauf s'il reste moins que cela dans la session :\n"
+                                  "elle est alors ramenée à ce qui reste (abonnement).");
+            }
+        }
     }
 
     auto fmt = [&](double v) { return sub ? pctText(v) : util::formatUsd(v); };
-    auto stat = [&](const char* label, const std::string& value, ImVec4 color, float w) {
+    float avail = ImGui::GetContentRegionAvail().x;
+    auto stat = [&](const char* label, const std::string& value, ImVec4 color, float w, bool last = false) {
         ImGui::BeginGroup();
         ImGui::TextDisabled("%s", label);
         ImGui::PushFont(fontBold, ImGui::GetStyle().FontSizeBase * 1.55f);
         ImGui::TextColored(color, "%s", value.c_str());
         ImGui::PopFont();
         ImGui::EndGroup();
-        ImGui::SameLine(0, std::max(fs, w - ImGui::GetItemRectSize().x));
+        if (!last) ImGui::SameLine(0, std::max(fs * 0.6f, w - ImGui::GetItemRectSize().x));
     };
+    // Abonnement : où en est la session de 5 h du compte (le chiffre qui compte vraiment)
+    const double u = sub && five ? five->current(nowT) : -1;
+    const double ceil = o.ceiling();
+    auto sessionColor = [&](double v) {
+        return v >= ceil ? pal.err : v >= ceil - 0.15 ? pal.warn : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    };
+    auto sessionStat = [&](float w, bool last = false) {
+        if (u >= 0) stat("Session de 5 h", pctText(u), sessionColor(u), w, last);
+    };
+    const double base = o.windowBase >= 0 ? o.windowBase : std::max(0.0, u - o.windowSpent);
 
     if (idle) {
         // Avant le départ : ce que représentera le budget
+        float colW = std::max(fs * 8.0f, avail / 2);
         if (!limited) {
-            stat("Limite", "Aucune", pal.dim, fs * 8);
-            ImGui::NewLine();
+            sessionStat(colW);
+            stat("Limite", "Aucune", pal.dim, colW, true);
             ImGui::TextDisabled(sub ? "Seuls les plafonds d'usage arrêtent l'orchestration ; elle enchaîne les sessions."
                                     : "Aucune limite de dépense.");
+            if (u >= 0) drawSessionBar(u, u, 0, 0, 0, ceil, -1, fs * 1.35f);
         } else if (sub && five) {
-            double room = std::max(0.0, o.ceiling() - five->utilization);
-            stat("Alloué pour cette session", "≈ " + pctText(o.settings.sessionShare * room), pal.accent, fs * 14);
-            ImGui::NewLine();
+            double room = std::max(0.0, ceil - u);
+            sessionStat(colW);
+            stat("Alloué pour cette session", "≈ " + pctText(o.settings.sessionShare * room), pal.accent, colW, true);
+            drawSessionBar(u, u, 0, o.settings.sessionShare * room, tol, ceil, -1, fs * 1.35f);
             ImGui::TextDisabled("%s de ce qui reste avant le plafond (%s) · renouvelé à chaque nouvelle session",
                                 pctText(o.settings.sessionShare).c_str(), pctText(room).c_str());
         } else if (sub) {
-            stat("Alloué", pctText(o.settings.sessionShare) + " du restant", pal.accent, fs * 14);
-            ImGui::NewLine();
+            stat("Alloué", pctText(o.settings.sessionShare) + " du restant", pal.accent, fs * 14, true);
             ImGui::TextDisabled("Quota mesuré au démarrage.");
         } else {
-            stat("Limite", util::formatUsd(o.settings.maxCostUsd), pal.accent, fs * 10);
-            ImGui::NewLine();
+            stat("Limite", util::formatUsd(o.settings.maxCostUsd), pal.accent, fs * 10, true);
         }
     } else {
         double allowance = sub ? o.sessionAllowance() : o.settings.maxCostUsd;
         double f = limited ? o.budgetFraction() : -1;
+        // Session de 5 h tout juste réinitialisée : chiffres de la nouvelle session (estimés jusqu'à la prochaine
+        // mesure), comme la barre — et non ceux de la précédente.
+        const bool freshWindow = sub && five && five->expired(nowT);
+        if (freshWindow) {
+            spent = 0;
+            allowance = limited ? o.settings.sessionShare * ceil : 0;
+            f = limited ? 0.0 : -1;
+        }
         ImVec4 vc = f >= 1.0 + tol ? pal.err : f >= 1.0 ? pal.warn : f >= 0.75 ? ImVec4(0.90f, 0.72f, 0.25f, 1) : pal.ok;
-        float colW = fs * 8.5f;
-        stat("Consommé", fmt(spent), limited ? vc : ImGui::GetStyleColorVec4(ImGuiCol_Text), colW);
+        bool capped = sub && five && o.settings.usagePause > 0 && u >= o.settings.usagePause;
+        int cols = (u >= 0 ? 1 : 0) + (limited ? 4 : 1);
+        float colW = std::max(fs * 6.5f, avail / (float)cols);
+        sessionStat(colW);
+        // Abonnement : entiers cohérents avec la barre (reste = limite − orchestration)
+        const int iSpent = pctInt(spent), iLimit = pctInt(allowance);
+        stat(sub ? "Orchestration" : "Consommé", sub ? pctOf(iSpent) : fmt(spent),
+             limited ? vc : ImGui::GetStyleColorVec4(ImGuiCol_Text), colW, !limited);
         if (limited) {
-            bool capped = sub && five && o.settings.usagePause > 0 && five->utilization >= o.settings.usagePause;
-            stat("Limite", capped ? std::string("—") : fmt(allowance), ImGui::GetStyleColorVec4(ImGuiCol_Text), colW);
-            stat("Reste", capped ? std::string("—") : fmt(std::max(0.0, allowance - spent)), pal.dim, colW);
-            ImGui::BeginGroup();
-            ImGui::TextDisabled("Utilisé");
-            ImGui::PushFont(fontBold, ImGui::GetStyle().FontSizeBase * 1.55f);
-            ImGui::TextColored(vc, "%d %%", (int)std::lround(f * 100));
-            ImGui::PopFont();
-            ImGui::EndGroup();
-            drawBudgetGauge(f, tol, -1, fs * 0.85f);
-            bool atCeiling = sub && five && o.settings.usagePause > 0 && five->utilization >= o.settings.usagePause;
-            if (atCeiling)
+            stat("Limite", capped ? std::string("—") : sub ? pctOf(iLimit) : fmt(allowance), ImGui::GetStyleColorVec4(ImGuiCol_Text), colW);
+            stat("Reste", capped ? std::string("—") : sub ? pctOf(std::max(0, iLimit - iSpent)) : fmt(std::max(0.0, allowance - spent)),
+                 pal.dim, colW);
+            stat("Budget utilisé", std::to_string((int)std::lround(f * 100)) + " %", vc, colW, true);
+        }
+        if (sub && five && five->expired(nowT) && !idle) {
+            // La session de 5 h vient de se réinitialiser : l'ancien budget ne vaut plus, le nouveau sera calculé à
+            // la prochaine mesure (dès qu'un agent ou l'orchestrateur répond, ou à l'actualisation de l'usage).
+            ImGui::TextColored(pal.link, "Nouvelle session de 5 h : le budget sera recalculé dès la prochaine mesure.");
+            drawSessionBar(0, 0, 0, allowance, tol, ceil, -1, fs * 1.35f);
+        } else if (u >= 0) {
+            drawSessionBar(u, base, o.windowSpent, limited && !capped ? allowance : 0, tol, ceil, -1, fs * 1.35f);
+        }
+        if (u < 0 && limited) drawBudgetGauge(f, tol, -1, fs * 0.85f);
+        if (limited) {
+            if (capped)
                 ImGui::TextColored(pal.warn, "Plafond du compte atteint (%s ≥ %s) : l'orchestration attend la prochaine session "
                                              "de 5 h%s, puis reprend avec un budget renouvelé.",
-                                   pctText(five->utilization).c_str(), pctText(o.settings.usagePause).c_str(),
+                                   pctText(u).c_str(), pctText(o.settings.usagePause).c_str(),
                                    five->resetsAt > nowT ? (" (dans " + util::humanDuration(five->resetsAt - nowT) + ")").c_str() : "");
             else if (f >= 1.0 + tol)
                 ImGui::TextColored(pal.err, "Budget épuisé (cible + tolérance).");
@@ -487,19 +621,201 @@ void App::drawOrchestratorBudgetCard(bool sub) {
             else if (f >= 0.75)
                 ImGui::TextColored(ImVec4(0.90f, 0.72f, 0.25f, 1), "Phase finale : l'orchestrateur resserre le périmètre.");
         } else {
-            ImGui::NewLine();
             ImGui::TextDisabled("Sans limite%s.", sub ? " : seuls les plafonds d'usage arrêtent l'orchestration" : "");
         }
     }
-    // Quota du compte et équivalent API
+    // Quota du compte et équivalent API, sur une ligne
     if (sub && five) {
-        std::string reset = five->resetsAt > nowT ? ", réinitialisation dans " + util::humanDuration(five->resetsAt - nowT) : "";
-        ImGui::TextDisabled("Compte : fenêtre de 5 h à %s (plafond %s%s) · semaine à %s", pctText(five->utilization).c_str(),
-                            pctText(o.settings.usagePause).c_str(), reset.c_str(), week ? pctText(week->utilization).c_str() : "?");
-    }
-    if (sub && o.spentUsd > 0) ImGui::TextDisabled("Équivalent API indicatif : %s (non facturé)", util::formatUsd(o.spentUsd).c_str());
-    else if (!sub && o.spentUsd > o.budgetSpentUsd() + 1e-9)
+        std::string info;
+        if (five->expired(nowT))
+            info = "nouvelle session de 5 h : mesure en attente";
+        else if (five->resetsAt > nowT)
+            info = "réinitialisation dans " + util::humanDuration(five->resetsAt - nowT);
+        info += std::string(info.empty() ? "" : " · ") + "semaine à " + (week ? pctText(week->current(nowT)) : std::string("?"));
+        if (o.spentUsd > 0) info += " · équivalent API " + util::formatUsd(o.spentUsd) + " (non facturé)";
+        ImGui::TextDisabled("%s", info.c_str());
+        if (ImGui::IsItemHovered() && o.spentUsd > 0)
+            ImGui::SetTooltip("Ce que l'orchestration aurait coûté facturée à l'usage (API). Avec l'abonnement, seul le\n"
+                              "quota compte : rien n'est facturé.");
+    } else if (sub && o.spentUsd > 0) {
+        ImGui::TextDisabled("Équivalent API indicatif : %s (non facturé)", util::formatUsd(o.spentUsd).c_str());
+    } else if (!sub && o.spentUsd > o.budgetSpentUsd() + 1e-9) {
         ImGui::TextDisabled("Total depuis le départ : %s", util::formatUsd(o.spentUsd).c_str());
+    }
+}
+
+// Barre de la session de 5 h (0 → 100 % de la fenêtre du compte), lisible d'un coup d'œil :
+//   gris      = usage hors orchestration (vos autres conversations, l'usage d'avant le départ)
+//   vert      = consommé par l'orchestration (orange puis rouge au-delà du budget)
+//   bleu      = ce qui RESTE du budget de l'orchestration (le cadre bleu = tout son budget)
+//   hachures  = dépassement toléré pour finir proprement
+//   rouge     = au-delà du plafond du compte
+// Chaque segment porte sa valeur, centrée, s'il est assez large ; la fin du budget et le plafond sont repérés sur
+// une règle sous la barre ; l'infobulle décrit le segment survolé.
+void App::drawSessionBar(double used, double base, double spent, double allowance, double tol, double ceiling,
+                         float width, float height) {
+    const auto& pal = ui::palette();
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    if (width <= 0) width = ImGui::GetContentRegionAvail().x;
+    ImGui::Dummy(ImVec2(width, height));
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p1(p0.x + width, p0.y + height);
+    const float r = height * 0.35f;
+    auto X = [&](double v) { return p0.x + width * (float)std::clamp(v, 0.0, 1.0); };
+    used = std::clamp(used, 0.0, 1.0);
+    spent = std::clamp(spent, 0.0, used);
+    (void)base;  // la référence de l'orchestrateur peut être périmée : on part toujours de l'usage réel
+    const double others = std::max(0.0, used - spent);
+    const double zoneEnd = others + allowance;               // fin du budget de l'orchestration
+    const double tolEnd = others + allowance * (1.0 + tol);   // fin de la tolérance
+    const double left = std::max(0.0, zoneEnd - used);        // ce qui reste du budget
+    const ImVec4 planned = ImVec4(0.36f, 0.58f, 0.98f, 1.0f);
+    const ImVec4 grey = ImVec4(pal.dim.x, pal.dim.y, pal.dim.z, 0.55f);
+    // Valeurs affichées, cohérentes entre elles
+    const int iUsed = pctInt(used), iSpent = std::min(pctInt(spent), iUsed), iOthers = iUsed - iSpent;
+    const int iBudget = pctInt(allowance), iLeft = std::max(0, iBudget - iSpent), iEnd = iOthers + iBudget;
+    const int iCeil = pctInt(ceiling), iTolEnd = iOthers + pctInt(allowance * (1.0 + tol));
+    const ImVec4 oc = allowance > 0 && spent >= allowance * (1.0 + tol) ? pal.err
+                      : allowance > 0 && spent >= allowance                ? pal.warn
+                                                                           : pal.ok;
+
+    // --- Segments ---
+    dl->AddRectFilled(p0, p1, ui::col(pal.cardBg), r);
+    if (ceiling < 1.0) dl->AddRectFilled(ImVec2(X(ceiling), p0.y), p1, ui::col(pal.err, 0.13f), r, ImDrawFlags_RoundCornersRight);
+    if (others > 0) dl->AddRectFilled(p0, ImVec2(X(others), p1.y), ui::col(grey), r, ImDrawFlags_RoundCornersLeft);
+    if (allowance > 0 && left > 0) dl->AddRectFilled(ImVec2(X(used), p0.y), ImVec2(X(zoneEnd), p1.y), ui::col(planned, 0.42f));
+    // Tolérance : hachures
+    if (allowance > 0 && tol > 0) {
+        float h0 = X(std::max(used, zoneEnd)), h1 = X(tolEnd);
+        if (h1 > h0 + 1) {
+            dl->PushClipRect(ImVec2(h0, p0.y), ImVec2(h1, p1.y), true);
+            for (float x = h0 - height; x < h1; x += 5.0f)
+                dl->AddLine(ImVec2(x, p1.y), ImVec2(x + height, p0.y), ui::col(pal.warn, 0.55f), 1.0f);
+            dl->PopClipRect();
+        }
+    }
+    if (spent > 0) dl->AddRectFilled(ImVec2(X(others), p0.y), ImVec2(X(used), p1.y), ui::col(oc, 0.9f));
+    if (allowance > 0) dl->AddRect(ImVec2(X(others), p0.y + 1), ImVec2(X(zoneEnd), p1.y - 1), ui::col(planned), 2.0f, 0, 1.5f);
+    if (ceiling < 1.0) dl->AddLine(ImVec2(X(ceiling), p0.y - 3), ImVec2(X(ceiling), p1.y + 3), ui::col(pal.err), 2.0f);
+    dl->AddRect(p0, p1, ui::col(ImGui::GetStyleColorVec4(ImGuiCol_Border)), r);
+
+    // --- Valeurs centrées dans leur segment (seulement si elles y tiennent) ---
+    ImFont* font = fontBold ? fontBold : ImGui::GetFont();
+    const float fsz = std::min(height * 0.72f, ImGui::GetFontSize());
+    const float ty = p0.y + (height - fsz) * 0.5f;
+    auto textW = [&](const std::string& t) { return font->CalcTextSizeA(fsz, FLT_MAX, 0, t.c_str()).x; };
+    auto centered = [&](double a, double b, const std::string& t, ImU32 c) {
+        float x0 = X(a), x1 = X(b), w = textW(t);
+        if (x1 - x0 < w + 8) return;
+        dl->AddText(font, fsz, ImVec2((x0 + x1 - w) * 0.5f, ty), c, t.c_str());
+    };
+    const ImU32 white = ui::col(ImVec4(1, 1, 1, 0.95f));
+    centered(0, others, pctOf(iOthers), white);
+    centered(others, used, pctOf(iSpent), ui::col(ImVec4(0.05f, 0.05f, 0.05f, 0.9f)));
+    if (allowance > 0 && left > 0) {
+        std::string lt = "reste " + pctOf(iLeft);
+        if (X(zoneEnd) - X(used) >= textW(lt) + 8) centered(used, zoneEnd, lt, white);
+        else centered(used, zoneEnd, pctOf(iLeft), white);
+    }
+
+    // --- Règle sous la barre : fin du budget, plafond ---
+    {
+        const float rfs = ImGui::GetFontSize() * 0.8f;
+        ImFont* rf = fontUi ? fontUi : ImGui::GetFont();
+        float y = p1.y + 2;
+        struct Mark {
+            double v;
+            std::string text;
+            ImVec4 color;
+        };
+        std::vector<Mark> marks;
+        if (allowance > 0) marks.push_back({zoneEnd, "fin du budget " + pctOf(iEnd), planned});
+        if (ceiling < 1.0) marks.push_back({ceiling, "plafond " + pctOf(iCeil), pal.err});
+        std::sort(marks.begin(), marks.end(), [](const Mark& a, const Mark& b) { return a.v < b.v; });
+        float taken = p0.x - 1e6f;
+        for (auto& m : marks) {
+            float w = rf->CalcTextSizeA(rfs, FLT_MAX, 0, m.text.c_str()).x;
+            float x = X(m.v);
+            float lx = std::clamp(x - w * 0.5f, p0.x, p1.x - w);
+            if (lx < taken + 8) {  // chevauchement : on décale à droite si possible
+                lx = taken + 8;
+                if (lx + w > p1.x) continue;
+            }
+            dl->AddLine(ImVec2(x, p1.y), ImVec2(x, y + 3), ui::col(m.color, 0.8f), 1.5f);
+            dl->AddText(rf, rfs, ImVec2(lx, y + 3), ui::col(m.color), m.text.c_str());
+            taken = lx + w;
+        }
+        ImGui::Dummy(ImVec2(width, rfs + 4));
+    }
+
+    // --- Légende : pastille + valeur ---
+    {
+        float sw = ImGui::GetFontSize() * 0.62f;
+        auto chip = [&](ImU32 fill, ImU32 border, const std::string& text, bool hatch = false) {
+            ImVec2 c = ImGui::GetCursorScreenPos();
+            float y = c.y + (ImGui::GetTextLineHeight() - sw) * 0.5f;
+            ImGui::Dummy(ImVec2(sw, ImGui::GetTextLineHeight()));
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            d->AddRectFilled(ImVec2(c.x, y), ImVec2(c.x + sw, y + sw), fill, 2.0f);
+            if (hatch)
+                for (float k = 0; k < sw * 2; k += 3.5f)
+                    d->AddLine(ImVec2(c.x + std::max(0.0f, k - sw), y + std::min(sw, k)),
+                               ImVec2(c.x + std::min(sw, k), y + std::max(0.0f, k - sw)), ui::col(pal.warn, 0.8f), 1.0f);
+            if (border) d->AddRect(ImVec2(c.x, y), ImVec2(c.x + sw, y + sw), border, 2.0f, 0, 1.5f);
+            ImGui::SameLine(0, 4);
+            ImGui::TextDisabled("%s", text.c_str());
+        };
+        float gapX = ImGui::GetFontSize() * 0.9f;
+        auto next = [&](const std::string& t) { ui::sameLineIfFits(ImGui::CalcTextSize(t.c_str()).x + sw + 4 + gapX); };
+        std::string t1 = "autres usages " + pctOf(iOthers);
+        chip(ui::col(grey), 0, t1);
+        std::string t2 = "orchestration " + pctOf(iSpent);
+        next(t2);
+        chip(ui::col(oc, 0.9f), 0, t2);
+        if (allowance > 0) {
+            std::string t3 = "budget " + pctOf(iBudget) + " (reste " + pctOf(iLeft) + ")";
+            next(t3);
+            chip(ui::col(planned, 0.42f), ui::col(planned), t3);
+            if (tol > 0) {
+                std::string t4 = "tolérance +" + std::to_string((int)std::lround(tol * 100)) + " %";
+                next(t4);
+                chip(ui::col(pal.cardBg), 0, t4, true);
+            }
+        }
+        if (ceiling < 1.0) {
+            std::string t5 = "plafond " + pctOf(iCeil);
+            next(t5);
+            chip(ui::col(pal.err, 0.13f), ui::col(pal.err), t5);
+        }
+    }
+
+    // --- Infobulle : le segment survolé, puis le résumé ---
+    if (hovered) {
+        double v = std::clamp((double)((ImGui::GetMousePos().x - p0.x) / width), 0.0, 1.0);
+        ImGui::BeginTooltip();
+        if (v < others)
+            ImGui::TextColored(pal.dim, "Hors orchestration : %s — vos autres conversations et l'usage d'avant le départ.",
+                               pctOf(iOthers).c_str());
+        else if (v < used)
+            ImGui::TextColored(oc, "Consommé par l'orchestration : %s (sur un budget de %s).", pctOf(iSpent).c_str(),
+                               pctOf(iBudget).c_str());
+        else if (allowance > 0 && v < zoneEnd)
+            ImGui::TextColored(planned, "Reste du budget de l'orchestration : %s, jusqu'à %s de la session.",
+                               pctOf(iLeft).c_str(), pctOf(iEnd).c_str());
+        else if (allowance > 0 && tol > 0 && v < tolEnd)
+            ImGui::TextColored(pal.warn, "Tolérance : jusqu'à %s pour finir proprement plutôt que de bâcler la fin.",
+                               pctOf(iTolEnd).c_str());
+        else if (ceiling < 1.0 && v >= ceiling)
+            ImGui::TextColored(pal.err, "Au-delà du plafond du compte (%s) : l'orchestration se met en pause jusqu'à la "
+                                        "session suivante.",
+                               pctText(ceiling).c_str());
+        else
+            ImGui::TextDisabled("Libre dans la session (hors budget de l'orchestration).");
+        ImGui::Separator();
+        ImGui::TextDisabled("Session de 5 h de votre abonnement : %s utilisés sur 100 %%.", pctOf(iUsed).c_str());
+        ImGui::EndTooltip();
+    }
 }
 
 // Avancement + budget, côte à côte quand la place le permet.
@@ -516,7 +832,7 @@ void App::drawOrchestratorStatus() {
     float gap = ImGui::GetStyle().ItemSpacing.x;
     float budgetW = wide ? std::clamp(avail * 0.5f, fs * 36, fs * 58) : avail;
     float progW = wide ? avail - budgetW - gap : avail;
-    float cardH = ImGui::GetTextLineHeightWithSpacing() * 8.4f;
+    float cardH = ImGui::GetTextLineHeightWithSpacing() * 9.6f;
     auto beginCard = [&](const char* id, float w) {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, pal.cardBg);
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
@@ -854,7 +1170,7 @@ void App::drawOrchestratorSettings() {
         int64_t nowT = util::nowUnix();
         const claude::RateWindow* five = usage_.find("five_hour");
         const claude::RateWindow* week = usage_.find("seven_day");
-        double rem = five ? std::max(0.0, (o.settings.usagePause > 0 ? o.settings.usagePause : 1.0) - five->utilization) : 1.0;
+        double rem = five ? std::max(0.0, (o.settings.usagePause > 0 ? o.settings.usagePause : 1.0) - five->current(nowT)) : 1.0;
         std::string resetIn = five && five->resetsAt > nowT ? util::humanDuration(five->resetsAt - nowT) : std::string();
 
         if (!orchAdvanced_) {
@@ -935,9 +1251,19 @@ void App::drawOrchestratorSettings() {
             // État du quota et conséquences du niveau choisi
             ImGui::PushTextWrapPos(0);
             if (subNow && five) {
-                ImGui::TextDisabled("Votre quota : fenêtre de 5 h à %s%s · semaine à %s.", pctText(five->utilization).c_str(),
-                                    resetIn.empty() ? "" : (" (réinitialisation dans " + resetIn + ")").c_str(),
-                                    week ? pctText(week->utilization).c_str() : "?");
+                // Où en est la session de 5 h, et où s'arrêterait l'orchestration avec le niveau choisi
+                double u5 = five->current(nowT);
+                ImGui::PushFont(fontBold, ImGui::GetStyle().FontSizeBase * 1.2f);
+                ImGui::Text("Session de 5 h : %s", pctText(u5).c_str());
+                ImGui::PopFont();
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s · semaine à %s", resetIn.empty() ? "" : ("réinitialisation dans " + resetIn).c_str(),
+                                    week ? pctText(week->current(nowT)).c_str() : "?");
+                bool running = o.state != claude::OrchState::Idle && o.windowBase >= 0;
+                double base = running ? o.windowBase : u5;
+                double allowance = o.settings.sessionShare > 0 ? (running ? o.sessionAllowance() : o.settings.sessionShare * rem) : 0;
+                drawSessionBar(u5, base, running ? o.windowSpent : 0, allowance, o.settings.budgetTolerance, o.ceiling(), -1,
+                               ImGui::GetFontSize() * 1.35f);
                 if (rem < 0.05)
                     ImGui::TextColored(pal.warn, "Il ne reste que %s avant le plafond de %s : l'orchestration se mettra vite en "
                                                  "pause, puis reprendra seule à la réinitialisation%s.",
@@ -1000,8 +1326,8 @@ void App::drawOrchestratorSettings() {
                     if (ImGui::SmallButton("Mesurer maintenant")) refreshUsage();
                 } else {
                     std::string reset = five->resetsAt > nowT ? " · réinitialisation dans " + util::humanDuration(five->resetsAt - nowT) : "";
-                    ImGui::Text("Fenêtre de 5 h : %s utilisés%s", pctText(five->utilization).c_str(), reset.c_str());
-                    if (week) ImGui::TextDisabled("Semaine : %s utilisés", pctText(week->utilization).c_str());
+                    ImGui::Text("Fenêtre de 5 h : %s utilisés%s", pctText(five->current(nowT)).c_str(), reset.c_str());
+                    if (week) ImGui::TextDisabled("Semaine : %s utilisés", pctText(week->current(nowT)).c_str());
                 }
 
                 ImGui::Spacing();
@@ -1173,12 +1499,52 @@ void App::drawOrchestratorSettings() {
         if (ImGui::BeginTabItem("Exécution", nullptr, tabFlags(3))) {
             ImGui::SetNextItemWidth(w);
             changedIf(ImGui::SliderInt("Agents en parallèle", &o.settings.maxParallel, 1, 6));
+            changedIf(ImGui::Checkbox("L'orchestrateur peut proposer de nouveaux agents", &o.settings.allowNewAgents));
+            ImGui::SameLine();
+            ui::helpMarker("Quand un besoin durable n'est couvert par aucun agent (une interface graphique distincte, un\n"
+                           "nouveau sous-système…), l'orchestrateur peut proposer un nouvel agent avec sa fiche de rôle.\n"
+                           "Rien n'est créé sans votre accord : chaque proposition vous est soumise comme une question\n"
+                           "(Créer / Ne pas créer / Autre : vos précisions, qu'il intègre avant de la soumettre de nouveau).\n"
+                           "Accepté, l'agent devient un nouveau thème du projet, sa fiche dans les notes.");
+            if (o.settings.allowNewAgents) {
+                ImGui::SetNextItemWidth(w);
+                if (ImGui::InputInt("Agents au plus (0 = sans plafond)", &o.settings.maxAgents)) {
+                    o.settings.maxAgents = std::max(0, o.settings.maxAgents);
+                    o.changed = true;
+                }
+            }
             changedIf(ImGui::Checkbox("Comptes rendus au fil de l'eau", &o.settings.rollingReports));
             ImGui::SameLine();
             ui::helpMarker("Activé : dès qu'un agent termine alors que d'autres travaillent encore, l'orchestrateur reçoit\n"
                            "son compte rendu et peut aussitôt confier une nouvelle tâche aux agents libres (ou répondre\n"
                            "@@ATTENDRE). L'équipe reste occupée, au prix de quelques tours de plus pour l'orchestrateur.\n"
                            "Désactivé : il attend que toute l'équipe ait fini avant de décider de la suite.");
+            changedIf(ImGui::Checkbox("Vérification visuelle (captures d'écran)", &o.settings.visualChecks));
+            ImGui::SameLine();
+            ui::helpMarker("Tout changement visible (interface, page web, graphique) est livré avec une capture PNG dans\n"
+                           "_captures/ à la racine du dépôt (ignoré par git). L'agent l'examine lui-même, et l'orchestrateur\n"
+                           "peut l'ouvrir pour juger — même en lecture seule : Claude lit les images avec Read.\n"
+                           "Coût : environ 1,5 k jetons par image regardée.");
+            if (ws::Folder* proj = orchProjectFolder(); proj && !proj->children.empty()) {
+                std::string head = "Agents équipés du navigateur (" + std::to_string(o.settings.browserAgents.size()) + ")###browserAgents";
+                if (ImGui::TreeNode(head.c_str())) {
+                    ImGui::PushTextWrapPos(0);
+                    ImGui::TextDisabled("Ils reçoivent les outils Claude in Chrome (--chrome) : ouvrir une page, cliquer, lire la "
+                                        "console, capturer. Il faut Chrome ouvert avec l'extension Claude. Cocher ou décocher "
+                                        "relance la conversation de l'agent à sa prochaine tâche (cache relu une fois).");
+                    ImGui::PopTextWrapPos();
+                    for (auto& ch : proj->children) {
+                        bool on = o.isBrowserAgent(ch->name);
+                        if (ImGui::Checkbox((ch->name + "##br").c_str(), &on)) {
+                            auto& v = o.settings.browserAgents;
+                            v.erase(std::remove(v.begin(), v.end(), ch->name), v.end());
+                            if (on) v.push_back(ch->name);
+                            o.changed = true;
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+            }
             ImGui::SetNextItemWidth(w);
             if (ImGui::InputInt("Cycles maximum (0 = illimité)", &o.settings.maxCycles)) {
                 o.settings.maxCycles = std::max(0, o.settings.maxCycles);
@@ -1207,18 +1573,79 @@ void App::drawOrchestratorSettings() {
                            "relit tout son contexte, ce qui consomme du quota), ClaudeDesk en fait le récap, ouvre une\n"
                            "conversation neuve dans le même dossier et y injecte la mémoire du projet (notes, synthèse,\n"
                            "récaps). Vaut pour les agents et pour l'orchestrateur.");
+            changedIf(ImGui::Checkbox("Récaps de l'équipe en fin de phase", &o.settings.recapOnPhaseEnd));
+            ImGui::SameLine();
+            ui::helpMarker("Quand l'orchestrateur conclut (@@TERMINE) ou se met en pause jusqu'à la session suivante\n"
+                           "(sa pause ou celle du budget), ClaudeDesk fait le récap des conversations de l'équipe (modèle\n"
+                           "des récaps, 3 à la fois), sans les fermer. La mémoire du projet suit le travail fait, et à la\n"
+                           "reprise, cache expiré, une conversation trop lourde repart aussitôt de ce récap au lieu de\n"
+                           "l'attendre. Pas lors d'une pause sur le plafond du compte, pour préserver le quota.");
             ImGui::BeginDisabled(!o.settings.contextRotation);
-            int ctxPct = (int)std::lround(o.settings.rotateAtContext * 100);
-            ImGui::SetNextItemWidth(w);
-            if (ImGui::SliderInt("Seuil de contexte", &ctxPct, 15, 90, "%d %%")) {
-                o.settings.rotateAtContext = ctxPct / 100.0;
-                o.changed = true;
-            }
+            // Seuils en milliers de jetons (k)
+            auto kSlider = [&](const char* label, int64_t& v, int lo, int hi) {
+                int k = (int)(v / 1000);
+                ImGui::SetNextItemWidth(w);
+                if (ImGui::SliderInt(label, &k, lo, hi, "%d k jetons")) {
+                    v = (int64_t)k * 1000;
+                    o.changed = true;
+                }
+            };
+            kSlider("Seuil de contexte", o.settings.rotateAtTokens, 40, 400);
+            ImGui::SameLine();
+            ui::helpMarker("Au-delà, la prochaine tâche part dans une conversation neuve (avec le récap).\n"
+                           "Chaque appel d'outil relit tout le contexte : 120 k plutôt que 300 k, c'est ~2,5× moins\n"
+                           "de jetons relus à chaque appel. Le contexte fixe de départ d'un agent est d'environ 35 k.");
             ImGui::SetNextItemWidth(w);
             if (ImGui::SliderInt("Ou après N tâches par conversation", &o.settings.rotateAfterTasks, 0, 12,
                                  o.settings.rotateAfterTasks == 0 ? "jamais" : "%d"))
                 o.changed = true;
+            changedIf(ImGui::Checkbox("Repartir du récap quand le cache a expiré", &o.settings.rotateWhenCold));
+            ImGui::SameLine();
+            ui::helpMarker("Le cache de prompt expire (≈ 1 h sous abonnement, 5 min en API). Reprendre une grosse\n"
+                           "conversation froide réécrit TOUT son contexte au prix fort (≈ 2× le prix normal) : après une\n"
+                           "pause ou une longue attente, mieux vaut repartir d'une conversation neuve avec le récap.");
+            ImGui::BeginDisabled(!o.settings.rotateWhenCold);
+            kSlider("si le contexte dépasse##cold", o.settings.coldRotateTokens, 20, 300);
             ImGui::EndDisabled();
+            changedIf(ImGui::Checkbox("Repartir du récap avant un changement de modèle ou d'effort", &o.settings.rotateOnSwitch));
+            ImGui::SameLine();
+            ui::helpMarker("Le cache est propre à chaque modèle : passer une conversation de 160 k de Sonnet à Haiku\n"
+                           "relit les 160 k sans cache — la « petite tâche Haiku » coûte alors plus cher que sur Sonnet.");
+            ImGui::BeginDisabled(!o.settings.rotateOnSwitch);
+            kSlider("si le contexte dépasse##switch", o.settings.switchRotateTokens, 20, 300);
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+
+            ImGui::SeparatorText("Économie");
+            changedIf(ImGui::Checkbox("Conversations allégées (sans skills, sous-agents ni serveurs MCP)", &o.settings.leanAgents));
+            ImGui::SameLine();
+            ui::helpMarker("Chaque conversation Claude Code reçoit la liste de tous vos skills, des sous-agents du dépôt et\n"
+                           "les instructions des serveurs MCP — relue à chaque appel. Les agents de l'orchestrateur n'en\n"
+                           "ont pas besoin : mesuré sur E7 Twin, le contexte fixe passe de 29,7 k à 17,6 k jetons.\n"
+                           "S'applique aux conversations neuves (après une rotation), pour ne pas casser le cache des autres.");
+            changedIf(ImGui::Checkbox("Orchestrateur en lecture seule (Read, Glob, Grep)", &o.settings.brainReadOnly));
+            ImGui::SameLine();
+            ui::helpMarker("L'orchestrateur est le modèle le plus cher et son contexte vit toute l'orchestration :\n"
+                           "en lecture seule, il ne lance ni tests ni build lui-même et délègue les vérifications à un\n"
+                           "agent économique. S'applique à son prochain message.");
+            ImGui::SetNextItemWidth(w);
+            if (ImGui::SliderInt("Compte rendu transmis (max)", &o.settings.reportMaxChars, 1000, 8000, "%d caractères"))
+                o.changed = true;
+            ImGui::SetNextItemWidth(w);
+            if (ImGui::SliderInt("Garde-fou : appels par tâche", &o.settings.maxCallsPerTask, 0, 400,
+                                 o.settings.maxCallsPerTask == 0 ? "aucun" : "%d"))
+                o.changed = true;
+            ImGui::SameLine();
+            ui::helpMarker("Une tâche qui dépasse ce nombre d'appels API (boucle d'essais, exploration sans fin) est\n"
+                           "interrompue ; l'orchestrateur reçoit le travail partiel et redécoupe la suite.");
+            {
+                int k = (int)(o.settings.taskContextLimit / 1000);
+                ImGui::SetNextItemWidth(w);
+                if (ImGui::SliderInt("Garde-fou : contexte d'une tâche", &k, 0, 800, k == 0 ? "aucun" : "%d k jetons")) {
+                    o.settings.taskContextLimit = (int64_t)k * 1000;
+                    o.changed = true;
+                }
+            }
             ImGui::SeparatorText("Permissions");
             modeCombo("Mode des agents", o.settings.workerMode);
             modeCombo("Mode de l'orchestrateur", o.settings.brainMode);
@@ -1373,15 +1800,26 @@ void App::drawOrchestratorTeam(bool compact) {
         std::string stl = v.label;
         if (v.working && v.task && v.task->sentAt > 0) stl += " · " + util::humanDuration(util::nowUnix() - v.task->sentAt);
         ImGui::TextColored(v.color, "%s", stl.c_str());
-        if (v.status.context > 0) {
+        if (v.status.contextTokens > 0) {
             ImGui::SameLine();
-            bool heavy = v.status.context >= o.settings.rotateAtContext && o.settings.contextRotation;
-            ImGui::TextColored(heavy ? pal.warn : pal.dim, "· contexte %d %%", (int)std::lround(v.status.context * 100));
+            bool heavy = o.settings.contextRotation && o.settings.rotateAtTokens > 0 &&
+                         v.status.contextTokens >= o.settings.rotateAtTokens;
+            ImGui::TextColored(heavy ? pal.warn : pal.dim, "· contexte %s", claude::kTokens(v.status.contextTokens).c_str());
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Occupation de la fenêtre de contexte de sa conversation.\n"
-                                  "Au-delà de %d %%, la prochaine tâche part dans une conversation neuve,\n"
+                ImGui::SetTooltip("Taille du contexte de sa conversation, relue à chaque appel API.\n"
+                                  "Au-delà de %s, la prochaine tâche part dans une conversation neuve,\n"
                                   "avec le récap de celle-ci (moins de contexte relu = moins de quota).",
-                                  (int)std::lround(o.settings.rotateAtContext * 100));
+                                  claude::kTokens(o.settings.rotateAtTokens).c_str());
+        }
+        if (v.task && v.task->calls > 0) {
+            ImGui::SameLine();
+            bool guard = !v.task->guardNote.empty();
+            ImGui::TextColored(guard ? pal.warn : pal.dim, "· %d appels", v.task->calls);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Cette tâche : %d appels API · %s relus en cache · %s écrits · %s générés%s%s",
+                                  v.task->calls, claude::kTokens(v.task->cacheRead).c_str(),
+                                  claude::kTokens(v.task->cacheWrite).c_str(), claude::kTokens(v.task->output).c_str(),
+                                  guard ? "\nInterrompue : " : "", guard ? v.task->guardNote.c_str() : "");
         }
         if (v.task && (v.task->sent || v.task->done) && (!v.task->model.empty() || !v.task->effort.empty())) {
             ImGui::SameLine();
@@ -1499,7 +1937,7 @@ void App::drawOrchestratorPage() {
 
     if (!orch_ || !proj) {
         ImGui::Spacing();
-        ImGui::TextWrapped("Choisissez un projet du mode cowork dont les thèmes sont des agents (ex. « E7 Twin »). "
+        ImGui::TextWrapped("Choisissez un projet dont les thèmes sont des agents (ex. « E7 Twin »). "
                            "L'orchestrateur les fera travailler ensemble jusqu'à l'objectif.");
         return;
     }

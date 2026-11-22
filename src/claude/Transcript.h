@@ -37,6 +37,10 @@ struct Entry {
 
 // Résumé d'une ligne pour un appel d'outil (« Read src/main.cpp », « Bash: git status »…).
 std::string toolSummary(const std::string& toolName, const nlohmann::json& input);
+// Nom de l'outil en clair, pour tous les publics (« Read » → « Lecture », « Bash » → « Commande »…).
+std::string toolLabel(const std::string& toolName);
+// Ce que Claude demande à faire, en une phrase (« modifier un fichier », « exécuter une commande »…).
+std::string toolAction(const std::string& toolName);
 
 nlohmann::json entryToJson(const Entry& e);
 Entry entryFromJson(const nlohmann::json& j);

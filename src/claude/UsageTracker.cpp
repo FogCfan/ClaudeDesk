@@ -7,27 +7,62 @@
 
 namespace claude {
 
+RateWindow& UsageTracker::upsert(const std::string& name) {
+    for (auto& x : windows)
+        if (x.name == name) return x;
+    windows.push_back({name});
+    return windows.back();
+}
+
 void UsageTracker::onRateLimitEvent(const nlohmann::json& info) {
     if (!info.is_object()) return;
     overageStatus = info.value("overageStatus", overageStatus);
     usingOverage = info.value("isUsingOverage", usingOverage);
-    auto upsert = [&](const std::string& name, const nlohmann::json& w) {
-        RateWindow* rw = nullptr;
-        for (auto& x : windows)
-            if (x.name == name) rw = &x;
-        if (!rw) {
-            windows.push_back({name});
-            rw = &windows.back();
-        }
-        if (w.contains("utilization") && w["utilization"].is_number()) rw->utilization = w["utilization"].get<double>();
-        if (w.contains("resetsAt") && w["resetsAt"].is_number()) rw->resetsAt = w["resetsAt"].get<int64_t>();
-        rw->status = w.value("status", rw->status);
+    auto apply = [&](const std::string& name, const nlohmann::json& w) {
+        RateWindow& rw = upsert(name);
+        if (w.contains("utilization") && w["utilization"].is_number()) rw.utilization = w["utilization"].get<double>();
+        if (w.contains("resetsAt") && w["resetsAt"].is_number()) rw.resetsAt = w["resetsAt"].get<int64_t>();
+        rw.status = w.value("status", rw.status);
     };
     if (info.contains("unifiedWindows") && info["unifiedWindows"].is_object()) {
-        for (auto& [name, w] : info["unifiedWindows"].items()) upsert(name, w);
+        for (auto& [name, w] : info["unifiedWindows"].items()) apply(name, w);
     } else if (info.contains("rateLimitType")) {
-        upsert(info.value("rateLimitType", "five_hour"), info);
+        apply(info.value("rateLimitType", "five_hour"), info);
     }
+    recordSample();
+}
+
+bool UsageTracker::onUsageReport(const nlohmann::json& rl) {
+    if (!rl.is_object() || !rl.contains("limits") || !rl["limits"].is_array()) return false;
+    bool any = false;
+    for (auto& l : rl["limits"]) {
+        if (!l.is_object() || !l.contains("percent") || !l["percent"].is_number()) continue;
+        std::string kind = l.value("kind", "");
+        // Mêmes noms que les rate_limit_event, pour que le reste de l'appli (orchestrateur…) s'y retrouve.
+        std::string name = kind == "session"         ? "five_hour"
+                           : kind == "weekly_all"    ? "seven_day"
+                           : kind == "weekly_opus"   ? "seven_day_opus"
+                           : kind == "weekly_sonnet" ? "seven_day_sonnet"
+                                                     : kind;
+        if (name.empty()) continue;
+        RateWindow& rw = upsert(name);
+        double pct = l["percent"].get<double>();
+        rw.utilization = pct / 100.0;
+        if (l.contains("resets_at") && l["resets_at"].is_string())
+            if (int64_t t = util::unixFromIso(l["resets_at"].get<std::string>()); t > 0) rw.resetsAt = t;
+        std::string sev = l.value("severity", "normal");
+        rw.status = pct >= 100 ? "rejected" : (sev.empty() || sev == "normal") ? "allowed" : "allowed_warning";
+        any = true;
+    }
+    if (rl.contains("extra_usage") && rl["extra_usage"].is_object()) {
+        auto& x = rl["extra_usage"];
+        usingOverage = x.value("is_enabled", false) && x.value("used_credits", 0.0) > 0;
+    }
+    if (any) recordSample();
+    return any;
+}
+
+void UsageTracker::recordSample() {
     // Ordre d'affichage stable : 5 h puis 7 jours puis le reste.
     std::stable_sort(windows.begin(), windows.end(), [](const RateWindow& a, const RateWindow& b) {
         auto rank = [](const std::string& n) { return n == "five_hour" ? 0 : n == "seven_day" ? 1 : 2; };
@@ -91,7 +126,7 @@ nlohmann::json SessionStats::toJson() const {
     for (auto& t : turnHistory)
         turnsJ.push_back({{"t", t.time}, {"c", t.costUsd}, {"i", t.inputTokens}, {"o", t.outputTokens}, {"d", t.durationS}});
     return {{"costUsd", costUsd},           {"inputTokens", inputTokens},   {"outputTokens", outputTokens},
-            {"cacheRead", cacheReadTokens}, {"cacheWrite", cacheWriteTokens}, {"turns", turns},
+            {"cacheRead", cacheReadTokens}, {"cacheWrite", cacheWriteTokens}, {"turns", turns}, {"apiCalls", apiCalls},
             {"contextTokens", contextTokens}, {"contextWindow", contextWindow}, {"apiSeconds", apiSeconds},
             {"lastModel", lastModel},       {"turnHistory", turnsJ}};
 }
@@ -104,6 +139,7 @@ void SessionStats::fromJson(const nlohmann::json& j) {
     cacheReadTokens = j.value("cacheRead", (int64_t)0);
     cacheWriteTokens = j.value("cacheWrite", (int64_t)0);
     turns = j.value("turns", 0);
+    apiCalls = j.value("apiCalls", 0);
     contextTokens = j.value("contextTokens", (int64_t)0);
     contextWindow = j.value("contextWindow", (int64_t)0);
     apiSeconds = j.value("apiSeconds", 0.0);

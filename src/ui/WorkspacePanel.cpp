@@ -1,11 +1,14 @@
-// Espace de travail « cowork » : projets › thèmes › conversations, inspecteur
-// (notes, synthèses, récaps) et import des sessions de Claude Code.
+// Panneau « Projets » : projets › thèmes › conversations, avec des icônes à la VS Code (projet, thème, agent,
+// orchestrateur, conversation, fichiers), l'explorateur du dossier de travail, les fichiers de référence,
+// l'inspecteur (notes, synthèses, récaps) et l'import des sessions de Claude Code.
 #include <algorithm>
+#include <cstdio>
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
 
 #include "app/App.h"
+#include "ui/Icons.h"
 #include "ui/Theme.h"
 #include "util/Paths.h"
 #include "util/Strings.h"
@@ -15,6 +18,17 @@ namespace app {
 namespace {
 
 const char* kConvPayload = "CD_CONV";
+constexpr double kDirRefreshS = 3.0;      // explorateur du dossier de travail : relecture au plus toutes les 3 s
+constexpr size_t kMaxDirEntries = 400;    // au-delà : « … » (dossiers énormes)
+
+// Dossiers lourds ou techniques, masqués dans l'explorateur (comme le fait VS Code par défaut pour .git).
+bool hiddenDir(const std::string& n) {
+    static const char* const names[] = {".git", "node_modules", "__pycache__", ".venv", "venv", ".vs", ".idea",
+                                        ".cache", ".corbeille", ".mypy_cache", ".pytest_cache", ".DS_Store"};
+    for (auto x : names)
+        if (n == x) return true;
+    return false;
+}
 
 // Met à jour le chemin des conversations ouvertes après un renommage de dossier.
 void fixOpenPaths(std::vector<std::unique_ptr<OpenConversation>>& open, const std::string& oldPrefix, const std::string& newPrefix) {
@@ -30,12 +44,122 @@ ImVec4 statusColor(const std::string& s) {
     return p.link;
 }
 
+std::string humanSize(uintmax_t n) {
+    char buf[32];
+    if (n < 1024) std::snprintf(buf, sizeof buf, "%u o", (unsigned)n);
+    else if (n < 1024 * 1024) std::snprintf(buf, sizeof buf, "%.1f Ko", n / 1024.0);
+    else std::snprintf(buf, sizeof buf, "%.1f Mo", n / (1024.0 * 1024.0));
+    return buf;
+}
+
+// Ligne de la légende : icône + explication.
+void legendRow(ui::Icon ic, const char* title, const char* text) {
+    ui::icon(ic);
+    ImGui::SameLine();
+    ImGui::TextUnformatted(title);
+    ImGui::SameLine();
+    ImGui::TextDisabled("— %s", text);
+}
+
 }  // namespace
 
+bool App::projectOrchestrated(const ws::Folder* project) {
+    if (!project) return false;
+    std::string path = util::pathToUtf8(project->path);
+    if (orch_ && orchProject_ == path) return true;
+    auto& c = orchFileCache_[path];
+    if (now_ - c.first > 5.0 || c.first == 0) {
+        std::error_code ec;
+        c = {now_ + 1e-9, fs::exists(project->path / "_orchestrateur.json", ec)};
+    }
+    return c.second;
+}
+
+bool App::isAgentFolder(const ws::Folder* f) {
+    return f && f->parent && f->parent->isProject && projectOrchestrated(f->parent);
+}
+
+bool App::isBrainConversation(const ws::Folder* f, const ws::ConversationMeta& m) {
+    if (isOrchBrain(m.id)) return true;
+    return f && f->isProject && m.title == "Orchestrateur" && projectOrchestrated(f);
+}
+
+void App::drawIconLegend() {
+    ImGui::TextUnformatted("Que représentent les icônes ?");
+    ImGui::Separator();
+    legendRow(ui::Icon::Project, "Projet", "un dossier de code sur lequel Claude travaille");
+    legendRow(ui::Icon::Folder, "Thème", "regroupe les conversations d'un sujet (Code, Infra, Docs…)");
+    legendRow(ui::Icon::Agent, "Agent", "thème d'un projet orchestré : un membre de l'équipe");
+    legendRow(ui::Icon::Orchestrator, "Orchestrateur", "la conversation qui pilote les agents");
+    legendRow(ui::Icon::Chat, "Conversation", "un échange enregistré avec Claude (double-clic pour le reprendre)");
+    legendRow(ui::Icon::WorkDir, "Dossier de travail", "les fichiers du projet (code, documents, données) que Claude lit et modifie");
+    legendRow(ui::Icon::FileText, "Fichier", "document de référence (glissez-en un sur un dossier pour l'ajouter)");
+    ImGui::Spacing();
+    ImGui::TextDisabled("Couleur des fichiers :");
+    ui::icon(ui::Icon::FileCode);
+    ImGui::SameLine();
+    ImGui::TextDisabled("code ");
+    ImGui::SameLine();
+    ui::icon(ui::Icon::FileData);
+    ImGui::SameLine();
+    ImGui::TextDisabled("données ");
+    ImGui::SameLine();
+    ui::icon(ui::Icon::FileImage);
+    ImGui::SameLine();
+    ImGui::TextDisabled("image ");
+    ImGui::SameLine();
+    ui::icon(ui::Icon::FilePdf);
+    ImGui::SameLine();
+    ImGui::TextDisabled("document");
+    ImGui::Spacing();
+    ui::icon(ui::Icon::Chat, 0, 1.0f);
+    ImGui::SameLine();
+    ImGui::TextDisabled("point orange : Claude travaille");
+}
+
+void App::addFilesTo(const std::string& folderPath, const std::vector<std::string>& files) {
+    ws::Folder* f = workspace_.findFolderByPath(util::pathFromUtf8(folderPath));
+    if (!f || files.empty()) return;
+    std::vector<fs::path> src;
+    for (auto& s : files) src.push_back(util::pathFromUtf8(s));
+    std::string err;
+    int n = workspace_.addFiles(f, src, &err);
+    if (n > 0)
+        toast((n > 1 ? std::to_string(n) + " fichiers ajoutés à « " : "Fichier ajouté à « ") + f->name +
+              " » : Claude les verra dans les nouvelles conversations du dossier.");
+    if (!err.empty()) toast(err, true);
+}
+
+bool App::dropOnProjects(float x, float y, const std::string& file) {
+    if (!showWorkspace_ || page_ != 0) return false;
+    if (x < projectsRect_[0] || x > projectsRect_[2] || y < projectsRect_[1] || y > projectsRect_[3]) return false;
+    std::string target;
+    for (auto& z : dropZones_)
+        if (x >= z.x0 && x <= z.x1 && y >= z.y0 && y <= z.y1) target = z.folder;
+    if (target.empty()) target = selectedFolder_;
+    if (target.empty()) {
+        toast("Lâchez le fichier sur un projet ou un thème pour l'y ajouter.", true);
+        return true;
+    }
+    std::error_code ec;
+    if (fs::is_directory(util::pathFromUtf8(file), ec)) {
+        toast("Seuls les fichiers peuvent être ajoutés à un projet (pas les dossiers).", true);
+        return true;
+    }
+    addFilesTo(target, {file});
+    return true;
+}
+
 void App::drawWorkspacePanel() {
-    if (!ImGui::Begin("Espace de travail", &showWorkspace_)) {
+    dropZones_.clear();
+    if (!ImGui::Begin("Projets", &showWorkspace_)) {
+        projectsRect_[2] = projectsRect_[0] - 1;  // panneau masqué : aucune zone de dépôt
         ImGui::End();
         return;
+    }
+    {
+        ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+        projectsRect_[0] = p.x, projectsRect_[1] = p.y, projectsRect_[2] = p.x + sz.x, projectsRect_[3] = p.y + sz.y;
     }
     if (ImGui::Button("+ Projet")) openNewProject_ = true;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Créer un projet (un dossier de travail + des thèmes)");
@@ -46,10 +170,21 @@ void App::drawWorkspacePanel() {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Importer des sessions faites dans le terminal (claude)");
     ImGui::SameLine();
-    if (ImGui::Button("⟳")) workspace_.rescan();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Relire le dossier de l'espace de travail");
+    if (ImGui::Button("⟳")) {
+        workspace_.rescan();
+        dirCache_.clear();
+        orchFileCache_.clear();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Relire le dossier des projets et les dossiers de travail");
+    ImGui::SameLine();
+    ImGui::Button("?");
+    if (ImGui::IsItemHovered() || optPanel_ == "projets:legende") {  // (capture de test : légende affichée)
+        ImGui::BeginTooltip();
+        drawIconLegend();
+        ImGui::EndTooltip();
+    }
     ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##filter", "Rechercher (titre, récap)…", &treeFilter_);
+    ImGui::InputTextWithHint("##filter", "Rechercher (titre, récap, fichier)…", &treeFilter_);
 
     ImGui::BeginChild("##tree");
     if (!util::trim(treeFilter_).empty()) {
@@ -61,13 +196,20 @@ void App::drawWorkspacePanel() {
                     ImGui::SameLine();
                     ImGui::TextDisabled("%s", f->displayPath().c_str());
                 }
+            for (auto& file : f->files)
+                if (util::containsInsensitive(util::pathToUtf8(file.filename()), treeFilter_)) {
+                    drawFileItem(util::pathToUtf8(file), f);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", f->displayPath().c_str());
+                }
             for (auto& ch : f->children) search(ch.get());
         };
         for (auto& p : workspace_.projects()) search(p.get());
     } else {
         if (workspace_.projects().empty())
-            ImGui::TextWrapped("Aucun projet. Créez-en un avec « + Projet » : un projet = un dossier de travail, "
-                               "découpé en thèmes (Code, Infra, Docs…) qui regroupent vos conversations.");
+            ImGui::TextWrapped("Aucun projet pour l'instant. Démarrez-en un depuis l'accueil (idées, analyse de données, "
+                               "rapport, logiciel… : le Designer organise le travail selon le type), ou avec « + Projet ». "
+                               "Un projet = un dossier de fichiers, découpé en thèmes qui regroupent vos conversations.");
         for (size_t i = 0; i < workspace_.projects().size(); ++i) {
             drawFolderNode(workspace_.projects()[i].get());
             // la liste a pu changer (suppression) : on arrête l'itération
@@ -84,7 +226,7 @@ void App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m) {
     for (auto& oc : open_)
         if (oc->session->localId == m.id) {
             isOpen = true;
-            busy = oc->session->state == claude::SessionState::Busy;
+            busy = oc->session->state == claude::SessionState::Busy || oc->session->state == claude::SessionState::Starting;
         }
     ImGui::PushID(m.id.c_str());
     if (renameTarget_ == m.id && !renameIsFolder_) {
@@ -104,22 +246,34 @@ void App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m) {
         ImGui::PopID();
         return;
     }
-    std::string label = std::string(m.pinned ? "★ " : "") + (busy ? "● " : "") + m.title;
-    bool selected = selectedConv_ == m.id;
+    bool brain = isBrainConversation(f, m);
+    std::string label = std::string(m.pinned ? "★ " : "") + m.title;
+    bool selected = selectedConv_ == m.id && selectedFile_.empty();
     ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
     if (selected) fl |= ImGuiTreeNodeFlags_Selected;
     if (isOpen) ImGui::PushStyleColor(ImGuiCol_Text, pal.accent);
-    ImGui::TreeNodeEx("##conv", fl, "%s", label.c_str());
+    ui::iconTreeNode("##conv", fl, brain ? ui::Icon::Orchestrator : ui::Icon::Chat, label.c_str(), 0, busy ? 1.0f : 0.0f);
     if (isOpen) ImGui::PopStyleColor();
+    {
+        ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        dropZones_.push_back({a.x, a.y, b.x, b.y, util::pathToUtf8(f->path)});
+    }
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
         selectedConv_ = m.id;
         selectedFolder_ = util::pathToUtf8(f->path);
+        selectedFile_.clear();
     }
-    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) openConversation(m.id);
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+        if (brain && isOrchBrain(m.id)) openOrchestratorPage(true);
+        else openConversation(m.id);
+    }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
         ImGui::BeginTooltip();
+        ui::icon(brain ? ui::Icon::Orchestrator : ui::Icon::Chat);
+        ImGui::SameLine();
         ImGui::TextUnformatted(m.title.c_str());
-        ImGui::TextDisabled("%s · %d messages · %s", util::humanDate(m.updated).c_str(), m.messages, util::formatUsd(m.costUsd).c_str());
+        ImGui::TextDisabled("%s · %s · %d messages · %s", brain ? "Orchestrateur" : "Conversation",
+                            util::humanDate(m.updated).c_str(), m.messages, util::formatUsd(m.costUsd).c_str());
         if (!m.recap.empty()) {
             ImGui::Separator();
             ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30);
@@ -136,6 +290,8 @@ void App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m) {
     }
     if (ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload(kConvPayload, m.id.c_str(), m.id.size() + 1);
+        ui::icon(ui::Icon::Chat);
+        ImGui::SameLine();
         ImGui::Text("Déplacer « %s »", m.title.c_str());
         ImGui::EndDragDropSource();
     }
@@ -210,6 +366,148 @@ void App::drawMoveMenu(const std::string& convId, ws::Folder* f) {
     }
 }
 
+void App::drawFileItem(const std::string& path, ws::Folder* owner) {
+    const auto& pal = ui::palette();
+    fs::path p = util::pathFromUtf8(path);
+    std::string name = util::pathToUtf8(p.filename());
+    ui::Icon ic = ui::fileIcon(name);
+    ImGui::PushID(path.c_str());
+    ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (selectedFile_ == path) fl |= ImGuiTreeNodeFlags_Selected;
+    ui::iconTreeNode("##file", fl, ic, name.c_str());
+    if (owner) {
+        ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        dropZones_.push_back({a.x, a.y, b.x, b.y, util::pathToUtf8(owner->path)});
+    }
+    if (ImGui::IsItemClicked()) {
+        selectedFile_ = path;
+        selectedFileOwner_ = owner ? util::pathToUtf8(owner->path) : std::string();
+        selectedConv_.clear();
+        if (owner) selectedFolder_ = util::pathToUtf8(owner->path);
+    }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) util::openInShell(path);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(path.c_str());
+        ImGui::TextDisabled(owner ? "Document de référence : Claude le voit dans les conversations de « %s »."
+                                  : "Fichier du dossier de travail%s",
+                            owner ? owner->name.c_str() : "");
+        ImGui::TextDisabled("Double-clic : ouvrir · clic droit : joindre à la conversation…");
+        ImGui::EndTooltip();
+    }
+    if (ImGui::BeginPopupContextItem("##filectx")) {
+        OpenConversation* oc = active();
+        if (ImGui::MenuItem("Ouvrir")) util::openInShell(path);
+        if (ImGui::MenuItem("Afficher dans l'Explorateur")) util::openInShell(util::pathToUtf8(p.parent_path()));
+        if (ImGui::MenuItem("Joindre à la conversation active", nullptr, false, oc != nullptr)) attachFile(*oc, path);
+        if (ImGui::MenuItem("Copier le chemin")) ImGui::SetClipboardText(path.c_str());
+        if (owner) {
+            ImGui::Separator();
+            if (ImGui::MenuItem("Retirer du projet (corbeille)")) {
+                if (!workspace_.removeFile(owner, p)) toast("Impossible de retirer ce fichier (ouvert ailleurs ?)", true);
+                if (selectedFile_ == path) selectedFile_.clear();
+                ImGui::EndPopup();
+                ImGui::PopID();
+                return;  // `path` peut référencer l'élément retiré
+            }
+        }
+        ImGui::EndPopup();
+    }
+    (void)pal;
+    ImGui::PopID();
+}
+
+void App::drawDirListing(const std::string& dir, int depth) {
+    auto& L = dirCache_[dir];
+    if (now_ - L.time > kDirRefreshS) {
+        L.time = now_;
+        L.entries.clear();
+        L.truncated = false;
+        std::error_code ec;
+        for (auto it = fs::directory_iterator(util::pathFromUtf8(dir), fs::directory_options::skip_permission_denied, ec);
+             !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            std::string n = util::pathToUtf8(it->path().filename());
+            std::error_code e2;
+            bool isDir = it->is_directory(e2);
+            if (isDir && hiddenDir(n)) continue;
+            if (L.entries.size() >= kMaxDirEntries) {
+                L.truncated = true;
+                break;
+            }
+            L.entries.push_back({n, util::pathToUtf8(it->path()), isDir});
+        }
+        std::sort(L.entries.begin(), L.entries.end(), [](const DirEntry& a, const DirEntry& b) {
+            if (a.dir != b.dir) return a.dir;
+            return util::toLower(a.name) < util::toLower(b.name);
+        });
+    }
+    const auto entries = L.entries;  // copie : la relecture d'un sous-dossier peut modifier la carte
+    if (entries.empty()) ImGui::TextDisabled("(vide)");
+    for (auto& e : entries) {
+        if (e.dir) {
+            ImGui::PushID(e.path.c_str());
+            bool open = ImGui::GetStateStorage()->GetInt(ImGui::GetID("##d"), 0) != 0;
+            bool o = ui::iconTreeNode("##d", ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick |
+                                                  ImGuiTreeNodeFlags_SpanAvailWidth,
+                                      open ? ui::Icon::FolderOpen : ui::Icon::Folder, e.name.c_str());
+            if (ImGui::BeginPopupContextItem("##dirctx")) {
+                OpenConversation* oc = active();
+                if (ImGui::MenuItem("Afficher dans l'Explorateur")) util::openInShell(e.path);
+                if (ImGui::MenuItem("Joindre à la conversation active", nullptr, false, oc != nullptr)) attachFile(*oc, e.path);
+                if (ImGui::MenuItem("Copier le chemin")) ImGui::SetClipboardText(e.path.c_str());
+                ImGui::EndPopup();
+            }
+            if (o) {
+                if (depth < 24) drawDirListing(e.path, depth + 1);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        } else {
+            drawFileItem(e.path, nullptr);
+        }
+    }
+    if (L.truncated) ImGui::TextDisabled("… (dossier trop grand : affichage limité à %d éléments)", (int)kMaxDirEntries);
+}
+
+void App::drawWorkDirNode(ws::Folder* project) {
+    std::string cwd = project->effectiveCwd();
+    if (cwd.empty()) return;
+    std::error_code ec;
+    if (!fs::is_directory(util::pathFromUtf8(cwd), ec)) return;
+    ImGui::PushID("##workdir");
+    std::string leaf = util::pathToUtf8(util::pathFromUtf8(cwd).filename());
+    claude::ProjectKind pk = claude::projectKindFromId(project->projectKind);
+    bool codeProject = project->projectKind.empty() || pk == claude::ProjectKind::Software || pk == claude::ProjectKind::Hybrid;
+    std::string label = std::string(codeProject ? "Dossier de travail" : "Fichiers du projet") + (leaf.empty() ? std::string() : " · " + leaf);
+    if (optPanel_ == "projets:fichiers") {  // capture de test : explorateur déplié, un fichier sélectionné
+        ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+        if (selectedFile_.empty()) {
+            selectedFile_ = util::pathToUtf8(util::pathFromUtf8(cwd) / "CMakeLists.txt");
+            selectedFileOwner_.clear();
+        }
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, ui::palette().dim);
+    bool open = ui::iconTreeNode("##wd", ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick |
+                                             ImGuiTreeNodeFlags_SpanAvailWidth,
+                                 ui::Icon::WorkDir, label.c_str());
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+        ImGui::SetTooltip("%s\n%s\nClic droit sur un fichier : le joindre à la conversation.", cwd.c_str(),
+                          codeProject ? "Le code du projet : Claude y lit et modifie les fichiers."
+                                      : "Les fichiers du projet (documents, données…) : Claude y lit et y écrit.");
+    if (ImGui::BeginPopupContextItem("##wdctx")) {
+        if (ImGui::MenuItem("Ouvrir dans l'Explorateur")) util::openInShell(cwd);
+        if (ImGui::MenuItem("Copier le chemin")) ImGui::SetClipboardText(cwd.c_str());
+        if (ImGui::MenuItem("Relire")) dirCache_.clear();
+        ImGui::EndPopup();
+    }
+    if (open) {
+        drawDirListing(cwd, 0);
+        ImGui::TreePop();
+    }
+    ImGui::PopID();
+}
+
 void App::drawFolderNode(ws::Folder* f) {
     static std::string pendingDelete;
     const auto& pal = ui::palette();
@@ -235,18 +533,45 @@ void App::drawFolderNode(ws::Folder* f) {
         return;
     }
     ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_SpanAvailWidth;
-    if (selectedFolder_ == path && selectedConv_.empty()) fl |= ImGuiTreeNodeFlags_Selected;
+    if (selectedFolder_ == path && selectedConv_.empty() && selectedFile_.empty()) fl |= ImGuiTreeNodeFlags_Selected;
     if (f->isProject || (f->parent && f->parent->isProject)) fl |= ImGuiTreeNodeFlags_DefaultOpen;
     int total = f->totalConversations();
     std::string label = f->name + (total ? "  (" + std::to_string(total) + ")" : "");
+    bool agent = isAgentFolder(f);
+    bool agentWorking = false;
+    if (agent && orch_ && orchProject_ == util::pathToUtf8(f->parent->path)) agentWorking = agentView(f->name).working;
+    bool wasOpen = ImGui::GetStateStorage()->GetInt(ImGui::GetID("##folder"), (fl & ImGuiTreeNodeFlags_DefaultOpen) ? 1 : 0) != 0;
+    ui::Icon ic = f->isProject ? ui::Icon::Project : agent ? ui::Icon::Agent : wasOpen ? ui::Icon::FolderOpen : ui::Icon::Folder;
     if (f->isProject) ImGui::PushFont(fontBold, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_Text, f->isProject ? pal.accent : ImGui::GetStyleColorVec4(ImGuiCol_Text));
-    bool open = ImGui::TreeNodeEx("##folder", fl, "%s %s", f->isProject ? "◆" : "▪", label.c_str());
+    bool open = ui::iconTreeNode("##folder", fl, ic, label.c_str(), 0, agentWorking ? 1.0f : 0.0f);
     ImGui::PopStyleColor();
     if (f->isProject) ImGui::PopFont();
+    {
+        ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        dropZones_.push_back({a.x, a.y, b.x, b.y, path});
+    }
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
         selectedFolder_ = path;
         selectedConv_.clear();
+        selectedFile_.clear();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::BeginTooltip();
+        ui::icon(ic);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(f->displayPath().c_str());
+        if (f->isProject && !f->projectKind.empty()) {
+            ui::icon(ui::projectKindIcon(claude::projectKindFromId(f->projectKind)));
+            ImGui::SameLine();
+            ImGui::TextUnformatted(claude::projectKindInfo(claude::projectKindFromId(f->projectKind)).label);
+        }
+        ImGui::TextDisabled("%s", f->isProject ? "Projet : son dossier de fichiers, ses thèmes et ses conversations."
+                                  : agent    ? "Agent de l'orchestrateur : sa fiche de rôle est dans les notes du thème."
+                                             : "Thème : regroupe les conversations d'un même sujet.");
+        ImGui::TextDisabled("%d conversation(s)%s", total,
+                            f->files.empty() ? "" : (" · " + std::to_string(f->files.size()) + " fichier(s)").c_str());
+        ImGui::EndTooltip();
     }
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload(kConvPayload)) {
@@ -260,9 +585,9 @@ void App::drawFolderNode(ws::Folder* f) {
     bool removed = false;
     if (ImGui::BeginPopupContextItem("##folderctx")) {
         if (ImGui::MenuItem("Nouvelle conversation ici")) newConversation(f);
-        if (ImGui::MenuItem("Nouveau sous-dossier")) {
+        if (ImGui::MenuItem(f->isProject ? "Nouveau thème" : "Nouveau sous-dossier")) {
             std::string err;
-            if (ws::Folder* nf = workspace_.createFolder(f, "Nouveau dossier", &err)) {
+            if (ws::Folder* nf = workspace_.createFolder(f, f->isProject ? "Nouveau thème" : "Nouveau dossier", &err)) {
                 renameTarget_ = util::pathToUtf8(nf->path);
                 renameIsFolder_ = true;
                 renameBuffer_ = nf->name;
@@ -270,6 +595,13 @@ void App::drawFolderNode(ws::Folder* f) {
                 toast(err, true);
             }
         }
+        if (ImGui::MenuItem("Ajouter des fichiers…")) {
+            openFileDialog([this, path](const std::vector<std::string>& files) { addFilesTo(path, files); });
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Copie des documents de référence (cahier des charges, schémas…) dans ce dossier.\n"
+                              "Claude reçoit leur chemin dans les nouvelles conversations du dossier.\n"
+                              "Astuce : vous pouvez aussi les glisser depuis l'Explorateur sur le dossier.");
         if (ImGui::MenuItem("Renommer")) {
             renameTarget_ = path;
             renameIsFolder_ = true;
@@ -314,15 +646,82 @@ void App::drawFolderNode(ws::Folder* f) {
         return;
     }
     if (open) {
+        if (f->isProject) drawWorkDirNode(f);
         for (size_t i = 0; i < f->children.size(); ++i) drawFolderNode(f->children[i].get());
         for (size_t i = 0; i < f->conversations.size(); ++i) {
             size_t before = f->conversations.size();
             drawConversationItem(f, f->conversations[i]);
             if (f->conversations.size() != before) break;
         }
+        for (size_t i = 0; i < f->files.size(); ++i) {
+            size_t before = f->files.size();
+            drawFileItem(util::pathToUtf8(f->files[i]), f);
+            if (f->files.size() != before) break;
+        }
         ImGui::TreePop();
     }
     ImGui::PopID();
+}
+
+// Inspecteur d'un fichier (document de référence ou fichier du dossier de travail).
+void App::drawFileInspector() {
+    const auto& pal = ui::palette();
+    fs::path p = util::pathFromUtf8(selectedFile_);
+    std::error_code ec;
+    if (!fs::exists(p, ec)) {
+        selectedFile_.clear();
+        return;
+    }
+    std::string name = util::pathToUtf8(p.filename());
+    ui::icon(ui::fileIcon(name));
+    ImGui::SameLine();
+    ImGui::PushFont(fontBold, 0.0f);
+    ImGui::TextWrapped("%s", name.c_str());
+    ImGui::PopFont();
+    ws::Folder* owner = selectedFileOwner_.empty() ? nullptr : workspace_.findFolderByPath(util::pathFromUtf8(selectedFileOwner_));
+    if (owner) ImGui::TextDisabled("Document de référence · %s", owner->displayPath().c_str());
+    else ImGui::TextDisabled("Fichier du dossier de travail");
+    uintmax_t size = fs::file_size(p, ec);
+    ImGui::TextDisabled("%s", ec ? "" : humanSize(size).c_str());
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", selectedFile_.c_str());
+    ImGui::PopTextWrapPos();
+    if (ImGui::Button("Ouvrir")) util::openInShell(selectedFile_);
+    ImGui::SameLine();
+    OpenConversation* oc = active();
+    ImGui::BeginDisabled(!oc);
+    if (ImGui::Button("Joindre à la conversation")) attachFile(*oc, selectedFile_);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(oc ? "Image : jointe au message. Autre fichier : sa référence @chemin est ajoutée au message."
+                             : "Ouvrez d'abord une conversation.");
+    if (owner) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(pal.dim, "Claude reçoit le chemin de ce fichier dans les nouvelles conversations de « %s » "
+                                    "et le lit quand il en a besoin.",
+                           owner->name.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    // Aperçu des fichiers texte (début du fichier)
+    ui::Icon ic = ui::fileIcon(name);
+    if ((ic == ui::Icon::FileCode || ic == ui::Icon::FileText || ic == ui::Icon::FileData) && !ec && size < 4 * 1024 * 1024) {
+        static std::string cachedPath, cachedText;
+        static double cachedAt = -1e9;
+        if (cachedPath != selectedFile_ || now_ - cachedAt > 3.0) {
+            std::string all;
+            util::readFile(p, all);
+            cachedText = util::truncateUtf8(all, 12000);
+            if (cachedText.size() < all.size()) cachedText += "\n…";
+            cachedPath = selectedFile_;
+            cachedAt = now_;
+        }
+        ImGui::SeparatorText("Aperçu");
+        ImGui::BeginChild("##preview", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::PushFont(fontMono, 0.0f);
+        ImGui::TextUnformatted(cachedText.c_str());
+        ImGui::PopFont();
+        ImGui::EndChild();
+    }
 }
 
 void App::drawInspector() {
@@ -333,11 +732,20 @@ void App::drawInspector() {
     const auto& pal = ui::palette();
     ui::MdStyle md{fontUi, fontBold, fontMono, settings_.wrapCode, fontItalic};
 
+    if (!selectedFile_.empty()) {
+        drawFileInspector();
+        if (!selectedFile_.empty()) {
+            ImGui::End();
+            return;
+        }
+    }
     if (!selectedConv_.empty()) {
         auto [folder, m] = workspace_.findConversation(selectedConv_);
         if (!m) {
             selectedConv_.clear();
         } else {
+            ui::icon(isBrainConversation(folder, *m) ? ui::Icon::Orchestrator : ui::Icon::Chat);
+            ImGui::SameLine();
             ImGui::PushFont(fontBold, 0.0f);
             ImGui::TextWrapped("%s", m->title.c_str());
             ImGui::PopFont();
@@ -350,14 +758,16 @@ void App::drawInspector() {
                 ImGui::SetTooltip("Rouvre la conversation : votre prochain message reprend la session Claude Code\n"
                                   "avec tout son historique (--resume).");
             ImGui::SameLine();
-            if (ImGui::Button("Repartir de ce contexte")) {
-                OpenConversation* oc = newConversation(folder);
-                oc->injectContext = true;
-                if (m->recap.empty()) requestRecap(m->id);
+            ImGui::BeginDisabled(restartPending(m->id));
+            if (ImGui::Button("↻ Repartir du récap")) {
+                std::string id = m->id;  // `m` peut être invalidé par l'ouverture
+                if (openConversation(id, false)) restartFromRecap(id);
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Nouvelle conversation dans le même dossier, qui reçoit les récaps du dossier\n"
-                                  "(dont celui-ci) au lieu de tout l'historique : plus léger en contexte.");
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Remet le contexte à zéro : récap (s'il manque ou date), puis conversation neuve dans\n"
+                                  "le même dossier qui le reçoit en contexte, avec les mêmes réglages. Celle-ci passe\n"
+                                  "« terminée ». Plus léger que tout l'historique.");
             ImGui::SeparatorText("Récap");
             bool generating = false;
             for (auto& j : jobs_)
@@ -384,14 +794,17 @@ void App::drawInspector() {
     if (selectedConv_.empty()) {
         ws::Folder* f = workspace_.findFolderByPath(util::pathFromUtf8(selectedFolder_));
         if (!f) {
-            ImGui::TextWrapped("Sélectionnez un projet, un dossier ou une conversation dans l'espace de travail pour voir "
-                               "ses notes, sa synthèse et ses récaps.");
+            ImGui::TextWrapped("Sélectionnez un projet, un thème, une conversation ou un fichier dans le panneau Projets "
+                               "pour voir ses notes, sa synthèse, son récap ou son contenu.");
             ImGui::End();
             return;
         }
+        ui::icon(f->isProject ? ui::Icon::Project : isAgentFolder(f) ? ui::Icon::Agent : ui::Icon::Folder);
+        ImGui::SameLine();
         ImGui::PushFont(fontBold, 0.0f);
         ImGui::TextColored(pal.accent, "%s", f->displayPath().c_str());
         ImGui::PopFont();
+        if (isAgentFolder(f)) ImGui::TextDisabled("Agent de l'orchestrateur : sa fiche de rôle est dans les notes ci-dessous.");
         ImGui::TextDisabled("%d conversations · activité %s", f->totalConversations(), util::humanDate(f->lastActivity()).c_str());
         if (ImGui::Button("Nouvelle conversation ici")) newConversation(f);
         ImGui::SameLine();
@@ -425,8 +838,38 @@ void App::drawInspector() {
                 ImGui::SetTooltip("Chaque thème du projet devient un agent ; une conversation « Orchestrateur »\n"
                                   "leur délègue le travail et vérifie, jusqu'à atteindre l'objectif.");
         }
+        if (f->isProject && f->name != "Divers") {
+            ImGui::SeparatorText("Type de projet");
+            claude::ProjectKind cur = claude::projectKindFromId(f->projectKind.empty() ? "software" : f->projectKind);
+            ui::icon(ui::projectKindIcon(cur));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(std::min(ImGui::GetFontSize() * 16, ImGui::GetContentRegionAvail().x));
+            if (ImGui::BeginCombo("##ptype", claude::projectKindInfo(cur).label)) {
+                for (claude::ProjectKind k : claude::allProjectKinds()) {
+                    if (k == claude::ProjectKind::Question) continue;
+                    const auto& info = claude::projectKindInfo(k);
+                    if (ImGui::Selectable(info.label, k == cur)) {
+                        f->projectKind = info.id;
+                        workspace_.saveFolderMeta(f);
+                        // L'orchestrateur du projet suit (s'il est chargé et ne travaille pas)
+                        if (orch_ && orchProject_ == util::pathToUtf8(f->path) && !orch_->running()) {
+                            orch_->settings.projectKind = info.id;
+                            orch_->changed = true;
+                            saveOrchestrator();
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", info.tagline);
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ui::helpMarker("Le type guide Claude dans ce projet : méthode de travail, façon de vérifier (tests pour du\n"
+                           "code, relecture et sources pour des documents, scripts relancés pour des données) et livrables.\n"
+                           "Il s'applique aux nouvelles conversations et à l'orchestrateur.");
+        }
         if (f->isProject) {
-            ImGui::SeparatorText("Dossier de travail du projet");
+            bool codeKind = f->projectKind.empty() || f->projectKind == "software" || f->projectKind == "hybrid";
+            ImGui::SeparatorText(codeKind ? "Dossier de travail du projet" : "Dossier des fichiers du projet");
             ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 6);
             if (ImGui::InputText("##pcwd", &f->cwd, ImGuiInputTextFlags_EnterReturnsTrue)) workspace_.saveFolderMeta(f);
             if (ImGui::IsItemDeactivatedAfterEdit()) workspace_.saveFolderMeta(f);
@@ -483,18 +926,44 @@ void App::drawNewProjectPopup() {
     }
     ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 34, 0), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal("Nouveau projet", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
-    ImGui::TextDisabled("Un projet = un dossier de travail pour Claude, découpé en thèmes qui regroupent vos échanges.");
+    ImGui::TextDisabled("Un projet = un dossier de fichiers pour Claude, découpé en thèmes qui regroupent vos échanges.");
+    // Type de projet : il règle les thèmes proposés et la façon de travailler de Claude
+    {
+        claude::ProjectKind cur = claude::projectKindFromId(npKind_);
+        ui::icon(ui::projectKindIcon(cur));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22);
+        if (ImGui::BeginCombo("Type", claude::projectKindInfo(cur).label)) {
+            for (claude::ProjectKind k : claude::allProjectKinds()) {
+                if (k == claude::ProjectKind::Question) continue;
+                const auto& info = claude::projectKindInfo(k);
+                if (ImGui::Selectable(info.label, k == cur)) {
+                    npKind_ = info.id;
+                    npFolders_.clear();
+                    for (auto t : info.themes) npFolders_ += (npFolders_.empty() ? "" : ", ") + std::string(t);
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", info.tagline);
+            }
+            ImGui::EndCombo();
+        }
+    }
+    const bool npCode = claude::projectKindFromId(npKind_) == claude::ProjectKind::Software;
     if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-    ImGui::InputTextWithHint("Nom", "ex. Platformer2D", &npName_);
+    ImGui::InputTextWithHint("Nom", npCode ? "ex. Platformer2D" : "ex. Étude de marché 2026", &npName_);
+    std::string autoDir = util::pathToUtf8(util::documentsDir() / "Projets" /
+                                           util::pathFromUtf8(util::sanitizeFileName(util::trim(npName_).empty() ? "Nouveau projet" : util::trim(npName_))));
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22);
-    ImGui::InputTextWithHint("##cwd", "C:\\Dev\\MonProjet", &npCwd_);
+    ImGui::InputTextWithHint("##cwd", npCode ? "C:\\Dev\\MonProjet — vide : créé dans Documents\\Projets"
+                                             : "Vide : un dossier est créé dans Documents\\Projets",
+                             &npCwd_);
     ImGui::SameLine();
     if (ImGui::Button("Parcourir…")) openFolderDialog([this](const std::string& p) {
         npCwd_ = p;
         if (npName_.empty()) npName_ = util::pathToUtf8(util::pathFromUtf8(p).filename());
     });
     ImGui::SameLine();
-    ImGui::TextUnformatted("Dossier de travail");
+    ImGui::TextUnformatted(npCode ? "Dossier de travail" : "Dossier du projet");
+    if (npCwd_.empty()) ImGui::TextDisabled("Sera créé : %s", autoDir.c_str());
     if (!settings_.recentCwds.empty() && ImGui::BeginCombo("Récents", "Choisir un dossier récent…")) {
         for (auto& c : settings_.recentCwds)
             if (ImGui::Selectable(c.c_str())) {
@@ -511,12 +980,20 @@ void App::drawNewProjectPopup() {
     ImGui::BeginDisabled(util::trim(npName_).empty() || !cwdOk);
     if (ImGui::Button("Créer", ImVec2(ImGui::GetFontSize() * 8, 0))) {
         std::string err;
-        if (ws::Folder* p = workspace_.createProject(util::trim(npName_), npCwd_, &err)) {
+        std::string cwd = npCwd_;
+        if (cwd.empty()) {  // dossier créé pour l'utilisateur, plutôt que de laisser Claude travailler n'importe où
+            std::error_code mk;
+            fs::create_directories(util::pathFromUtf8(autoDir), mk);
+            cwd = autoDir;
+        }
+        if (ws::Folder* p = workspace_.createProject(util::trim(npName_), cwd, &err)) {
+            p->projectKind = npKind_;
+            workspace_.saveFolderMeta(p);
             for (auto& t : util::split(npFolders_, ','))
                 if (!util::trim(t).empty()) workspace_.createFolder(p, util::trim(t));
             selectedFolder_ = util::pathToUtf8(p->path);
             selectedConv_.clear();
-            settings_.pushRecentCwd(npCwd_);
+            settings_.pushRecentCwd(cwd);
             ImGui::CloseCurrentPopup();
         } else {
             toast(err, true);

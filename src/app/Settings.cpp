@@ -48,6 +48,7 @@ void Settings::load(const std::string& path) {
     fpsCap = j.value("fpsCap", fpsCap);
     ecoIdle = j.value("ecoIdle", ecoIdle);
     ecoBackground = j.value("ecoBackground", ecoBackground);
+    backgroundFps = std::clamp(j.value("backgroundFps", backgroundFps), 5, 240);
     showFps = j.value("showFps", showFps);
     animations = j.value("animations", animations);
     animSpeed = j.value("animSpeed", animSpeed);
@@ -56,6 +57,11 @@ void Settings::load(const std::string& path) {
     highQuality = j.value("highQuality", highQuality);
     fontRenderer = j.value("fontRenderer", fontRenderer);
     renderDriver = j.value("renderDriver", renderDriver);
+    // Avant les préréglages d'énergie : réglages d'origine = Automatique (même rendu sur un fixe), sinon on garde
+    // les réglages de l'utilisateur (Personnalisé).
+    energyMode = j.value("energyMode", energyPresetMatches(*this, EnergyPerformance) ? (int)EnergyAuto : (int)EnergyCustom);
+    energyOnAc = std::clamp(j.value("energyOnAc", energyOnAc), 1, 3);
+    energyOnBattery = std::clamp(j.value("energyOnBattery", energyOnBattery), 1, 3);
     dashDetached = j.value("dashDetached", dashDetached);
     dashShowIdle = j.value("dashShowIdle", dashShowIdle);
     injectContext = j.value("injectContext", injectContext);
@@ -83,8 +89,70 @@ void Settings::save(const std::string& path) const {
               {"fpsMode", fpsMode}, {"fpsCap", fpsCap}, {"ecoIdle", ecoIdle}, {"ecoBackground", ecoBackground},
               {"showFps", showFps}, {"animations", animations}, {"animSpeed", animSpeed}, {"smoothScroll", smoothScroll},
               {"glowEffects", glowEffects}, {"highQuality", highQuality}, {"fontRenderer", fontRenderer},
-              {"renderDriver", renderDriver}};
+              {"renderDriver", renderDriver}, {"backgroundFps", backgroundFps}, {"energyMode", energyMode},
+              {"energyOnAc", energyOnAc}, {"energyOnBattery", energyOnBattery}};
     util::writeFileAtomic(util::pathFromUtf8(path), j.dump(2, ' ', false, json::error_handler_t::replace));
+}
+
+const char* energyModeLabel(int mode) {
+    switch (mode) {
+        case EnergyAuto: return "Automatique";
+        case EnergyPerformance: return "Performance";
+        case EnergyBalanced: return "Équilibré";
+        case EnergySaver: return "Économie de batterie";
+        default: return "Personnalisé";
+    }
+}
+
+const char* energyModeSummary(int mode) {
+    switch (mode) {
+        case EnergyAuto: return "S'adapte tout seul : Performance sur secteur, Économie quand le portable passe sur batterie.";
+        case EnergyPerformance: return "Le plus beau et le plus fluide : rendu continu à la fréquence de l'écran, toutes les animations.";
+        case EnergyBalanced: return "Fluide quand vous agissez, au repos sinon : ne redessine que s'il se passe quelque chose ; 30 i/s en arrière-plan.";
+        case EnergySaver: return "Pour tenir sur batterie : 30 i/s max, 10 i/s en arrière-plan, sans animations ni effets, rendu au repos.";
+        default: return "Vos propres réglages (ci-dessous).";
+    }
+}
+
+namespace {
+struct EnergyValues {
+    int fpsMode, fpsCap;
+    bool ecoIdle, ecoBackground;
+    int backgroundFps;
+    bool animations, smoothScroll, glowEffects, highQuality;
+};
+bool energyValues(int preset, EnergyValues& v) {
+    switch (preset) {
+        case EnergyPerformance: v = {0, 144, false, false, 30, true, true, true, true}; return true;
+        case EnergyBalanced: v = {0, 144, true, true, 30, true, true, true, true}; return true;
+        case EnergySaver: v = {1, 30, true, true, 10, false, false, false, false}; return true;
+        default: return false;
+    }
+}
+}  // namespace
+
+void applyEnergyPreset(Settings& s, int preset) {
+    EnergyValues v;
+    if (!energyValues(preset, v)) return;
+    s.fpsMode = v.fpsMode;
+    if (v.fpsMode == 1) s.fpsCap = v.fpsCap;
+    s.ecoIdle = v.ecoIdle;
+    s.ecoBackground = v.ecoBackground;
+    s.backgroundFps = v.backgroundFps;
+    s.animations = v.animations;
+    s.smoothScroll = v.smoothScroll;
+    s.glowEffects = v.glowEffects;
+    s.highQuality = v.highQuality;
+}
+
+bool energyPresetMatches(const Settings& s, int preset) {
+    EnergyValues v;
+    if (!energyValues(preset, v)) return false;
+    // La limite n'importe que si elle est active ; la cadence d'arrière-plan, que si elle est réduite.
+    return s.fpsMode == v.fpsMode && (v.fpsMode != 1 || s.fpsCap == v.fpsCap) && s.ecoIdle == v.ecoIdle &&
+           s.ecoBackground == v.ecoBackground && (!v.ecoBackground || s.backgroundFps == v.backgroundFps) &&
+           s.animations == v.animations && s.smoothScroll == v.smoothScroll && s.glowEffects == v.glowEffects &&
+           s.highQuality == v.highQuality;
 }
 
 void Settings::pushRecentCwd(const std::string& cwd) {
