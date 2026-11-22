@@ -1,6 +1,7 @@
 #include "workspace/Workspace.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "util/Paths.h"
 #include "util/Strings.h"
@@ -127,6 +128,7 @@ bool Workspace::readConversationMeta(const fs::path& file, ConversationMeta& m) 
     m.updated = j.value("updated", (int64_t)0);
     m.pinned = j.value("pinned", false);
     m.status = j.value("status", "");
+    m.continues = j.value("continues", "");
     m.messages = 0;
     for (auto& e : j.value("entries", json::array()))
         if (e.value("kind", "") == "user") m.messages++;
@@ -313,6 +315,7 @@ ConversationMeta* Workspace::saveConversation(Folder* folder, const json& sessio
         m->pinned = metaIn->pinned;
         m->status = metaIn->status;
         if (metaIn->created) m->created = metaIn->created;
+        if (!metaIn->continues.empty()) m->continues = metaIn->continues;
     }
     m->title = sessionJson.value("title", m->title);
     m->claudeSessionId = sessionJson.value("claudeSessionId", "");
@@ -332,6 +335,7 @@ ConversationMeta* Workspace::saveConversation(Folder* folder, const json& sessio
     j["updated"] = m->updated;
     j["pinned"] = m->pinned;
     j["status"] = m->status;
+    if (!m->continues.empty()) j["continues"] = m->continues;
 
     fs::path desired = folder->path / util::pathFromUtf8(conversationFileName(m->title, id));
     if (!m->file.empty() && m->file != desired) {
@@ -481,6 +485,85 @@ std::string Workspace::buildContext(const Folder* folder, const std::string& exc
             ctx += "- " + ch->name + " (" + std::to_string(ch->totalConversations()) + " échanges)\n";
     }
     return util::truncateUtf8(ctx, maxChars);
+}
+
+// --- Discussions (suites de sessions) -------------------------------------------
+
+int ConversationChain::indexOf(const std::string& id) const {
+    for (int i = 0; i < (int)sessions.size(); ++i)
+        if (sessions[i]->id == id) return i;
+    return -1;
+}
+
+namespace {
+// Titres donnés par l'orchestrateur à la conversation neuve d'une rotation de contexte.
+bool relayTitle(const std::string& t) { return t == "Tâches de l'orchestrateur" || t == "Orchestrateur"; }
+constexpr int64_t kRelayGap = 300;  // écart max (s) entre la fin d'une session et le début de la suivante (anciennes)
+}  // namespace
+
+std::vector<ConversationChain> conversationChains(Folder& f) {
+    auto& cs = f.conversations;
+    const int n = (int)cs.size();
+    std::vector<int> prev(n, -1), next(n, -1);
+    // 1. Liens enregistrés
+    for (int b = 0; b < n; ++b) {
+        if (cs[b].continues.empty()) continue;
+        for (int a = 0; a < n; ++a)
+            if (a != b && cs[a].id == cs[b].continues && next[a] < 0) {
+                prev[b] = a;
+                next[a] = b;
+                break;
+            }
+    }
+    // 2. Conversations d'avant le lien : déduit des dates (dans l'ordre de création)
+    std::vector<int> order(n);
+    for (int i = 0; i < n; ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return cs[a].created < cs[b].created; });
+    for (int b : order) {
+        const ConversationMeta& B = cs[b];
+        if (prev[b] >= 0 || !B.continues.empty() || B.created <= 0) continue;
+        int best = -1;
+        int64_t bestGap = kRelayGap + 1;
+        for (int a : order) {
+            const ConversationMeta& A = cs[a];
+            if (a == b || next[a] >= 0 || A.status != "done" || A.created <= 0 || A.created >= B.created) continue;
+            if (B.title != A.title && !relayTitle(B.title)) continue;
+            int64_t gap = std::llabs(B.created - A.updated);
+            if (A.recapTime > 0) gap = std::min(gap, (int64_t)std::llabs(B.created - A.recapTime));
+            if (gap < bestGap) best = a, bestGap = gap;
+        }
+        if (best >= 0) {
+            prev[b] = best;
+            next[best] = b;
+        }
+    }
+    // 3. Suites, de la première session à la dernière (une boucle de liens corrompus est cassée)
+    std::vector<ConversationChain> chains;
+    std::vector<char> seen(n, 0);
+    auto walk = [&](int start) {
+        ConversationChain c;
+        for (int i = start; i >= 0 && !seen[i]; i = next[i]) {
+            seen[i] = 1;
+            c.sessions.push_back(&cs[i]);
+        }
+        if (!c.sessions.empty()) chains.push_back(std::move(c));
+    };
+    for (int i = 0; i < n; ++i)
+        if (prev[i] < 0) walk(i);
+    for (int i = 0; i < n; ++i)
+        if (!seen[i]) walk(i);
+    std::stable_sort(chains.begin(), chains.end(), [](const ConversationChain& a, const ConversationChain& b) {
+        const ConversationMeta *x = a.latest(), *y = b.latest();
+        if (x->pinned != y->pinned) return x->pinned;
+        return x->updated > y->updated;
+    });
+    return chains;
+}
+
+int countDiscussions(Folder& f) {
+    int n = (int)conversationChains(f).size();
+    for (auto& ch : f.children) n += countDiscussions(*ch);
+    return n;
 }
 
 }  // namespace ws

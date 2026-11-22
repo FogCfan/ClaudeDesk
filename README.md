@@ -115,6 +115,9 @@ arrière-plan avec `--resume` : l'historique est conservé.
   fondu entre les pages, barres d'usage qui se remplissent en douceur, indicateur d'activité en arc,
   curseur de rédaction pulsé, notifications qui glissent, halos lumineux sur les cartes actives et pendant la
   visite guidée. Vitesse réglable, tout désactivable.
+- **Polices** : IBM Plex Sans pour l'interface (ou Noto Sans, Inter) et JetBrains Mono pour le code, fournies avec
+  l'application (licence SIL OFL, `assets/fonts`), rendues avec leur propre hinting pour rester nettes ; la police du
+  système et l'épaisseur du texte restent au choix (Configuration › Application).
 - **Qualité** : texte rendu par **FreeType** (net, emoji en couleur, vraie police italique), courbes et coins
   arrondis haute définition.
 - **Processeur graphique** : moteur de rendu au choix (Direct3D 12 / 11, Vulkan, OpenGL, SDL GPU, logiciel),

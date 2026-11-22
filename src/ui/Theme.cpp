@@ -1,7 +1,10 @@
 #include "ui/Theme.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
+#include <string>
+#include <vector>
 
 #include "ui/Anim.h"
 
@@ -13,30 +16,33 @@ const Palette& palette() { return g_palette; }
 
 static ImVec4 rgb(int r, int g, int b, float a = 1.0f) { return ImVec4(r / 255.f, g / 255.f, b / 255.f, a); }
 
-void applyTheme(ThemeId id, float scale) {
+void applyTheme(ThemeId id, float scale, bool compact) {
     ImGuiStyle& s = ImGui::GetStyle();
     s = ImGuiStyle();
     if (id == ThemeId::Light) ImGui::StyleColorsLight(&s);
     else ImGui::StyleColorsDark(&s);
 
-    s.WindowRounding = 6;
-    s.ChildRounding = 6;
-    s.FrameRounding = 5;
-    s.PopupRounding = 6;
-    s.GrabRounding = 4;
-    s.TabRounding = 5;
-    s.ScrollbarRounding = 8;
-    s.ScrollbarSize = 13;
-    s.WindowPadding = ImVec2(10, 10);
-    s.FramePadding = ImVec2(8, 5);
-    s.ItemSpacing = ImVec2(8, 7);
-    s.ItemInnerSpacing = ImVec2(6, 5);
-    s.IndentSpacing = 16;
+    // Style épuré, à la VS Code : coins à peine arrondis, séparateurs et barres de défilement fins, onglets droits.
+    s.WindowRounding = 4;
+    s.ChildRounding = 4;
+    s.FrameRounding = 3;
+    s.PopupRounding = 4;
+    s.GrabRounding = 3;
+    s.TabRounding = 0;
+    s.ScrollbarRounding = 6;
+    s.ScrollbarSize = 10;
+    s.WindowPadding = compact ? ImVec2(8, 6) : ImVec2(10, 10);
+    s.FramePadding = compact ? ImVec2(6, 3) : ImVec2(8, 5);
+    s.ItemSpacing = compact ? ImVec2(6, 4) : ImVec2(8, 7);
+    s.ItemInnerSpacing = ImVec2(6, compact ? 4 : 5);
+    s.IndentSpacing = compact ? 13 : 16;
     s.WindowBorderSize = 1;
     s.FrameBorderSize = 0;
     s.TabBarBorderSize = 1;
-    s.SeparatorTextBorderSize = 2;
-    s.DockingSeparatorSize = 3;
+    s.TabBarOverlineSize = 2;
+    s.SeparatorTextBorderSize = 1;
+    s.SeparatorTextPadding = ImVec2(compact ? 12 : 16, compact ? 2 : 3);
+    s.DockingSeparatorSize = 1;
 
     ImVec4* c = s.Colors;
     Palette& p = g_palette;
@@ -64,17 +70,22 @@ void applyTheme(ThemeId id, float scale) {
         c[ImGuiCol_TitleBgActive] = rgb(232, 226, 218);
         c[ImGuiCol_MenuBarBg] = rgb(240, 237, 232);
         c[ImGuiCol_Header] = p.accentSoft;
-        c[ImGuiCol_HeaderHovered] = rgb(201, 100, 66, 0.25f);
-        c[ImGuiCol_HeaderActive] = rgb(201, 100, 66, 0.35f);
-        c[ImGuiCol_Button] = rgb(230, 225, 218);
-        c[ImGuiCol_ButtonHovered] = rgb(220, 205, 192);
-        c[ImGuiCol_ButtonActive] = rgb(210, 190, 175);
-        c[ImGuiCol_Tab] = rgb(232, 228, 222);
-        c[ImGuiCol_TabHovered] = rgb(201, 100, 66, 0.3f);
+        c[ImGuiCol_HeaderHovered] = rgb(0, 0, 0, 0.05f);
+        c[ImGuiCol_HeaderActive] = rgb(201, 100, 66, 0.30f);
+        c[ImGuiCol_Button] = rgb(232, 228, 222);
+        c[ImGuiCol_ButtonHovered] = rgb(222, 216, 208);
+        c[ImGuiCol_ButtonActive] = rgb(201, 100, 66, 0.35f);
+        c[ImGuiCol_Tab] = rgb(236, 233, 228);
+        c[ImGuiCol_TabHovered] = rgb(0, 0, 0, 0.05f);
+        c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+        c[ImGuiCol_ScrollbarGrab] = rgb(0, 0, 0, 0.14f);
+        c[ImGuiCol_ScrollbarGrabHovered] = rgb(0, 0, 0, 0.24f);
+        c[ImGuiCol_ScrollbarGrabActive] = rgb(0, 0, 0, 0.32f);
         c[ImGuiCol_TabSelected] = rgb(250, 249, 246);
         c[ImGuiCol_TabSelectedOverline] = p.accent;
         c[ImGuiCol_TabDimmedSelected] = rgb(244, 242, 238);
         c[ImGuiCol_CheckMark] = p.accent;
+        c[ImGuiCol_CheckboxSelectedBg] = ImVec4(p.accent.x, p.accent.y, p.accent.z, 0.22f);  // sinon : bleu d'ImGui
         c[ImGuiCol_SliderGrab] = p.accent;
         c[ImGuiCol_SliderGrabActive] = rgb(180, 85, 55);
         c[ImGuiCol_TextSelectedBg] = rgb(201, 100, 66, 0.30f);
@@ -114,15 +125,19 @@ void applyTheme(ThemeId id, float scale) {
         c[ImGuiCol_TitleBgActive] = bg2;
         c[ImGuiCol_MenuBarBg] = dusk ? rgb(32, 28, 41) : rgb(31, 30, 28);
         c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+        c[ImGuiCol_ScrollbarGrab] = rgb(255, 255, 255, 0.10f);
+        c[ImGuiCol_ScrollbarGrabHovered] = rgb(255, 255, 255, 0.18f);
+        c[ImGuiCol_ScrollbarGrabActive] = rgb(255, 255, 255, 0.26f);
         c[ImGuiCol_CheckMark] = p.accent;
+        c[ImGuiCol_CheckboxSelectedBg] = ImVec4(p.accent.x, p.accent.y, p.accent.z, 0.22f);  // sinon : bleu d'ImGui
         c[ImGuiCol_SliderGrab] = p.accent;
         c[ImGuiCol_SliderGrabActive] = rgb(235, 140, 105);
-        c[ImGuiCol_Button] = dusk ? rgb(52, 46, 66) : rgb(48, 46, 43);
-        c[ImGuiCol_ButtonHovered] = rgb(217, 119, 87, 0.55f);
-        c[ImGuiCol_ButtonActive] = rgb(217, 119, 87, 0.8f);
+        c[ImGuiCol_Button] = dusk ? rgb(46, 41, 59) : rgb(42, 41, 39);
+        c[ImGuiCol_ButtonHovered] = dusk ? rgb(60, 54, 76) : rgb(56, 54, 51);
+        c[ImGuiCol_ButtonActive] = rgb(217, 119, 87, 0.55f);
         c[ImGuiCol_Header] = p.accentSoft;
-        c[ImGuiCol_HeaderHovered] = rgb(217, 119, 87, 0.28f);
-        c[ImGuiCol_HeaderActive] = rgb(217, 119, 87, 0.40f);
+        c[ImGuiCol_HeaderHovered] = rgb(255, 255, 255, 0.06f);
+        c[ImGuiCol_HeaderActive] = rgb(217, 119, 87, 0.30f);
         c[ImGuiCol_Separator] = c[ImGuiCol_Border];
         c[ImGuiCol_SeparatorHovered] = p.accent;
         c[ImGuiCol_SeparatorActive] = p.accent;
@@ -130,7 +145,7 @@ void applyTheme(ThemeId id, float scale) {
         c[ImGuiCol_ResizeGripHovered] = p.accentSoft;
         c[ImGuiCol_ResizeGripActive] = p.accent;
         c[ImGuiCol_Tab] = bg;
-        c[ImGuiCol_TabHovered] = rgb(217, 119, 87, 0.35f);
+        c[ImGuiCol_TabHovered] = rgb(255, 255, 255, 0.07f);
         c[ImGuiCol_TabSelected] = bg2;
         c[ImGuiCol_TabSelectedOverline] = p.accent;
         c[ImGuiCol_TabDimmed] = bg;
@@ -177,8 +192,21 @@ void badge(const char* text, const ImVec4& color) {
 }
 
 void helpMarker(const char* text) {
+    // Petit « ? » cerclé et discret (au lieu de « (?) ») ; le texte d'aide au survol.
     ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
+    const float lh = ImGui::GetTextLineHeight();
+    const float d = lh * 0.72f;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(d, lh));
+    bool hov = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 c(p.x + d * 0.5f, p.y + lh * 0.5f);
+    ImVec4 cl = hov ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : palette().dim;
+    cl.w *= hov ? 1.0f : 0.7f;
+    dl->AddCircle(c, d * 0.5f, col(cl), 20, 1.2f);
+    float qs = d * 0.78f;
+    ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(qs, FLT_MAX, 0, "?");
+    dl->AddText(ImGui::GetFont(), qs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), col(cl), "?");
     if (ImGui::BeginItemTooltip()) {
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
         ImGui::TextUnformatted(text);
@@ -222,8 +250,25 @@ void sideNote(const char* text) {
     if (below) ImGui::Unindent(indent);
 }
 
-void usageBar(float f, const char* overlay, float height, float width, const char* animId) {
+ImVec4 levelColor(float f) {
     const Palette& p = palette();
+    auto lerp = [](const ImVec4& a, const ImVec4& b, float t) {
+        return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
+    };
+    f = std::clamp(f, 0.0f, 1.0f);
+    return f < 0.5f ? lerp(p.ok, p.warn, f / 0.5f) : lerp(p.warn, p.err, std::min(1.0f, (f - 0.5f) / 0.35f));
+}
+
+// Piste fine + remplissage coloré, entre x0 et x1, centrée verticalement sur [y, y + h].
+static void slimTrack(ImDrawList* dl, float x0, float x1, float y, float h, float shown) {
+    float th = std::max(3.0f, std::min(h * 0.42f, ImGui::GetFontSize() * 0.34f));
+    float ty = y + (h - th) * 0.5f;
+    dl->AddRectFilled(ImVec2(x0, ty), ImVec2(x1, ty + th), col(ImGui::GetStyleColorVec4(ImGuiCol_FrameBg)), th * 0.5f);
+    float fw = (x1 - x0) * shown;
+    if (shown > 0.001f) dl->AddRectFilled(ImVec2(x0, ty), ImVec2(x0 + std::max(th, fw), ty + th), col(levelColor(shown)), th * 0.5f);
+}
+
+void usageBar(float f, const char* overlay, float height, float width, const char* animId) {
     f = f < 0 ? 0 : f > 1 ? 1 : f;
     float shown = animId ? anim::smooth(ImGui::GetID(animId), f, 5.0f, 0.0f) : f;
     float w = width < 0 ? ImGui::GetContentRegionAvail().x : width;
@@ -231,25 +276,157 @@ void usageBar(float f, const char* overlay, float height, float width, const cha
     ImVec2 pos = ImGui::GetCursorScreenPos();
     ImGui::Dummy(ImVec2(w, h));
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    float rounding = h * 0.5f;
-    // Couleur interpolée vert → orange → rouge
-    auto lerp = [](const ImVec4& a, const ImVec4& b, float t) {
-        return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
-    };
-    ImVec4 c = shown < 0.5f ? lerp(p.ok, p.warn, shown / 0.5f) : lerp(p.warn, p.err, std::min(1.0f, (shown - 0.5f) / 0.35f));
-    dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h), col(ImGui::GetStyleColorVec4(ImGuiCol_FrameBg)), rounding);
-    float fw = std::max(shown > 0.001f ? h : 0.0f, w * shown);
-    if (fw > 0) {
-        dl->AddRectFilled(pos, ImVec2(pos.x + fw, pos.y + h), col(c, 0.92f), rounding);
-        // reflet discret sur la moitié haute
-        dl->AddRectFilled(ImVec2(pos.x + 2, pos.y + 1), ImVec2(pos.x + fw - 2, pos.y + h * 0.45f), col(ImVec4(1, 1, 1, 1), 0.10f),
-                          rounding);
-    }
+    // Valeur à droite, barre fine à gauche
+    float textW = 0;
     if (overlay && *overlay) {
         ImVec2 ts = ImGui::CalcTextSize(overlay);
-        ImVec2 tp(pos.x + (w - ts.x) * 0.5f, pos.y + (h - ts.y) * 0.5f);
-        dl->AddText(ImVec2(tp.x + 1, tp.y + 1), col(ImVec4(0, 0, 0, 1), 0.45f), overlay);
-        dl->AddText(tp, col(ImGui::GetStyleColorVec4(ImGuiCol_Text)), overlay);
+        textW = ts.x + ImGui::GetFontSize() * 0.5f;
+        dl->AddText(ImVec2(pos.x + w - ts.x, pos.y + (h - ts.y) * 0.5f), col(ImGui::GetStyleColorVec4(ImGuiCol_Text)), overlay);
+    }
+    float x1 = pos.x + std::max(ImGui::GetFontSize() * 1.5f, w - textW);
+    slimTrack(dl, pos.x, x1, pos.y, h, shown);
+}
+
+void ringGauge(float f, float d, const char* bigText, const char* caption, ImFont* bigFont, const char* animId) {
+    f = std::clamp(f, 0.0f, 1.0f);
+    float shown = animId ? anim::smooth(ImGui::GetID(animId), f, 5.0f, 0.0f) : f;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(d, d));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 c(p.x + d * 0.5f, p.y + d * 0.5f);
+    float th = std::max(4.0f, d * 0.085f);
+    float r = d * 0.5f - th * 0.5f - 1;
+    dl->AddCircle(c, r, col(ImGui::GetStyleColorVec4(ImGuiCol_FrameBg)), 64, th);
+    if (shown > 0.002f) {
+        const float a0 = -3.14159265f * 0.5f;
+        dl->PathArcTo(c, r, a0, a0 + shown * 3.14159265f * 2.0f, 64);
+        dl->PathStroke(col(levelColor(shown)), 0, th);
+    }
+    ImFont* font = bigFont ? bigFont : ImGui::GetFont();
+    float bs = d * 0.26f;
+    if (bigText && *bigText) {
+        ImVec2 ts = font->CalcTextSizeA(bs, FLT_MAX, 0, bigText);
+        float y = caption && *caption ? c.y - ts.y * 0.62f : c.y - ts.y * 0.5f;
+        dl->AddText(font, bs, ImVec2(c.x - ts.x * 0.5f, y), col(ImGui::GetStyleColorVec4(ImGuiCol_Text)), bigText);
+    }
+    if (caption && *caption) {
+        float cs = std::max(ImGui::GetFontSize() * 0.75f, d * 0.10f);
+        ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(cs, FLT_MAX, 0, caption);
+        dl->AddText(ImGui::GetFont(), cs, ImVec2(c.x - ts.x * 0.5f, c.y + bs * 0.42f), col(palette().dim), caption);
+    }
+}
+
+void miniRing(float f, float size, const char* animId) {
+    f = std::clamp(f, 0.0f, 1.0f);
+    float shown = animId ? anim::smooth(ImGui::GetID(animId), f, 5.0f, 0.0f) : f;
+    float lh = ImGui::GetTextLineHeight();
+    float d = size > 0 ? size : lh * 0.85f;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(d, lh));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 c(p.x + d * 0.5f, p.y + lh * 0.5f);
+    float th = std::max(2.0f, d * 0.2f);
+    float r = d * 0.5f - th * 0.5f;
+    dl->AddCircle(c, r, col(ImGui::GetStyleColorVec4(ImGuiCol_FrameBg)), 32, th);
+    if (shown > 0.002f) {
+        dl->PathArcTo(c, r, -3.14159265f * 0.5f, -3.14159265f * 0.5f + shown * 3.14159265f * 2.0f, 32);
+        dl->PathStroke(col(levelColor(shown)), 0, th);
+    }
+}
+
+bool chip(const char* label, const ImVec4* color) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgActive));
+    if (color) ImGui::PushStyleColor(ImGuiCol_Text, *color);
+    bool r = ImGui::Button(label);
+    ImGui::PopStyleColor(color ? 4 : 3);
+    return r;
+}
+
+bool checkboxWrapped(const char* label, bool* v, const char* help) {
+    ImGui::PushID(label);
+    bool changed = ImGui::Checkbox("##cb", v);
+    bool hov = ImGui::IsItemHovered();
+    ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float wrap = ImGui::GetContentRegionAvail().x;
+    ImVec2 sz = ImGui::CalcTextSize(label, nullptr, false, wrap);
+    // Le libellé est cliquable, comme celui d'une case ordinaire
+    if (ImGui::InvisibleButton("##lbl", ImVec2(std::max(1.0f, std::min(wrap, sz.x)), std::max(sz.y, ImGui::GetFrameHeight())))) {
+        *v = !*v;
+        changed = true;
+    }
+    hov = hov || ImGui::IsItemHovered();
+    float dy = sz.y < ImGui::GetFrameHeight() ? (ImGui::GetFrameHeight() - sz.y) * 0.5f : 0;
+    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x, p.y + dy),
+                                        col(ImGui::GetStyleColorVec4(ImGuiCol_Text)), label, nullptr, wrap);
+    if (help && hov) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28);
+        ImGui::TextUnformatted(help);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+bool segmented(const char* id, int* value, const char* const* labels, int count) {
+    const Palette& p = palette();
+    bool changed = false;
+    ImGui::PushID(id);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2, ImGui::GetStyle().ItemSpacing.y));
+    for (int i = 0; i < count; ++i) {
+        if (i > 0) sameLineIfFits(buttonWidth(labels[i]));
+        bool sel = *value == i;
+        if (sel) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(p.accent.x, p.accent.y, p.accent.z, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, p.accent);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+        }
+        ImGui::PushID(i);
+        if (ImGui::Button(labels[i]) && !sel) {
+            *value = i;
+            changed = true;
+        }
+        ImGui::PopID();
+        if (sel) ImGui::PopStyleColor(3);
+    }
+    ImGui::PopStyleVar();
+    ImGui::PopID();
+    return changed;
+}
+
+std::string shortPath(const std::string& path, int keep) {
+    std::vector<size_t> seps;
+    for (size_t i = 0; i < path.size(); ++i)
+        if (path[i] == '\\' || path[i] == '/') seps.push_back(i);
+    if ((int)seps.size() <= keep) return path;
+    return "…" + path.substr(seps[seps.size() - keep]);
+}
+
+void meterRow(const char* label, float f, const char* value, const char* note, ImFont* valueFont, const char* animId) {
+    f = std::clamp(f, 0.0f, 1.0f);
+    float shown = animId ? anim::smooth(ImGui::GetID(animId), f, 5.0f, 0.0f) : f;
+    float w = ImGui::GetContentRegionAvail().x;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float lh = ImGui::GetTextLineHeight();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGui::TextUnformatted(label);
+    if (value && *value) {
+        ImFont* vf = valueFont ? valueFont : ImGui::GetFont();
+        ImVec2 ts = vf->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0, value);
+        dl->AddText(vf, ImGui::GetFontSize(), ImVec2(p.x + w - ts.x, p.y), col(ImGui::GetStyleColorVec4(ImGuiCol_Text)), value);
+    }
+    ImVec2 q = ImGui::GetCursorScreenPos();
+    float bh = lh * 0.55f;
+    ImGui::Dummy(ImVec2(w, bh));
+    slimTrack(dl, q.x, q.x + w, q.y, bh, shown);
+    if (note && *note) {
+        ImGui::PushStyleColor(ImGuiCol_Text, palette().dim);
+        ImGui::TextWrapped("%s", note);
+        ImGui::PopStyleColor();
     }
 }
 

@@ -32,8 +32,15 @@ void Settings::load(const std::string& path) {
     promptPresets.clear();
     for (auto& p : j.value("promptPresets", json::array())) promptPresets.push_back({p.value("name", ""), p.value("text", "")});
     fontSize = j.value("fontSize", fontSize);
+    // Passage aux polices fournies (Inter) : l'ancienne taille par défaut (17) passe à 18.
+    if (!j.contains("uiFont") && fontSize == 17.0f) fontSize = 18.0f;
+    uiFont = j.value("uiFont", uiFont);
+    monoFont = j.value("monoFont", monoFont);
+    fontWeight = j.value("fontWeight", fontWeight);
+    if (j.contains("modelAccess")) modelAccess.fromJson(j["modelAccess"]);
     uiScale = j.value("uiScale", uiScale);
     theme = j.value("theme", theme);
+    compactUi = j.value("compactUi", compactUi);
     enterSends = j.value("enterSends", enterSends);
     showThinking = j.value("showThinking", showThinking);
     expandTools = j.value("expandTools", expandTools);
@@ -56,6 +63,16 @@ void Settings::load(const std::string& path) {
     glowEffects = j.value("glowEffects", glowEffects);
     highQuality = j.value("highQuality", highQuality);
     fontRenderer = j.value("fontRenderer", fontRenderer);
+    // Inter est dessinée pour un rendu sans grille (lettres régulièrement espacées) : l'ancien défaut (rendu léger)
+    // passe au rendu sans grille avec les nouvelles polices.
+    // Polices v2 : Inter sans grille paraissait flou. Passage à IBM Plex Sans, rendu avec le hinting de la police et
+    // traits épaissis — sauf choix explicite de l'utilisateur (police du système, Noto).
+    if (j.value("fontsVersion", 0) < 2) {
+        if (uiFont == "inter") uiFont = "plex";
+        if (fontRenderer == 0 || fontRenderer == 1) fontRenderer = 3;
+        if (!j.contains("fontWeight")) fontWeight = 1.3f;
+        fontsVersion = 2;
+    }
     renderDriver = j.value("renderDriver", renderDriver);
     // Avant les préréglages d'énergie : réglages d'origine = Automatique (même rendu sur un fixe), sinon on garde
     // les réglages de l'utilisateur (Personnalisé).
@@ -75,11 +92,15 @@ void Settings::load(const std::string& path) {
 }
 
 void Settings::save(const std::string& path) const {
+    util::writeFileAtomic(util::pathFromUtf8(path), dump());
+}
+
+std::string Settings::dump() const {
     json presets = json::array();
     for (auto& p : promptPresets) presets.push_back({{"name", p.name}, {"text", p.text}});
     json j = {{"claudeExe", claudeExe},       {"workspaceRoot", workspaceRoot}, {"defaultCwd", defaultCwd},
               {"defaultConfig", defaultConfig}, {"promptPresets", presets},     {"fontSize", fontSize},
-              {"uiScale", uiScale},           {"theme", theme},                 {"enterSends", enterSends},
+              {"uiScale", uiScale},           {"theme", theme}, {"compactUi", compactUi},                 {"enterSends", enterSends},
               {"showThinking", showThinking}, {"expandTools", expandTools},     {"wrapCode", wrapCode},
               {"notifyOnFinish", notifyOnFinish}, {"autoRefreshUsage", autoRefreshUsage}, {"confirmBypass", confirmBypass},
               {"injectContext", injectContext}, {"autoRecap", autoRecap},       {"recapModel", recapModel},
@@ -90,8 +111,9 @@ void Settings::save(const std::string& path) const {
               {"showFps", showFps}, {"animations", animations}, {"animSpeed", animSpeed}, {"smoothScroll", smoothScroll},
               {"glowEffects", glowEffects}, {"highQuality", highQuality}, {"fontRenderer", fontRenderer},
               {"renderDriver", renderDriver}, {"backgroundFps", backgroundFps}, {"energyMode", energyMode},
-              {"energyOnAc", energyOnAc}, {"energyOnBattery", energyOnBattery}};
-    util::writeFileAtomic(util::pathFromUtf8(path), j.dump(2, ' ', false, json::error_handler_t::replace));
+              {"energyOnAc", energyOnAc}, {"energyOnBattery", energyOnBattery},
+              {"uiFont", uiFont}, {"monoFont", monoFont}, {"fontWeight", fontWeight}, {"fontsVersion", fontsVersion}, {"modelAccess", modelAccess.toJson()}};
+    return j.dump(2, ' ', false, json::error_handler_t::replace);
 }
 
 const char* energyModeLabel(int mode) {

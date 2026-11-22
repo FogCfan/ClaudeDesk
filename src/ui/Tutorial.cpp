@@ -46,7 +46,7 @@ const std::vector<TourStep>& tourSteps() {
         {"La barre de menus",
          "- **Fichier** : nouvelle conversation, nouveau projet, import des sessions du terminal, export.\n"
          "- **Session** : interrompre Claude, compacter le contexte, générer un récap.\n"
-         "- **Configuration** : modèle, effort, mode de permission, outils, prompt système.\n"
+         "- **Configuration** : modèle, effort, mode de permission, outils, instructions.\n"
          "- **Affichage** : panneaux, thème, taille du texte, pages.\n"
          "- **Aide** : ce guide, la visite, le projet exemple, les raccourcis (F1).\n\n"
          "À droite : les **pages** (Cockpit / Tableau de bord) et votre usage de la fenêtre de 5 h.",
@@ -99,8 +99,10 @@ const std::vector<TourStep>& tourSteps() {
          "et la **liste de tâches** de Claude quand il en tient une.",
          "Usage", 0},
         {"La configuration",
-         "Six onglets : **Modèle** (et effort), **Mode**, **Outils** (autoriser / interdire, règles fines comme "
-         "`Bash(git *)`), **Prompt système** (avec modèles réutilisables), **Avancé** et **Application**.\n\n"
+         "Des sections, choisies en tête du panneau. Pour la conversation : **Modèle** (et effort), **Mode**, "
+         "**Outils** (demander / toujours / jamais, règles précises comme `Bash(git *)`), **Instructions** (consignes "
+         "permanentes, avec modèles réutilisables) et **Avancé**. Pour l'application : **Général**, **Apparence** "
+         "(thème, police, densité) et **Performances** (énergie, fluidité).\n\n"
          "Les réglages s'appliquent à la conversation active, ou deviennent les défauts avec "
          "« Enregistrer comme défaut ». Le modèle et le mode changent à chaud ; le reste relance la session "
          "en arrière-plan **sans perdre l'historique**.",
@@ -353,7 +355,7 @@ const std::vector<GuideSection>& guideSections() {
          "### Ce que ClaudeDesk ajoute au terminal\n"
          "- un **vrai éditeur** (souris, copier-coller, historique) et un rendu lisible des réponses et des actions ;\n"
          "- l'**usage en direct** de votre forfait et du contexte ;\n"
-         "- la **configuration en un clic** (modèle, effort, mode, outils, prompt système) ;\n"
+         "- la **configuration en un clic** (modèle, effort, mode, outils, instructions) ;\n"
          "- une **mémoire de travail organisée** : les *projets* ;\n"
          "- le **suivi de plusieurs conversations en parallèle** : le *tableau de bord*.\n\n"
          "### Comment lire ce guide\n"
@@ -388,7 +390,7 @@ const std::vector<GuideSection>& guideSections() {
          "| Inspecteur (gauche, bas) | notes, synthèse, récap de la sélection |\n"
          "| Conversations (centre) | le fil, l'éditeur, les autorisations ; un onglet par conversation |\n"
          "| Usage (droite) | limites du forfait, contexte, coût, tâches de Claude |\n"
-         "| Configuration (droite, bas) | modèle, effort, mode, outils, prompt système, préférences, graphismes |\n"
+         "| Configuration (droite, bas) | modèle, effort, mode, outils, instructions, apparence, performances |\n"
          "| Barre d'état (bas) | état de la conversation active |\n\n"
          "Tous les panneaux se **déplacent et s'ancrent** à la souris (glissez leur onglet). "
          "*Affichage › Réinitialiser la disposition* remet tout en place.\n\n"
@@ -446,9 +448,9 @@ const std::vector<GuideSection>& guideSections() {
          "- **Effort** : de *Faible* à *Maximum*, la quantité de réflexion avant d'agir.\n"
          "- **Outils** : rendez un outil indisponible, toujours autorisé ou interdit ; ajoutez des règles fines "
          "comme `Bash(git *)` (toutes les commandes git) ou `Edit(src/**)`.\n"
-         "- **Prompt système** : ajoutez des consignes permanentes ; enregistrez-les comme **modèles** réutilisables.\n"
+         "- **Instructions** : ajoutez des consignes permanentes ; enregistrez-les comme **modèles** réutilisables.\n"
          "- **Avancé** : dossiers supplémentaires accessibles, budget maximal, options libres.\n"
-         "- **Graphismes** : fluidité, animations, qualité du texte, moteur GPU.\n\n"
+         "- **Apparence** : thème, police, taille et densité. **Performances** : énergie, fluidité, carte graphique.\n\n"
          "Les réglages s'appliquent à la **conversation active**. *Enregistrer comme défaut* les utilise pour les "
          "suivantes. Changer l'effort, les outils ou le prompt **relance la session en arrière-plan** : l'historique "
          "est conservé."},
@@ -590,7 +592,7 @@ const std::vector<GuideSection>& guideSections() {
          "3. les **récaps** des conversations précédentes du même dossier, les plus récentes d'abord, jusqu'à un "
          "plafond d'environ 40 000 caractères ;\n"
          "4. à la racine d'un projet, la liste des thèmes.\n\n"
-         "Vous pouvez le lire avant d'envoyer : *Configuration › Prompt système › Mémoire du projet injectée*.\n\n"
+         "Vous pouvez le lire avant d'envoyer : *Configuration › Instructions › Mémoire du projet ajoutée*.\n\n"
          "### Quand générer un récap\n"
          "- à la **fin** d'une conversation qui a produit quelque chose (une décision, du code, un diagnostic) ;\n"
          "- avant une **pause** longue ;\n"
@@ -800,7 +802,7 @@ const std::vector<GuideSection>& guideSections() {
          "modèle **au milieu** d'une conversation est possible : par exemple Opus pour concevoir, puis Sonnet pour "
          "dérouler l'implémentation.\n\n"
          "### Les modèles de prompts\n"
-         "Le prompt système (Configuration › Prompt système) fixe un **rôle** pour toute la conversation : relecteur "
+         "Les instructions (Configuration › Instructions) fixent un **rôle** pour toute la conversation : relecteur "
          "exigeant, pédagogue, rédacteur concis… Enregistrez ceux qui vous servent souvent comme **modèles** : un "
          "clic suffit ensuite. Pour des consignes liées à un projet plutôt qu'à un rôle, préférez les **notes** du "
          "dossier."},
@@ -973,7 +975,7 @@ void App::drawGuideWindow() {
     } else if (t == "Doser l'autonomie et la réflexion") {
         action("Modes de permission", [&] { openConfig(1); });
         action("Outils et règles", [&] { openConfig(2); });
-        action("Modèles de prompts", [&] { openConfig(3); });
+        action("Modèles de consignes", [&] { openConfig(3); });
     } else if (t == "Questions fréquentes") {
         action("Journal du CLI", [&] { showLog_ = true; });
         action("Accueil et réinitialisation", [&] { openConfig(5); });

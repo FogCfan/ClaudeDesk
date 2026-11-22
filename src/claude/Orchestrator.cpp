@@ -546,6 +546,19 @@ int modelTier(const std::string& model) {
     return 0;
 }
 
+std::vector<std::string> usableModels(const std::vector<std::string>& allowed, const std::vector<std::string>& blocked) {
+    if (blocked.empty()) return allowed;
+    std::vector<std::string> base = allowed.empty() ? std::vector<std::string>{"haiku", "sonnet", "opus", "fable"} : allowed;
+    std::vector<std::string> out;
+    for (auto& m : base) {
+        bool bad = false;
+        for (auto& b : blocked)
+            if (modelTier(m) == modelTier(b)) bad = true;
+        if (!bad) out.push_back(m);
+    }
+    return out.empty() ? allowed : out;
+}
+
 std::string clampModel(const std::string& requested, const std::vector<std::string>& allowed) {
     std::map<int, std::string> byTier;  // gamme -> modèle autorisé
     for (auto& a : allowed)
@@ -866,8 +879,13 @@ std::string Orchestrator::budgetNotes() const {
     }
     n += "\nLe budget est un maximum : optimise dans tous les cas (le modèle le plus économique qui suffit à chaque tâche).";
     std::string models;
-    for (auto& m : settings.allowedModels) models += (models.empty() ? "" : ", ") + m;
+    for (auto& m : usableModels(settings.allowedModels, blockedModels)) models += (models.empty() ? "" : ", ") + m;
     n += "\nModèles autorisés : " + (models.empty() ? std::string("tous") : models);
+    if (!blockedModels.empty()) {
+        std::string b;
+        for (auto& m : blockedModels) b += (b.empty() ? "" : ", ") + m;
+        n += " (hors abonnement de l'utilisateur, ne pas demander : " + b + ")";
+    }
     n += " · effort maximal : " + (settings.maxEffort.empty() ? std::string("aucun plafond") : settings.maxEffort) + ".";
     double tol = std::max(0.0, settings.budgetTolerance);
     if (f >= 0 && tol > 0)
@@ -1351,7 +1369,7 @@ bool Orchestrator::start(OrchestratorHost& h) {
 }
 
 bool Orchestrator::sendBrain(OrchestratorHost& h, const std::string& msg) {
-    SendOptions opt{settings.brainMode, clampModel(settings.brainModel, settings.allowedModels),
+    SendOptions opt{settings.brainMode, clampModel(settings.brainModel, usableModels(settings.allowedModels, blockedModels)),
                     clampEffort(settings.brainEffort, settings.maxEffort), settings.leanAgents};
     // Avant d'écrire au cerveau : s'il est trop chargé, ou froid (cache expiré pendant que l'équipe travaillait ou
     // pendant une pause), il repart d'une conversation neuve — le message attend la fin du récap (voir tick).
@@ -1978,7 +1996,7 @@ void Orchestrator::dispatch(OrchestratorHost& h) {
         // Modèle / effort : demande du cerveau, sinon défauts, dans les limites autorisées.
         std::string wantModel = !t.model.empty() ? t.model : settings.defaultWorkerModel;
         std::string wantEffort = !t.effort.empty() ? t.effort : settings.defaultWorkerEffort;
-        std::string model = clampModel(wantModel, settings.allowedModels);
+        std::string model = clampModel(wantModel, usableModels(settings.allowedModels, blockedModels));
         std::string effort = clampEffort(wantEffort, settings.maxEffort);
         // Conversation trop chargée, froide, ou qui changerait de modèle : on repart du récap.
         if (std::string why = rotationReasonFor(st, id, h.now(), model, effort); !why.empty()) {

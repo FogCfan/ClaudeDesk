@@ -89,6 +89,7 @@ struct OpenConversation {
     bool hasReplace = false;
     int historyIndex = -1;
     float editorHeight = 130.0f;
+    float quickBarHeight = 0;           // hauteur mesurée de la barre sous le fil (puces qui passent à la ligne)
     float permPanelHeight = 0;
     int slashSelection = 0;
 
@@ -165,7 +166,17 @@ private:
     void drawNewProjectPopup();               // WorkspacePanel.cpp
     void drawWorkspacePanel();                // WorkspacePanel.cpp
     void drawFolderNode(ws::Folder* f);       // WorkspacePanel.cpp
-    void drawConversationItem(ws::Folder* f, ws::ConversationMeta& m);
+    // Ligne d'une conversation. Session d'une suite : `session` = son rang (1 = la plus ancienne) sur `sessions` ;
+    // la dernière d'une suite se déplie sur les sessions précédentes : renvoie true si dépliée (TreePop à faire).
+    // `label` remplace le titre affiché. Renvoie false (sans TreePop à faire) si la conversation a été supprimée.
+    bool drawConversationItem(ws::Folder* f, ws::ConversationMeta& m, int session = 0, int sessions = 0,
+                              const std::string& label = {});
+    // Une discussion (suite de sessions) : la session actuelle, dépliable sur les précédentes. Renvoie false si le
+    // dossier a changé pendant le dessin (suppression, déplacement) : arrêter l'itération.
+    bool drawChain(ws::Folder* f, const ws::ConversationChain& c, const std::string& label = {});
+    // Projet orchestré : le nœud « Orchestrateur » et, en dessous, ses agents (thèmes) puis sa discussion.
+    void drawOrchestratorNode(ws::Folder* project);
+    void openProjectOrchestrator(ws::Folder* project);
     void drawInspector();                     // WorkspacePanel.cpp
     void drawMoveMenu(const std::string& convId, ws::Folder* f);
     void drawHistoryImport();                 // WorkspacePanel.cpp
@@ -340,6 +351,32 @@ private:
     void openLogin(const std::string& reason = {});
     void startLogin(bool console);            // `claude auth login` dans une fenêtre de terminal
     void onAuthError(claude::ClaudeSession& s);
+    // Modèles : abonnement du compte (« pro », « max »… ; "" inconnu), refus d'un modèle (hors abonnement…),
+    // familles utilisables. Voir claude/Models.h.
+    std::string accountPlan() const;
+    void onModelRefused(claude::ClaudeSession& s);
+    bool modelUsable(const std::string& model) const { return settings_.modelAccess.usable(model, accountPlan()); }
+    void drawModelRefusedCard(OpenConversation& oc, int index, float width);  // ConversationView.cpp
+    void drawModelCards(std::string& model, claude::ClaudeSession* s);         // ConfigPanel.cpp
+    // Éléments d'un menu / d'une liste de modèles (barre rapide, menu Configuration) : défaut, les quatre familles
+    // avec leur accès, puis les versions figées. Renvoie true et remplit `chosen` quand un modèle est choisi.
+    bool drawModelPickerItems(claude::ClaudeSession* s, const std::string& current, std::string& chosen);
+    void drawEffortSelector(std::string& effort, claude::ClaudeSession* s);  // ConfigPanel.cpp
+    void drawPermissionCards(std::string& mode);                              // ConfigPanel.cpp
+    // Sections de la Configuration (ConfigPanel.cpp)
+    void drawConfigTools(claude::ClaudeSession* s);
+    void drawConfigInstructions(OpenConversation* oc);
+    void drawConfigAdvanced(claude::ClaudeSession* s);
+    void drawConfigGeneral();
+    void drawConfigAppearance();
+    void drawConfigPerformance();
+    // Réglages enregistrés d'eux-mêmes quand ils changent (plus de bouton « Enregistrer les préférences »)
+    void autosaveSettings();
+    std::string settingsSnapshot_;
+    double settingsCheckedAt_ = 0;
+    // Polices : rechargement complet (changement de police), entre deux images.
+    bool fontFamilyReloadPending_ = false;
+    void reloadFontFamilies();
     void onLoggedIn();
     bool orchManages(const std::string& convId) const;  // conversation reprise par l'orchestrateur lui-même
     std::vector<OpenConversation*> authFailedConversations(bool excludeOrch);

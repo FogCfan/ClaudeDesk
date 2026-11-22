@@ -319,6 +319,16 @@ void ClaudeSession::handleLine(const std::string& line, double now) {
             authErrorPending_ = true;
             return;
         }
+        // Modèle refusé (Fable sans crédits d'usage, modèle inexistant…) : même schéma, carte « changer de modèle ».
+        if (std::string err = jstr(j, "error"); !err.empty()) {
+            std::string text;
+            for (auto& c : j.value("message", json::object()).value("content", json::array()))
+                if (jstr(c, "type") == "text") text += jstr(c, "text");
+            if (ModelAccess a = modelAccessFromError(err, text); a != ModelAccess::Unknown) {
+                modelErrorPending_ = a;
+                return;
+            }
+        }
         handleAssistant(j.value("message", json::object()), parent);
     } else if (type == "user") {
         handleUser(j.value("message", json::object()), parent);
@@ -499,6 +509,7 @@ void ClaudeSession::handleAssistant(const json& msg, const std::string& parent) 
         }
         std::string model = jstr(msg, "model");
         if (!model.empty()) stats.lastModel = model;
+        if (!model.empty() && model != "<synthetic>" && onModelAnswered) onModelAnswered(*this, model);
     }
 }
 
@@ -564,13 +575,17 @@ void ClaudeSession::handleResult(const json& j, double now) {
     bool isError = j.value("is_error", false) || (sub != "success" && !sub.empty());
     bool authError = isError && (authErrorPending_ || isAuthErrorText(jstr(j, "result")));
     authErrorPending_ = false;
+    ModelAccess refusedAs = isError && !authError ? modelErrorPending_ : ModelAccess::Unknown;
+    if (isError && !authError && refusedAs == ModelAccess::Unknown) refusedAs = modelAccessFromError("", jstr(j, "result"));
+    modelErrorPending_ = ModelAccess::Unknown;
+    const bool refused = refusedAs != ModelAccess::Unknown;
 
     stats.costUsd += ts.costUsd;
     stats.outputTokens += ts.outputTokens;
     stats.apiSeconds += jint(j, "duration_api_ms") / 1000.0;
     // Un tour refusé faute de connexion n'est pas une réponse : il ne compte pas (l'orchestrateur renverra le
     // message après la reconnexion au lieu de prendre l'erreur pour le travail de l'agent).
-    if (!authError) {
+    if (!authError && !refused) {
         stats.turns++;
         stats.turnHistory.push_back(ts);
         if (stats.turnHistory.size() > 400) stats.turnHistory.erase(stats.turnHistory.begin());
@@ -579,6 +594,10 @@ void ClaudeSession::handleResult(const json& j, double now) {
         std::string msg = jstr(j, "result");
         addSystemNote(msg.empty() ? "Échec d'authentification (authentication_failed)." : msg, true);
         authFailed = true;
+    } else if (refused) {
+        modelRefused = refusedAs;
+        modelRefusedName = !config.model.empty() ? config.model : activeModel;
+        addSystemNote(modelRefusalText(modelRefusedName, refusedAs), true);
     } else if (isError) {
         std::string msg = jstr(j, "result");
         if (msg.empty() && j.contains("errors"))
@@ -598,8 +617,12 @@ void ClaudeSession::handleResult(const json& j, double now) {
         statusText.clear();
     }
     dirty = true;
-    if (!isError) authFailed = false;
+    if (!isError) {
+        authFailed = false;
+        modelRefused = ModelAccess::Unknown;
+    }
     if (authError && onAuthError) onAuthError(*this);
+    if (refused && onModelRefused) onModelRefused(*this);
     if (onTurnFinished) onTurnFinished(*this);
 }
 

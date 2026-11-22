@@ -36,6 +36,18 @@ struct ConversationMeta {
     std::string model;
     bool pinned = false;
     std::string status;  // "", "en cours", "terminé", "bloqué"
+    // Conversation dont celle-ci est la suite (id) : quand le contexte devient trop long, la conversation est résumée
+    // et poursuivie dans une conversation neuve (rotation de l'orchestrateur, « Repartir du récap »). Vide sinon.
+    std::string continues;
+};
+
+// Une discussion = une suite de sessions (conversations reliées par `continues`), de la plus ancienne à la plus
+// récente. Une conversation isolée forme une suite d'une seule session.
+struct ConversationChain {
+    std::vector<ConversationMeta*> sessions;
+    ConversationMeta* latest() const { return sessions.back(); }
+    int size() const { return (int)sessions.size(); }
+    int indexOf(const std::string& id) const;  // rang (0 = la plus ancienne), -1 si absente
 };
 
 struct Folder {
@@ -111,6 +123,13 @@ private:
 };
 
 std::string conversationFileName(const std::string& title, const std::string& id);
+// Discussions d'un dossier (les conversations regroupées en suites de sessions), la plus récente en premier
+// (épinglées d'abord). Liens `continues`, ou, pour les conversations d'avant ce lien, déduits : une conversation
+// « terminée » suivie, à quelques minutes de sa dernière mise à jour ou de son récap, d'une conversation du même
+// titre (ou d'une conversation de l'orchestrateur). Les pointeurs restent valides tant que le dossier ne change pas.
+std::vector<ConversationChain> conversationChains(Folder& f);
+// Nombre de discussions du dossier et de ses sous-dossiers (une suite de sessions compte pour une).
+int countDiscussions(Folder& f);
 const char* statusLabel(const std::string& status);
 
 }  // namespace ws

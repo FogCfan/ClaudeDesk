@@ -8,6 +8,7 @@
 #include <imgui.h>
 
 #include "app/App.h"
+#include "claude/Models.h"
 #include "ui/Theme.h"
 #include "util/Strings.h"
 
@@ -34,8 +35,6 @@ void drawFiveHourHistory(const claude::UsageTracker& u, int64_t nowT) {
     }
     if (pts.empty()) return;
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("Session 5 h — 24 dernières heures");
     const float fs = ImGui::GetFontSize();
     const float axisW = ImGui::CalcTextSize("100 %").x + fs * 0.4f;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -140,131 +139,145 @@ void drawFiveHourHistory(const claude::UsageTracker& u, int64_t nowT) {
             ImGui::Separator();
             ImGui::Text("Session 5 h : %d %% utilisé", (int)(best->fiveHour * 100 + 0.5));
             ImGui::TextDisabled("Semaine : %d %% utilisé", (int)(best->sevenDay * 100 + 0.5));
+            ImGui::Separator();
+            ImGui::TextDisabled("Zone claire : session en cours · pointillés : depuis la dernière mesure");
             ImGui::EndTooltip();
         }
     }
-    const claude::RateWindow* fiveNow = u.find("five_hour");
-    dimWrapped(fiveNow && fiveNow->resetsAt > nowT ? "Zone claire : session en cours  ·  pointillés : depuis la dernière mesure"
-                                                   : "Pointillés : depuis la dernière mesure (aucune session en cours)");
 }
 
 }  // namespace
 
+// Panneau épuré : l'essentiel d'un coup d'œil (anneau de la session de 5 h, semaine), le reste replié.
 void App::drawUsagePanel() {
     if (!ImGui::Begin("Usage", &showUsage_)) {
         ImGui::End();
         return;
     }
     const auto& pal = ui::palette();
+    const float fs = ImGui::GetFontSize();
     int64_t nowT = util::nowUnix();
-
-    // --- Limites du forfait ---
-    ImGui::SeparatorText(usage_.subscription.empty() ? "Limites du forfait" : ("Limites — " + usage_.subscription).c_str());
     bool refreshing = false;
     for (auto& j : jobs_)
         if (j->target == "#usage") refreshing = true;
+
+    // --- Quota de l'abonnement ---------------------------------------------------------------------------------
+    ImGui::SeparatorText(usage_.subscription.empty() ? "Quota" : ("Quota · " + usage_.subscription).c_str());
     if (usage_.windows.empty()) {
-        ImGui::TextWrapped("Pas encore de mesure. Cliquez sur Actualiser : ClaudeDesk lance /usage, "
-                           "qui ne consomme aucun quota.");
+        dimWrapped("Pas encore de mesure. L'actualisation lance /usage, qui ne consomme aucun quota.");
+        ImGui::BeginDisabled(refreshing);
+        if (ImGui::Button(refreshing ? "Mesure…" : "Mesurer maintenant")) refreshUsage();
+        ImGui::EndDisabled();
     }
-    for (auto& w : usage_.windows) {
-        const bool fiveHour = w.name == "five_hour";
-        // Date de réinitialisation dépassée : la mesure gardée est périmée, le compteur est reparti de 0.
-        const bool expired = w.resetsAt > 0 && nowT >= w.resetsAt;
-        const double used = expired ? 0.0 : w.utilization;
-        ImGui::TextUnformatted(claude::windowLabel(w.name).c_str());
-        if (expired) {
-            ImGui::SameLine();
-            ui::badge("réinitialisée", pal.ok);
-        } else if (w.status == "rejected") {
-            ImGui::SameLine();
-            ui::badge("limite atteinte", pal.err);
-        } else if (w.status == "allowed_warning") {
-            ImGui::SameLine();
-            ui::badge("proche de la limite", pal.warn);
-        }
-        char overlay[64];
-        std::snprintf(overlay, sizeof overlay, "%d %% utilisé", (int)(used * 100 + 0.5));
-        ui::usageBar((float)used, overlay, ImGui::GetFrameHeight() * 0.9f, -1, w.name.c_str());
+    // Échéance lisible : « dans 1 h 04 »
+    auto resetText = [&](const claude::RateWindow& w, bool expired) -> std::string {
+        if (w.resetsAt <= 0) return {};
+        if (expired) return w.name == "five_hour" ? "terminée : la suivante démarre à votre prochain message" : "réinitialisée";
+        return "repart à 0 dans " + util::humanDuration(w.resetsAt - nowT);
+    };
+    auto statusBadge = [&](const claude::RateWindow& w, bool expired) {
+        if (expired) return;
+        if (w.status == "rejected") ui::badge("limite atteinte", pal.err);
+        else if (w.status == "allowed_warning") ui::badge("proche de la limite", pal.warn);
+    };
+
+    // Session de 5 h : anneau + texte à côté (ou dessous si le panneau est étroit)
+    if (const claude::RateWindow* five = usage_.find("five_hour")) {
+        const bool expired = five->resetsAt > 0 && nowT >= five->resetsAt;
+        const float used = expired ? 0.0f : (float)five->utilization;
+        char big[16];
+        std::snprintf(big, sizeof big, "%d %%", (int)(used * 100 + 0.5f));
+        const float d = std::clamp(ImGui::GetContentRegionAvail().x * 0.36f, fs * 5.0f, fs * 7.0f);
+        const bool side = ImGui::GetContentRegionAvail().x >= d + fs * 9;
+        ImGui::Spacing();
+        if (!side) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - d) * 0.5f);
+        ui::ringGauge(used, d, big, "utilisé", fontBold, "##ring5h");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
             ImGui::BeginTooltip();
-            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24);
-            if (fiveHour)
-                ImGui::TextUnformatted("Part du quota de la session en cours. Une session dure 5 h à partir de votre "
-                                       "premier message ; à son terme, le compteur repart de 0 %.");
-            else
-                ImGui::TextUnformatted("Quota de la semaine. Il se réinitialise à date fixe, une fois par semaine.");
-            if (!expired) ImGui::Text("Reste : %d %%", std::max(0, 100 - (int)(w.utilization * 100 + 0.5)));
+            ImGui::PushTextWrapPos(fs * 22);
+            ImGui::TextUnformatted("Part du quota de la session en cours. Une session dure 5 h à partir de votre premier "
+                                   "message ; à son terme, le compteur repart de 0 %.");
+            if (!expired && five->resetsAt > 0) ImGui::TextDisabled("Réinitialisation : %s", util::humanWhen(five->resetsAt).c_str());
             ImGui::PopTextWrapPos();
             ImGui::EndTooltip();
         }
-        if (w.resetsAt > 0) {
-            std::string when = util::humanWhen(w.resetsAt);
-            if (!expired)
-                ImGui::TextDisabled("Repart de 0 dans %s  ·  %s", util::humanDuration(w.resetsAt - nowT).c_str(), when.c_str());
-            else if (fiveHour)
-                dimWrapped("Session terminée " + when + " : la suivante démarre à votre prochain message.");
-            else
-                ImGui::TextDisabled("Réinitialisée %s.", when.c_str());
+        if (side) {
+            ImGui::SameLine(0, fs);
+            ImGui::BeginGroup();
+            ImGui::Dummy(ImVec2(0, d * 0.5f - ImGui::GetTextLineHeightWithSpacing() * 1.2f));
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextUnformatted("Session de 5 h");
+            ImGui::PopFont();
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(pal.dim, "%s", resetText(*five, expired).c_str());
+            ImGui::PopTextWrapPos();
+            statusBadge(*five, expired);
+            ImGui::EndGroup();
+        } else {
+            std::string t = "Session de 5 h · " + resetText(*five, expired);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(t.c_str()).x) * 0.5f));
+            ImGui::TextColored(pal.dim, "%s", t.c_str());
+            statusBadge(*five, expired);
         }
+        ImGui::Spacing();
     }
-    if (usage_.usingOverage) ui::badge("Crédits supplémentaires en cours d'utilisation", pal.warn);
+    // Les autres fenêtres (semaine, semaine Opus…) : une ligne chacune
+    for (auto& w : usage_.windows) {
+        if (w.name == "five_hour") continue;
+        const bool expired = w.resetsAt > 0 && nowT >= w.resetsAt;
+        const float used = expired ? 0.0f : (float)w.utilization;
+        char val[16];
+        std::snprintf(val, sizeof val, "%d %%", (int)(used * 100 + 0.5f));
+        ui::meterRow(claude::windowLabel(w.name).c_str(), used, val, resetText(w, expired).c_str(), fontBold, w.name.c_str());
+        if (!expired && (w.status == "rejected" || w.status == "allowed_warning")) statusBadge(w, expired);
+    }
+    if (usage_.usingOverage) ui::badge("crédits supplémentaires en cours d'utilisation", pal.warn);
+    // Fraîcheur de la mesure + actualiser, en une ligne discrète
     if (usage_.lastUpdate > 0) {
         ImGui::TextDisabled("Mesuré il y a %s", util::humanDuration(nowT - usage_.lastUpdate).c_str());
         ImGui::SameLine();
+        ImGui::BeginDisabled(refreshing);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        if (ImGui::SmallButton(refreshing ? "…##usagerefresh" : "⟳##usagerefresh")) refreshUsage();
+        ImGui::PopStyleColor();
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_DelayShort))
+            ImGui::SetTooltip("Actualiser (commande /usage : gratuite, sans quota consommé)");
     }
-    ImGui::BeginDisabled(refreshing);
-    if (ImGui::SmallButton(refreshing ? "Actualisation…" : "Actualiser")) refreshUsage();
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_DelayShort))
-        ImGui::SetTooltip("Lance la commande /usage de Claude Code : gratuite, sans quota consommé,\n"
-                          "et elle fonctionne même quand la limite est atteinte.");
+    if (!usage_.history.empty() && ImGui::TreeNodeEx("Historique sur 24 h", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+        drawFiveHourHistory(usage_, nowT);
+        ImGui::TreePop();
+    }
 
-    drawFiveHourHistory(usage_, nowT);
-
-    // --- Session active ---
-    OpenConversation* oc = active();
-    if (oc) {
+    // --- Conversation active -------------------------------------------------------------------------------------
+    if (OpenConversation* oc = active()) {
         auto& s = *oc->session;
         auto& st = s.stats;
         ImGui::SeparatorText("Conversation active");
-        if (ImGui::BeginTable("##sess", 2, ImGuiTableFlags_SizingStretchProp)) {
-            auto row = [](const char* k, const std::string& v) {
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::TextDisabled("%s", k);
-                ImGui::TableSetColumnIndex(1);
-                ImGui::TextUnformatted(v.c_str());
-            };
-            row("État", claude::stateLabel(s.state));
-            row("Modèle", st.lastModel.empty() ? (s.config.model.empty() ? "par défaut" : s.config.model) : st.lastModel);
-            row("Coût (équivalent API)", util::formatUsd(st.costUsd));
-            row("Tours", std::to_string(st.turns));
-            row("Jetons envoyés", util::humanTokens(st.inputTokens + st.cacheReadTokens + st.cacheWriteTokens));
-            row("  dont cache lu", util::humanTokens(st.cacheReadTokens));
-            row("  dont cache écrit", util::humanTokens(st.cacheWriteTokens));
-            row("Jetons générés", util::humanTokens(st.outputTokens));
-            row("Temps API", util::humanDuration((int64_t)st.apiSeconds));
-            if (!s.claudeSessionId.empty()) row("Session", s.claudeSessionId.substr(0, 8) + "…");
-            ImGui::EndTable();
+        // Modèle et état sur une ligne
+        std::string model = st.lastModel.empty() ? claude::modelDisplayName(s.config.model) : claude::modelDisplayName(st.lastModel);
+        bool busy = s.state == claude::SessionState::Busy || s.state == claude::SessionState::Starting;
+        if (busy) {
+            ui::spinner((float)now_, pal.accent);
+            ImGui::SameLine();
         }
+        ImGui::TextUnformatted(model.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("· %s", claude::stateLabel(s.state));
+        if (st.contextWindow > 0) {
+            float f = (float)st.contextTokens / (float)st.contextWindow;
+            char val[16];
+            std::snprintf(val, sizeof val, "%d %%", (int)(f * 100 + 0.5f));
+            std::string note = util::humanTokens(st.contextTokens) + " / " + util::humanTokens(st.contextWindow) + " jetons";
+            if (f > 0.6f) note += " · /compact pour résumer";
+            ui::meterRow("Contexte", f, val, note.c_str(), fontBold, ("##ctx" + s.localId).c_str());
+        }
+        ImGui::TextDisabled("%d tour%s · %s en équivalent API", st.turns, st.turns > 1 ? "s" : "", util::formatUsd(st.costUsd).c_str());
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Le coût est l'équivalent au tarif API : avec un abonnement, c'est le quota\n"
                               "ci-dessus qui est consommé, pas de l'argent.");
-        if (st.contextWindow > 0) {
-            float f = (float)st.contextTokens / (float)st.contextWindow;
-            std::string ov = util::humanTokens(st.contextTokens) + " / " + util::humanTokens(st.contextWindow);
-            ImGui::TextUnformatted("Fenêtre de contexte");
-            ui::usageBar(f, ov.c_str(), ImGui::GetFrameHeight() * 0.9f, -1, ("##ctx" + s.localId).c_str());
-        }
-        if (st.turnHistory.size() >= 2) {
-            std::vector<float> costs;
-            for (auto& t : st.turnHistory) costs.push_back((float)(t.costUsd * 1000.0));
-            ImGui::PlotHistogram("##costs", costs.data(), (int)costs.size(), 0, "coût par tour (m$)", 0, FLT_MAX,
-                                 ImVec2(-1, ImGui::GetFontSize() * 3));
-        }
 
-        // Dernière liste de tâches de Claude (TodoWrite)
+        // Liste de tâches de Claude (TodoWrite) : utile, gardée visible
         for (auto it = s.entries.rbegin(); it != s.entries.rend(); ++it) {
             if (it->kind != claude::EntryKind::ToolUse || it->toolName != "TodoWrite" || !it->parentToolUseId.empty()) continue;
             auto input = nlohmann::json::parse(it->toolInput, nullptr, false);
@@ -274,47 +287,70 @@ void App::drawUsagePanel() {
                 ++total;
                 if (t.value("status", "") == "completed") ++done;
             }
-            ImGui::SeparatorText(("Tâches de Claude (" + std::to_string(done) + "/" + std::to_string(total) + ")").c_str());
+            ImGui::SeparatorText(("Tâches de Claude · " + std::to_string(done) + "/" + std::to_string(total)).c_str());
             for (auto& t : input["todos"]) {
                 std::string stt = t.value("status", "");
                 ImVec4 c = stt == "completed" ? pal.ok : stt == "in_progress" ? pal.warn : pal.dim;
                 ImGui::TextColored(c, "%s", stt == "completed" ? "☑" : stt == "in_progress" ? "◐" : "☐");
                 ImGui::SameLine();
                 ImGui::PushTextWrapPos(0.0f);
-                ImGui::TextUnformatted(t.value(stt == "in_progress" ? "activeForm" : "content", t.value("content", "")).c_str());
+                if (stt == "completed") ImGui::TextDisabled("%s", t.value("content", "").c_str());
+                else ImGui::TextUnformatted(t.value(stt == "in_progress" ? "activeForm" : "content", t.value("content", "")).c_str());
                 ImGui::PopTextWrapPos();
             }
             break;
         }
 
-        if (!s.mcpServers.empty() && ImGui::TreeNode("Serveurs MCP")) {
-            for (auto& [name, status] : s.mcpServers) {
-                ImVec4 c = status == "connected" ? pal.ok : status == "failed" ? pal.err : pal.dim;
-                ImGui::TextColored(c, "●");
-                ImGui::SameLine();
-                ImGui::Text("%s  (%s)", name.c_str(), status.c_str());
+        // Détails techniques : repliés
+        if (ImGui::TreeNodeEx("Détails", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+            if (ImGui::BeginTable("##sess", 2, ImGuiTableFlags_SizingStretchProp)) {
+                auto row = [](const char* k, const std::string& v) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextDisabled("%s", k);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(v.c_str());
+                };
+                row("Jetons envoyés", util::humanTokens(st.inputTokens + st.cacheReadTokens + st.cacheWriteTokens));
+                row("  dont cache lu", util::humanTokens(st.cacheReadTokens));
+                row("  dont cache écrit", util::humanTokens(st.cacheWriteTokens));
+                row("Jetons générés", util::humanTokens(st.outputTokens));
+                row("Temps API", util::humanDuration((int64_t)st.apiSeconds));
+                if (!s.claudeSessionId.empty()) row("Session", s.claudeSessionId.substr(0, 8) + "…");
+                ImGui::EndTable();
+            }
+            if (st.turnHistory.size() >= 2) {
+                std::vector<float> costs;
+                for (auto& t : st.turnHistory) costs.push_back((float)(t.costUsd * 1000.0));
+                ImGui::PlotHistogram("##costs", costs.data(), (int)costs.size(), 0, "coût par tour (m$)", 0, FLT_MAX,
+                                     ImVec2(-1, fs * 3));
+            }
+            if (!s.mcpServers.empty()) {
+                ImGui::TextDisabled("Serveurs MCP");
+                for (auto& [name, status] : s.mcpServers) {
+                    ImVec4 c = status == "connected" ? pal.ok : status == "failed" ? pal.err : pal.dim;
+                    ImGui::TextColored(c, "●");
+                    ImGui::SameLine();
+                    ImGui::Text("%s  (%s)", name.c_str(), status.c_str());
+                }
             }
             ImGui::TreePop();
         }
     }
 
-    // --- Toutes les conversations ouvertes ---
-    if (open_.size() > 1) {
-        double total = 0;
-        int busy = 0;
-        for (auto& o : open_) {
-            total += o->session->stats.costUsd;
-            if (o->session->state == claude::SessionState::Busy) ++busy;
-        }
-        ImGui::SeparatorText("Toutes les conversations ouvertes");
-        ImGui::Text("%d ouvertes, %d actives  ·  %s", (int)open_.size(), busy, util::formatUsd(total).c_str());
-    }
-    if (!jobs_.empty()) {
-        ImGui::SeparatorText("Tâches de fond");
+    // --- En arrière-plan -----------------------------------------------------------------------------------------
+    int busyN = 0;
+    for (auto& o : open_)
+        if (o->session->state == claude::SessionState::Busy) ++busyN;
+    if (open_.size() > 1 || !jobs_.empty()) {
+        ImGui::Spacing();
+        if (open_.size() > 1)
+            ImGui::TextDisabled("%d conversations ouvertes%s", (int)open_.size(),
+                                busyN ? (", " + std::to_string(busyN) + " au travail").c_str() : "");
         for (auto& j : jobs_) {
             ui::spinner((float)now_, pal.accent);
             ImGui::SameLine();
-            ImGui::TextUnformatted(j->label.c_str());
+            ImGui::TextDisabled("%s", j->label.c_str());
         }
     }
     ImGui::End();

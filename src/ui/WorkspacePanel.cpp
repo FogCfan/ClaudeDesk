@@ -8,6 +8,7 @@
 #include <imgui_stdlib.h>
 
 #include "app/App.h"
+#include "claude/Models.h"
 #include "ui/Icons.h"
 #include "ui/Theme.h"
 #include "util/Paths.h"
@@ -92,6 +93,9 @@ void App::drawIconLegend() {
     legendRow(ui::Icon::Agent, "Agent", "thème d'un projet orchestré : un membre de l'équipe");
     legendRow(ui::Icon::Orchestrator, "Orchestrateur", "la conversation qui pilote les agents");
     legendRow(ui::Icon::Chat, "Conversation", "un échange enregistré avec Claude (double-clic pour le reprendre)");
+    legendRow(ui::Icon::History, "Session précédente",
+              "devenue trop longue, la discussion a été résumée et poursuivie : les sessions sont rangées sous la plus "
+              "récente (flèche)");
     legendRow(ui::Icon::WorkDir, "Dossier de travail", "les fichiers du projet (code, documents, données) que Claude lit et modifie");
     legendRow(ui::Icon::FileText, "Fichier", "document de référence (glissez-en un sur un dossier pour l'ajouter)");
     ImGui::Spacing();
@@ -161,23 +165,24 @@ void App::drawWorkspacePanel() {
         ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
         projectsRect_[0] = p.x, projectsRect_[1] = p.y, projectsRect_[2] = p.x + sz.x, projectsRect_[3] = p.y + sz.y;
     }
-    if (ImGui::Button("+ Projet")) openNewProject_ = true;
+    const auto& palp = ui::palette();
+    if (ui::chip("+ Projet", &palp.link)) openNewProject_ = true;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Créer un projet (un dossier de travail + des thèmes)");
     ImGui::SameLine();
-    if (ImGui::Button("Importer")) {
+    if (ui::chip("Importer", &palp.dim)) {
         showHistory_ = true;
         histProjects_ = claude::listHistoryProjects();
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Importer des sessions faites dans le terminal (claude)");
     ImGui::SameLine();
-    if (ImGui::Button("⟳")) {
+    if (ui::chip("⟳", &palp.dim)) {
         workspace_.rescan();
         dirCache_.clear();
         orchFileCache_.clear();
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Relire le dossier des projets et les dossiers de travail");
     ImGui::SameLine();
-    ImGui::Button("?");
+    ui::chip("?", &palp.dim);
     if (ImGui::IsItemHovered() || optPanel_ == "projets:legende") {  // (capture de test : légende affichée)
         ImGui::BeginTooltip();
         drawIconLegend();
@@ -220,7 +225,8 @@ void App::drawWorkspacePanel() {
     ImGui::End();
 }
 
-void App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m) {
+bool App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m, int session, int sessions,
+                               const std::string& labelIn) {
     const auto& pal = ui::palette();
     bool isOpen = false, busy = false;
     for (auto& oc : open_)
@@ -244,16 +250,25 @@ void App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m) {
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) renameTarget_.clear();
         ImGui::PopID();
-        return;
+        return false;
     }
     bool brain = isBrainConversation(f, m);
-    std::string label = std::string(m.pinned ? "★ " : "") + m.title;
+    // Session d'une suite : la dernière porte le titre (et se déplie sur les précédentes), les précédentes leur rang.
+    const bool chained = sessions > 1;
+    const bool current = chained && session == sessions;
+    const bool relayed = chained && !current;
+    std::string label = std::string(m.pinned ? "★ " : "") + (labelIn.empty() ? m.title : labelIn);
     bool selected = selectedConv_ == m.id && selectedFile_.empty();
-    ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
+    ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (current) fl |= ImGuiTreeNodeFlags_OpenOnArrow;
+    else fl |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
     if (selected) fl |= ImGuiTreeNodeFlags_Selected;
     if (isOpen) ImGui::PushStyleColor(ImGuiCol_Text, pal.accent);
-    ui::iconTreeNode("##conv", fl, brain ? ui::Icon::Orchestrator : ui::Icon::Chat, label.c_str(), 0, busy ? 1.0f : 0.0f);
-    if (isOpen) ImGui::PopStyleColor();
+    else if (relayed) ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+    ui::Icon ic = relayed ? ui::Icon::History : brain ? ui::Icon::Orchestrator : ui::Icon::Chat;
+    bool nodeOpen = ui::iconTreeNode("##conv", fl, ic, label.c_str(), 0, busy ? 1.0f : 0.0f);
+    if (isOpen || relayed) ImGui::PopStyleColor();
+    if (!current) nodeOpen = false;
     {
         ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
         dropZones_.push_back({a.x, a.y, b.x, b.y, util::pathToUtf8(f->path)});
@@ -263,17 +278,25 @@ void App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m) {
         selectedFolder_ = util::pathToUtf8(f->path);
         selectedFile_.clear();
     }
-    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0) && !ImGui::IsItemToggledOpen()) {
         if (brain && isOrchBrain(m.id)) openOrchestratorPage(true);
         else openConversation(m.id);
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
         ImGui::BeginTooltip();
-        ui::icon(brain ? ui::Icon::Orchestrator : ui::Icon::Chat);
+        ui::icon(ic);
         ImGui::SameLine();
         ImGui::TextUnformatted(m.title.c_str());
         ImGui::TextDisabled("%s · %s · %d messages · %s", brain ? "Orchestrateur" : "Conversation",
                             util::humanDate(m.updated).c_str(), m.messages, util::formatUsd(m.costUsd).c_str());
+        if (current)
+            ImGui::TextColored(pal.link, "Session %d (l'actuelle) : les %d précédentes ont été résumées pour repartir\n"
+                                         "d'un contexte léger. Flèche à gauche : les afficher.",
+                               session, sessions - 1);
+        else if (relayed)
+            ImGui::TextColored(pal.link, "Session %d sur %d : son contexte devenait trop long, elle a été résumée\n"
+                                         "et poursuivie dans la session %d. Double-clic : la relire.",
+                               session, sessions, session + 1);
         if (!m.recap.empty()) {
             ImGui::Separator();
             ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30);
@@ -284,9 +307,16 @@ void App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m) {
         }
         ImGui::EndTooltip();
     }
-    if (!m.status.empty()) {
+    if (relayed && m.status == "done") {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s · résumée", util::humanDate(m.updated).c_str());
+    } else if (!m.status.empty()) {
         ImGui::SameLine();
         ui::badge(ws::statusLabel(m.status), statusColor(m.status));
+    }
+    if (current) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d sessions", sessions);
     }
     if (ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload(kConvPayload, m.id.c_str(), m.id.size() + 1);
@@ -339,10 +369,155 @@ void App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m) {
                 }
             workspace_.removeConversation(id);
             ImGui::EndPopup();
+            if (nodeOpen) ImGui::TreePop();
             ImGui::PopID();
-            return;  // `m` n'existe plus
+            return false;  // `m` n'existe plus
         }
         ImGui::EndPopup();
+    }
+    ImGui::PopID();
+    return nodeOpen;
+}
+
+bool App::drawChain(ws::Folder* f, const ws::ConversationChain& c, const std::string& label) {
+    const size_t before = f->conversations.size();
+    const int n = c.size();
+    ws::ConversationMeta* last = c.latest();
+    const std::string lastTitle = last->title;
+    if (optPanel_ == "projets:sessions" && n > 2 && f->parent) {  // capture de test
+        ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+        if (selectedConv_.empty()) selectedConv_ = c.sessions[n - 2]->id;
+    }
+    bool open = drawConversationItem(f, *last, n > 1 ? n : 0, n > 1 ? n : 0, label);
+    if (f->conversations.size() != before) {
+        if (open) ImGui::TreePop();
+        return false;
+    }
+    if (!open) return true;
+    // Sessions précédentes, de la plus récente à la plus ancienne
+    for (int k = n - 2; k >= 0; --k) {
+        ws::ConversationMeta* m = c.sessions[k];
+        std::string l = "Session " + std::to_string(k + 1);
+        if (m->title != lastTitle) l += " · " + m->title;
+        drawConversationItem(f, *m, k + 1, n, l);
+        if (f->conversations.size() != before) {
+            ImGui::TreePop();
+            return false;
+        }
+    }
+    ImGui::TreePop();
+    return true;
+}
+
+void App::openProjectOrchestrator(ws::Folder* project) {
+    if (!project) return;
+    if (!(orch_ && orchProject_ == util::pathToUtf8(project->path))) {
+        if (orch_ && orch_->running()) {
+            toast("L'orchestrateur d'un autre projet travaille : mettez-le en pause pour ouvrir celui de « " +
+                      project->name + " ».",
+                  true);
+            return;
+        }
+        if (!loadOrchestrator(project)) return;
+    }
+    openOrchestratorPage(true);
+}
+
+void App::drawOrchestratorNode(ws::Folder* project) {
+    const auto& pal = ui::palette();
+    const std::string ppath = util::pathToUtf8(project->path);
+    const bool loaded = orch_ && orchProject_ == ppath;
+    // Discussion du cerveau (copie : le dessin des agents peut modifier le dossier)
+    std::string brainId, brainRecap;
+    int brainSessions = 0;
+    for (const auto& c : ws::conversationChains(*project))
+        if (isBrainConversation(project, *c.latest())) {
+            brainId = c.latest()->id;
+            brainRecap = c.latest()->recap;
+            brainSessions = c.size();
+            break;
+        }
+    // État, en quelques mots
+    const char* state = brainId.empty() ? "pas encore lancé" : "à l'arrêt";
+    ImVec4 stateCol = pal.dim;
+    bool active = false;
+    if (loaded) {
+        switch (orch_->state) {
+            case claude::OrchState::Idle: state = brainId.empty() ? "pas encore lancé" : "prêt"; break;
+            case claude::OrchState::Thinking: state = "réfléchit", stateCol = pal.accent, active = true; break;
+            case claude::OrchState::Working: state = "les agents travaillent", stateCol = pal.accent, active = true; break;
+            case claude::OrchState::WaitingHuman: state = "attend votre réponse", stateCol = pal.warn; break;
+            case claude::OrchState::Paused: state = "en pause", stateCol = pal.warn; break;
+            case claude::OrchState::UsagePause: state = "pause : limite d'usage", stateCol = pal.warn; break;
+            case claude::OrchState::Finished: state = "terminé", stateCol = pal.ok; break;
+        }
+    }
+    const int agents = (int)project->children.size();
+
+    ImGui::PushID("##orchnode");
+    ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_DefaultOpen;
+    if (!brainId.empty() && selectedConv_ == brainId && selectedFile_.empty()) fl |= ImGuiTreeNodeFlags_Selected;
+    ImGui::PushFont(fontBold, 0.0f);
+    bool open = ui::iconTreeNode("##orch", fl, ui::Icon::Orchestrator, "Orchestrateur", 0, active ? 1.0f : 0.0f);
+    ImGui::PopFont();
+    if (ImGui::IsItemClicked() && !brainId.empty()) {
+        selectedConv_ = brainId;
+        selectedFolder_ = ppath;
+        selectedFile_.clear();
+    }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) openProjectOrchestrator(project);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::BeginTooltip();
+        ui::icon(ui::Icon::Orchestrator);
+        ImGui::SameLine();
+        ImGui::TextUnformatted("Orchestrateur du projet");
+        ImGui::TextDisabled("Il répartit le travail entre les agents rangés dessous et suit leurs résultats.");
+        ImGui::TextColored(stateCol, "État : %s", state);
+        ImGui::TextDisabled("%d agent(s)%s", agents,
+                            brainSessions > 1 ? (" · sa discussion en est à la session " + std::to_string(brainSessions)).c_str() : "");
+        if (!brainRecap.empty()) {
+            ImGui::Separator();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30);
+            ImGui::TextUnformatted(util::truncateUtf8(brainRecap, 500).c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("Clic : afficher / masquer l'équipe · double-clic : ouvrir la page Orchestrateur");
+        ImGui::EndTooltip();
+    }
+    ImGui::SameLine();
+    ui::badge(state, stateCol);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d agent%s", agents, agents > 1 ? "s" : "");
+    if (ImGui::BeginPopupContextItem("##orchctx")) {
+        if (ImGui::MenuItem("Ouvrir la page Orchestrateur")) openProjectOrchestrator(project);
+        if (ImGui::MenuItem("Ouvrir sa discussion", nullptr, false, !brainId.empty())) {
+            if (isOrchBrain(brainId)) openOrchestratorPage(true);
+            else openConversation(brainId);
+        }
+        if (ImGui::MenuItem("Nouvel agent (thème)")) {
+            std::string err;
+            if (ws::Folder* nf = workspace_.createFolder(project, "Nouvel agent", &err)) {
+                renameTarget_ = util::pathToUtf8(nf->path);
+                renameIsFolder_ = true;
+                renameBuffer_ = nf->name;
+            } else {
+                toast(err, true);
+            }
+        }
+        ImGui::EndPopup();
+    }
+    if (open) {
+        if (project->children.empty())
+            ImGui::TextDisabled("Pas encore d'agent : l'orchestrateur en proposera au lancement.");
+        for (size_t i = 0; i < project->children.size(); ++i) drawFolderNode(project->children[i].get());
+        // Sa propre discussion (sessions regroupées), après l'équipe
+        for (const auto& c : ws::conversationChains(*project))
+            if (isBrainConversation(project, *c.latest())) {
+                drawChain(project, c, "Discussion de l'orchestrateur");
+                break;
+            }
+        ImGui::TreePop();
     }
     ImGui::PopID();
 }
@@ -532,14 +707,20 @@ void App::drawFolderNode(ws::Folder* f) {
         ImGui::PopID();
         return;
     }
-    ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_SpanAvailWidth;
-    if (selectedFolder_ == path && selectedConv_.empty() && selectedFile_.empty()) fl |= ImGuiTreeNodeFlags_Selected;
-    if (f->isProject || (f->parent && f->parent->isProject)) fl |= ImGuiTreeNodeFlags_DefaultOpen;
-    int total = f->totalConversations();
-    std::string label = f->name + (total ? "  (" + std::to_string(total) + ")" : "");
     bool agent = isAgentFolder(f);
-    bool agentWorking = false;
-    if (agent && orch_ && orchProject_ == util::pathToUtf8(f->parent->path)) agentWorking = agentView(f->name).working;
+    // Agent : un clic le déplie (ses discussions), un double-clic ouvre sa conversation actuelle.
+    ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (!agent) fl |= ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+    if (selectedFolder_ == path && selectedConv_.empty() && selectedFile_.empty()) fl |= ImGuiTreeNodeFlags_Selected;
+    if (f->isProject || (!agent && f->parent && f->parent->isProject)) fl |= ImGuiTreeNodeFlags_DefaultOpen;
+    int total = f->totalConversations();
+    int discussions = ws::countDiscussions(*f);
+    std::string label = f->name + (discussions && !agent ? "  (" + std::to_string(discussions) + ")" : "");
+    const bool agentLive = agent && orch_ && orchProject_ == util::pathToUtf8(f->parent->path);
+    AgentView av;
+    if (agentLive) av = agentView(f->name);
+    bool agentWorking = agentLive && av.working;
+    if (agent && optPanel_ == "projets:sessions" && total > discussions) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     bool wasOpen = ImGui::GetStateStorage()->GetInt(ImGui::GetID("##folder"), (fl & ImGuiTreeNodeFlags_DefaultOpen) ? 1 : 0) != 0;
     ui::Icon ic = f->isProject ? ui::Icon::Project : agent ? ui::Icon::Agent : wasOpen ? ui::Icon::FolderOpen : ui::Icon::Folder;
     if (f->isProject) ImGui::PushFont(fontBold, 0.0f);
@@ -551,10 +732,19 @@ void App::drawFolderNode(ws::Folder* f) {
         ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
         dropZones_.push_back({a.x, a.y, b.x, b.y, path});
     }
-    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+    if (ImGui::IsItemClicked() && (agent || !ImGui::IsItemToggledOpen())) {
         selectedFolder_ = path;
         selectedConv_.clear();
         selectedFile_.clear();
+    }
+    if (agent && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+        // Conversation actuelle de l'agent : celle que l'orchestrateur lui a confiée, sinon sa discussion la plus récente
+        std::string id = agentLive ? av.convId : std::string();
+        if (id.empty()) {
+            auto chains = ws::conversationChains(*f);
+            if (!chains.empty()) id = chains.front().latest()->id;
+        }
+        if (!id.empty()) openConversation(id);
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
         ImGui::BeginTooltip();
@@ -569,9 +759,23 @@ void App::drawFolderNode(ws::Folder* f) {
         ImGui::TextDisabled("%s", f->isProject ? "Projet : son dossier de fichiers, ses thèmes et ses conversations."
                                   : agent    ? "Agent de l'orchestrateur : sa fiche de rôle est dans les notes du thème."
                                              : "Thème : regroupe les conversations d'un même sujet.");
-        ImGui::TextDisabled("%d conversation(s)%s", total,
+        if (agentLive && av.task) ImGui::TextColored(av.color, "%s", av.label.c_str());
+        ImGui::TextDisabled("%d discussion(s)%s%s", discussions,
+                            total > discussions ? (" · " + std::to_string(total) + " sessions en tout").c_str() : "",
                             f->files.empty() ? "" : (" · " + std::to_string(f->files.size()) + " fichier(s)").c_str());
+        if (total > discussions)
+            ImGui::TextDisabled("Une discussion trop longue est résumée et poursuivie dans une nouvelle session :\n"
+                                "les sessions d'une même discussion sont regroupées sous la plus récente.");
+        if (agent) ImGui::TextDisabled("Clic : afficher ses discussions · double-clic : ouvrir sa conversation actuelle");
         ImGui::EndTooltip();
+    }
+    if (agent) {
+        // Statut de l'agent : celui de sa tâche, quand l'orchestrateur du projet est chargé (le statut enregistré dans
+        // la conversation, « En cours », resterait affiché une fois l'orchestration finie)
+        if (agentLive && av.task) {
+            ImGui::SameLine();
+            ui::badge(av.label.c_str(), av.color);
+        }
     }
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload(kConvPayload)) {
@@ -646,13 +850,21 @@ void App::drawFolderNode(ws::Folder* f) {
         return;
     }
     if (open) {
-        if (f->isProject) drawWorkDirNode(f);
-        for (size_t i = 0; i < f->children.size(); ++i) drawFolderNode(f->children[i].get());
-        for (size_t i = 0; i < f->conversations.size(); ++i) {
-            size_t before = f->conversations.size();
-            drawConversationItem(f, f->conversations[i]);
-            if (f->conversations.size() != before) break;
+        const bool orchestrated = f->isProject && projectOrchestrated(f);
+        if (orchestrated) {
+            // Projet orchestré : Orchestrateur › agents › discussions, puis le reste du projet
+            drawOrchestratorNode(f);
+        } else {
+            if (f->isProject) drawWorkDirNode(f);
+            for (size_t i = 0; i < f->children.size(); ++i) drawFolderNode(f->children[i].get());
         }
+        // Discussions du dossier (les sessions d'une même discussion regroupées) ; celle de l'orchestrateur est
+        // déjà sous son nœud.
+        for (const auto& c : ws::conversationChains(*f)) {
+            if (orchestrated && isBrainConversation(f, *c.latest())) continue;
+            if (!drawChain(f, c)) break;
+        }
+        if (orchestrated) drawWorkDirNode(f);
         for (size_t i = 0; i < f->files.size(); ++i) {
             size_t before = f->files.size();
             drawFileItem(util::pathToUtf8(f->files[i]), f);
@@ -749,25 +961,67 @@ void App::drawInspector() {
             ImGui::PushFont(fontBold, 0.0f);
             ImGui::TextWrapped("%s", m->title.c_str());
             ImGui::PopFont();
-            ImGui::TextDisabled("%s", folder->displayPath().c_str());
-            ImGui::TextDisabled("Créée %s · modifiée %s", util::humanDate(m->created).c_str(), util::humanDate(m->updated).c_str());
-            ImGui::TextDisabled("%d messages · %s%s", m->messages, util::formatUsd(m->costUsd).c_str(),
-                                m->model.empty() ? "" : (" · " + m->model).c_str());
-            if (ImGui::Button("Reprendre")) openConversation(m->id);
+            ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+            ImGui::TextWrapped("%s", folder->displayPath().c_str());
+            std::string facts = std::to_string(m->messages) + " message" + (m->messages > 1 ? "s" : "");
+            if (!m->model.empty()) facts += " · " + claude::modelDisplayName(m->model);
+            facts += " · " + util::humanDate(m->updated);
+            ImGui::TextWrapped("%s", facts.c_str());
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Créée %s · modifiée %s\n%s en équivalent API", util::humanDate(m->created).c_str(),
+                                  util::humanDate(m->updated).c_str(), util::formatUsd(m->costUsd).c_str());
+            // Session d'une discussion : « Session 2/3 ‹ › » (la navigation prend effet à l'image suivante)
+            {
+                std::string prevId, nextId;
+                int rank = -1, count = 0;
+                for (const auto& c : ws::conversationChains(*folder)) {
+                    int k = c.indexOf(m->id);
+                    if (k < 0) continue;
+                    rank = k, count = c.size();
+                    if (k > 0) prevId = c.sessions[k - 1]->id;
+                    if (k + 1 < c.size()) nextId = c.sessions[k + 1]->id;
+                }
+                if (count > 1) {
+                    ui::icon(ui::Icon::History);
+                    ImGui::SameLine();
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextColored(pal.link, "Session %d/%d", rank + 1, count);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s\nQuand une discussion devient trop longue, elle est résumée et poursuivie dans\n"
+                                          "une nouvelle session qui part de ce résumé.",
+                                          rank + 1 == count ? "La session actuelle de la discussion." : "Une session précédente (résumée).");
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(prevId.empty());
+                    if (ui::chip("‹##prevsess")) selectedConv_ = prevId;
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Session précédente");
+                    ImGui::SameLine(0, 2);
+                    ImGui::BeginDisabled(nextId.empty());
+                    if (ui::chip("›##nextsess")) selectedConv_ = nextId;
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Session suivante");
+                }
+            }
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Button, pal.accent);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+            bool resume = ImGui::Button("Reprendre");
+            ImGui::PopStyleColor(2);
+            if (resume) openConversation(m->id);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Rouvre la conversation : votre prochain message reprend la session Claude Code\n"
-                                  "avec tout son historique (--resume).");
-            ImGui::SameLine();
+                                  "avec tout son historique.");
+            ui::sameLineIfFits(ui::buttonWidth("↻ Repartir du récap"));
             ImGui::BeginDisabled(restartPending(m->id));
-            if (ImGui::Button("↻ Repartir du récap")) {
+            if (ui::chip("↻ Repartir du récap", &pal.dim)) {
                 std::string id = m->id;  // `m` peut être invalidé par l'ouverture
                 if (openConversation(id, false)) restartFromRecap(id);
             }
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Remet le contexte à zéro : récap (s'il manque ou date), puis conversation neuve dans\n"
-                                  "le même dossier qui le reçoit en contexte, avec les mêmes réglages. Celle-ci passe\n"
-                                  "« terminée ». Plus léger que tout l'historique.");
+                ImGui::SetTooltip("Remet le contexte à zéro : une conversation neuve reçoit le récap de celle-ci, avec les\n"
+                                  "mêmes réglages. Plus léger que tout l'historique.");
             ImGui::SeparatorText("Récap");
             bool generating = false;
             for (auto& j : jobs_)
@@ -778,13 +1032,14 @@ void App::drawInspector() {
                 ImGui::TextDisabled("Génération du récap…");
             } else if (m->recap.empty()) {
                 ImGui::TextDisabled("Pas encore de récap.");
-                if (ImGui::Button("Générer le récap")) requestRecap(m->id);
+                if (ui::chip("Générer le récap", &pal.link)) requestRecap(m->id);
             } else {
-                ImGui::TextDisabled("Généré %s", util::humanDate(m->recapTime).c_str());
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Régénérer")) requestRecap(m->id);
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Copier")) ImGui::SetClipboardText(m->recap.c_str());
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", util::humanDate(m->recapTime).c_str());
+                ui::sameLineIfFits(ui::buttonWidth("Régénérer"));
+                if (ui::chip("Régénérer", &pal.dim)) requestRecap(m->id);
+                ImGui::SameLine(0, 2);
+                if (ui::chip("Copier", &pal.dim)) ImGui::SetClipboardText(m->recap.c_str());
                 ImGui::BeginChild("##recap", ImVec2(0, 0), ImGuiChildFlags_None);
                 ui::renderMarkdown(ui::parseMarkdown(m->recap), md, 77777);
                 ImGui::EndChild();
@@ -804,16 +1059,19 @@ void App::drawInspector() {
         ImGui::PushFont(fontBold, 0.0f);
         ImGui::TextColored(pal.accent, "%s", f->displayPath().c_str());
         ImGui::PopFont();
-        if (isAgentFolder(f)) ImGui::TextDisabled("Agent de l'orchestrateur : sa fiche de rôle est dans les notes ci-dessous.");
-        ImGui::TextDisabled("%d conversations · activité %s", f->totalConversations(), util::humanDate(f->lastActivity()).c_str());
-        if (ImGui::Button("Nouvelle conversation ici")) newConversation(f);
-        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+        if (isAgentFolder(f)) ImGui::TextWrapped("Agent de l'orchestrateur : sa fiche de rôle est dans les notes ci-dessous.");
+        ImGui::TextWrapped("%d discussion(s) · activité %s", ws::countDiscussions(*f), util::humanDate(f->lastActivity()).c_str());
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+        if (ui::chip("+ Conversation ici", &pal.link)) newConversation(f);
+        ui::sameLineIfFits(ui::buttonWidth("Synthèse du dossier"));
         const FolderSynthesis* syn = synthesisFor(f);
         bool synRunning = syn != nullptr;
         for (auto& j : jobs_)
             if (j->target == util::pathToUtf8(f->path)) synRunning = true;
         ImGui::BeginDisabled(synRunning);
-        if (ImGui::Button("Synthèse du dossier")) requestFolderRecap(f);
+        if (ui::chip("Synthèse du dossier", &pal.dim)) requestFolderRecap(f);
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Génère d'abord le récap des conversations qui n'en ont pas (ou dont le récap est\n"
@@ -829,8 +1087,8 @@ void App::drawInspector() {
                 ImGui::TextDisabled("Synthèse en cours…");
         }
         if (f->isProject && f->name != "Divers") {
-            ImGui::SameLine();
-            if (ImGui::Button("Orchestrer…")) {
+            ui::sameLineIfFits(ui::buttonWidth("Orchestrer…"));
+            if (ui::chip("Orchestrer…", &pal.dim)) {
                 if (!orch_ || !orch_->running()) loadOrchestrator(f);
                 page_ = 2;
             }
@@ -884,7 +1142,9 @@ void App::drawInspector() {
                 }, f->cwd);
             }
         } else {
-            ImGui::TextDisabled("Dossier de travail : %s", f->effectiveCwd().empty() ? "(par défaut)" : f->effectiveCwd().c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+            ImGui::TextWrapped("Dossier de travail : %s", f->effectiveCwd().empty() ? "(par défaut)" : f->effectiveCwd().c_str());
+            ImGui::PopStyleColor();
             if (ImGui::TreeNode("Dossier de travail spécifique")) {
                 ImGui::SetNextItemWidth(-1);
                 ImGui::InputTextWithHint("##fcwd", "hérité du projet si vide", &f->cwd);
@@ -893,7 +1153,9 @@ void App::drawInspector() {
             }
         }
         ImGui::SeparatorText("Notes");
-        ImGui::TextDisabled("Injectées dans le contexte de chaque nouvelle conversation de ce dossier.");
+        ImGui::PushStyleColor(ImGuiCol_Text, pal.dim);
+        ImGui::TextWrapped("Données à Claude au début de chaque nouvelle conversation de ce dossier.");
+        ImGui::PopStyleColor();
         ImGui::InputTextMultiline("##notes", &f->notes, ImVec2(-1, ImGui::GetFontSize() * 7),
                                   ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_AllowTabInput);
         if (ImGui::IsItemDeactivatedAfterEdit()) workspace_.saveFolderMeta(f);

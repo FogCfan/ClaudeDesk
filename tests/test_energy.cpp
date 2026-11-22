@@ -62,3 +62,37 @@ TEST_CASE("énergie : réglages par défaut = Performance, migration des anciens
     std::error_code ec;
     fs::remove(f, ec);
 }
+
+TEST_CASE("polices : migration des anciens réglages") {
+    fs::path f = fs::temp_directory_path() / ("claudedesk_fonts_" + util::newUuid().substr(0, 8) + ".json");
+    // Très ancien réglage (Segoe UI, 17 px, lissage léger) : nouvelle police, 18 px, hinting de la police
+    util::writeFileAtomic(f, R"({"fontSize":17,"fontRenderer":0})");
+    Settings a;
+    a.load(util::pathToUtf8(f));
+    CHECK(a.uiFont == "plex");
+    CHECK(a.fontSize == 18.0f);
+    CHECK(a.fontRenderer == 3);
+    CHECK(a.fontWeight == doctest::Approx(1.3f));
+    // Version précédente (Inter sans grille, jugée floue)
+    util::writeFileAtomic(f, R"({"fontSize":18,"uiFont":"inter","fontRenderer":1})");
+    Settings b;
+    b.load(util::pathToUtf8(f));
+    CHECK(b.uiFont == "plex");
+    CHECK(b.fontRenderer == 3);
+    // Choix explicite de la police du système : respecté
+    util::writeFileAtomic(f, R"({"uiFont":"system","fontRenderer":2})");
+    Settings c;
+    c.load(util::pathToUtf8(f));
+    CHECK(c.uiFont == "system");
+    CHECK(c.fontRenderer == 2);
+    // Après migration : les choix de l'utilisateur ne bougent plus
+    b.uiFont = "inter";
+    b.fontRenderer = 1;
+    b.save(util::pathToUtf8(f));
+    Settings d;
+    d.load(util::pathToUtf8(f));
+    CHECK(d.uiFont == "inter");
+    CHECK(d.fontRenderer == 1);
+    std::error_code ec;
+    fs::remove(f, ec);
+}

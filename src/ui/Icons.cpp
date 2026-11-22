@@ -46,6 +46,9 @@ ImVec4 iconColor(Icon icon) {
         case Icon::FileImage: return pick(ImVec4(0.72f, 0.52f, 0.92f, 1), ImVec4(0.52f, 0.28f, 0.76f, 1));
         case Icon::FilePdf: return pick(ImVec4(0.92f, 0.42f, 0.40f, 1), ImVec4(0.78f, 0.20f, 0.18f, 1));
         case Icon::Trash: return palette().dim;
+        case Icon::History: return palette().dim;
+        case Icon::Send:
+        case Icon::Stop: return ImGui::GetStyleColorVec4(ImGuiCol_Text);
         case Icon::KindAuto: return palette().accent;
         case Icon::KindSoftware: return pick(ImVec4(0.40f, 0.64f, 0.96f, 1), ImVec4(0.16f, 0.40f, 0.80f, 1));
         case Icon::KindConcept: return pick(ImVec4(0.96f, 0.80f, 0.30f, 1), ImVec4(0.78f, 0.56f, 0.02f, 1));
@@ -232,6 +235,29 @@ void drawIcon(ImDrawList* dl, Icon icon, ImVec2 p, float s, ImU32 col, float act
             float fsz = s * 0.62f;
             ImVec2 ts = f->CalcTextSizeA(fsz, FLT_MAX, 0, "?");
             dl->AddText(f, fsz, ImVec2(p.x + (s - ts.x) * 0.5f, p.y + s * 0.40f - ts.y * 0.5f), cut, "?");
+            break;
+        }
+        case Icon::History: {
+            // Horloge entourée d'une flèche de retour : « avant »
+            ImVec2 c = P(0.54f, 0.54f);
+            float R = s * 0.38f;
+            dl->PathArcTo(c, R, -2.4f, 2.9f, 20);
+            dl->PathStroke(col, 0, lw);
+            ImVec2 a(c.x + R * std::cos(-2.4f), c.y + R * std::sin(-2.4f));
+            dl->AddTriangleFilled(ImVec2(a.x - s * 0.16f, a.y - s * 0.04f), ImVec2(a.x + s * 0.10f, a.y - s * 0.06f),
+                                  ImVec2(a.x - s * 0.04f, a.y + s * 0.18f), col);
+            dl->AddLine(c, P(0.54f, 0.32f), col, lw);
+            dl->AddLine(c, P(0.70f, 0.64f), col, lw);
+            break;
+        }
+        case Icon::Send: {
+            // Avion en papier : pointe à droite, encoche à l'arrière
+            ImVec2 pts[4] = {P(0.08f, 0.10f), P(0.96f, 0.50f), P(0.08f, 0.90f), P(0.24f, 0.50f)};
+            dl->AddConcavePolyFilled(pts, 4, col);
+            break;
+        }
+        case Icon::Stop: {
+            dl->AddRectFilled(P(0.18f, 0.18f), P(0.82f, 0.82f), col, s * 0.12f);
             break;
         }
         case Icon::Trash: {

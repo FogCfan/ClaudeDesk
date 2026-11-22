@@ -109,6 +109,10 @@ int App::run(int argc, char** argv) {
         if (optPanel_.size() > 4) tourStep_ = std::atoi(optPanel_.c_str() + 4);
     }
     if (optPanel_ == "welcome") showWelcomeModal_ = true;
+    // Test : changement de police à chaud (atlas reconstruit après le démarrage)
+    if (optPanel_.rfind("police:", 0) == 0 && optPanel_ != "police:systeme")
+        settings_.uiFont = optPanel_.substr(7), fontFamilyReloadPending_ = true;
+    if (optPanel_ == "police:systeme") settings_.uiFont = "system", settings_.monoFont = "system", fontFamilyReloadPending_ = true;
     if (optPanel_ == "example") createExampleProject();
     if (optPanel_ == "synthesis")  // test : synthèse du premier projet (récaps manquants d'abord)
         for (auto& p : workspace_.projects())
@@ -241,6 +245,10 @@ int App::run(int argc, char** argv) {
             applyFontLoader(true);
             fontReloadPending_ = false;
         }
+        if (fontFamilyReloadPending_) {
+            reloadFontFamilies();
+            fontFamilyReloadPending_ = false;
+        }
         applyVSync();
         if (SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED) {
             now_ = SDL_GetTicks() / 1000.0;
@@ -371,6 +379,36 @@ void App::onLiveResize(uint32_t window, LiveEvent kind) {
     frame();
 }
 
+// Nouvelle police choisie : atlas reconstruits (fenêtre principale et tableau de bord détaché), mises en page
+// des messages recalculées.
+void App::reloadFontFamilies() {
+    ImGuiContext* prev = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(mainCtx_);
+    mainFonts_ = loadFonts();
+    if (dash_) {
+        ImGui::SetCurrentContext(dash_->ctx);
+        dash_->fonts = loadFonts();
+    }
+    ImGui::SetCurrentContext(prev ? prev : mainCtx_);
+    useFonts(prev == mainCtx_ || !dash_ ? mainFonts_ : dash_->fonts);
+    for (auto& o : open_) o->cache.clear();
+}
+
+// Toutes les 3 s : les réglages ont-ils changé depuis la dernière écriture ? (comparaison du JSON enregistré)
+void App::autosaveSettings() {
+    if (now_ - settingsCheckedAt_ < 3.0 || settingsPath_.empty()) return;
+    settingsCheckedAt_ = now_;
+    std::string cur = settings_.dump();
+    if (settingsSnapshot_.empty()) {
+        settingsSnapshot_ = cur;
+        return;
+    }
+    if (cur != settingsSnapshot_) {
+        settings_.save(settingsPath_);
+        settingsSnapshot_ = cur;
+    }
+}
+
 void App::useFonts(const FontSet& f) {
     fontItalic = f.italic ? f.italic : f.ui;
     fontUi = f.ui;
@@ -393,6 +431,7 @@ void App::applyFontLoader(bool force) {
         const ImFontLoader* want = settings_.fontRenderer == 2 ? stb : ft;
         unsigned flags = ImGuiFreeTypeLoaderFlags_LoadColor;  // emoji en couleur
         if (settings_.fontRenderer == 0) flags |= ImGuiFreeTypeLoaderFlags_LightHinting;
+        // 3 : hinting natif de la police (instructions TrueType), le plus net pour les polices bien « hintées »
         if (settings_.fontRenderer == 1) flags |= ImGuiFreeTypeLoaderFlags_NoHinting;
         atlas->FontLoaderFlags = flags;
         if (force && atlas->FontLoader == want) atlas->SetFontLoader(want == ft ? stb : ft);  // reconstruit les glyphes
@@ -443,6 +482,29 @@ struct FontFile {
     const char* path;
     int index = 0;
 };
+// Polices fournies avec ClaudeDesk (assets/fonts, copiées dans fonts/ à côté de l'exécutable). Licence SIL OFL.
+// Polices d'interface fournies : identifiant (Settings::uiFont), nom, fichiers (normal, gras, italique).
+struct UiFontFamily {
+    const char* id;
+    const char* regular;
+    const char* bold;
+    const char* italic;
+};
+const UiFontFamily kUiFamilies[] = {
+    {"plex", "IBMPlexSans-Regular.ttf", "IBMPlexSans-SemiBold.ttf", "IBMPlexSans-Italic.ttf"},
+    {"noto", "NotoSans-Regular.ttf", "NotoSans-SemiBold.ttf", "NotoSans-Italic.ttf"},
+    {"inter", "Inter-Regular.ttf", "Inter-SemiBold.ttf", "Inter-Italic.ttf"},
+};
+const UiFontFamily* findUiFontFamily(const std::string& id) {
+    for (auto& f : kUiFamilies)
+        if (id == f.id) return &f;
+    return nullptr;  // "system"
+}
+std::string bundledFont(const char* file) {
+    const char* base = SDL_GetBasePath();
+    if (!base) return {};
+    return std::string(base) + "fonts/" + file;
+}
 #if defined(_WIN32)
 const FontFile kUi[] = {{"C:/Windows/Fonts/segoeui.ttf"}};
 const FontFile kBold[] = {{"C:/Windows/Fonts/segoeuib.ttf"}};
@@ -485,12 +547,20 @@ FontSet App::loadFonts() {
         std::error_code ec;
         return fs::exists(util::pathFromUtf8(p), ec);
     };
-    auto addWithFallbacks = [&](auto& candidates) -> ImFont* {
+    // `preferred` : police fournie, essayée avant les polices du système.
+    auto addWithFallbacks = [&](auto& candidates, const std::string& preferred = {}) -> ImFont* {
         ImFont* f = nullptr;
+        if (!preferred.empty() && exists(preferred.c_str())) {
+            ImFontConfig cfg;
+            cfg.RasterizerMultiply = settings_.fontWeight;
+            f = io.Fonts->AddFontFromFileTTF(preferred.c_str(), settings_.fontSize, &cfg);
+        }
         for (const FontFile& c : candidates) {
+            if (f) break;
             if (!exists(c.path)) continue;
             ImFontConfig cfg;
             cfg.FontNo = c.index;
+            cfg.RasterizerMultiply = settings_.fontWeight;
             if ((f = io.Fonts->AddFontFromFileTTF(c.path, settings_.fontSize, &cfg))) break;
         }
         if (!f) return io.Fonts->AddFontDefault();
@@ -504,16 +574,17 @@ FontSet App::loadFonts() {
         return f;
     };
     FontSet set;
-    set.ui = addWithFallbacks(kUi);
-    set.bold = addWithFallbacks(kBold);
-    set.mono = addWithFallbacks(kMono);
-    set.italic = addWithFallbacks(kItalic);
+    const UiFontFamily* fam = findUiFontFamily(settings_.uiFont);
+    set.ui = addWithFallbacks(kUi, fam ? bundledFont(fam->regular) : std::string());
+    set.bold = addWithFallbacks(kBold, fam ? bundledFont(fam->bold) : std::string());
+    set.mono = addWithFallbacks(kMono, settings_.monoFont == "jetbrains" ? bundledFont("JetBrainsMono.ttf") : std::string());
+    set.italic = addWithFallbacks(kItalic, fam ? bundledFont(fam->italic) : std::string());
     io.FontDefault = set.ui;
     return set;
 }
 
 void App::applyTheme() {
-    ui::applyTheme((ui::ThemeId)settings_.theme, dpiScale_ * settings_.uiScale);
+    ui::applyTheme((ui::ThemeId)settings_.theme, dpiScale_ * settings_.uiScale, settings_.compactUi);
     ImGuiStyle& s = ImGui::GetStyle();
     s.FontSizeBase = settings_.fontSize;
     s.FontScaleDpi = dpiScale_;
@@ -581,7 +652,10 @@ void App::frame() {
     if (pageAlpha < 1.0f) ui::anim::markBusy();
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, std::max(0.05f, pageAlpha));
     // Page « tableau de bord » : la disposition du cockpit est gardée en vie mais masquée.
-    ImGuiID dock = ImGui::DockSpaceOverViewport(0, nullptr, page_ != 0 ? ImGuiDockNodeFlags_KeepAliveOnly : ImGuiDockNodeFlags_None);
+    // Panneaux épurés (à la VS Code) : un seul × par panneau (sur son onglet), pas de menu « ▼ » ni de bouton de
+    // fermeture du groupe à droite. Ces drapeaux se transmettent à tous les nœuds de la disposition.
+    const ImGuiDockNodeFlags dockFlags = (ImGuiDockNodeFlags)(ImGuiDockNodeFlags_NoWindowMenuButton | ImGuiDockNodeFlags_NoCloseButton);
+    ImGuiID dock = ImGui::DockSpaceOverViewport(0, nullptr, (page_ != 0 ? ImGuiDockNodeFlags_KeepAliveOnly : ImGuiDockNodeFlags_None) | dockFlags);
     {
         ImGuiDockNode* node = ImGui::DockBuilderGetNode(dock);
         static bool checked = false;
@@ -940,6 +1014,7 @@ void App::processAsyncResults() {
         if (s.dirty && !s.entries.empty() && now_ - oc->lastSave > std::max(1, settings_.autosaveSeconds)) saveConversation(*oc);
     }
     tickOrchestrator();
+    autosaveSettings();
     for (auto& j : jobs_) j->update();
     pumpFolderSyntheses();
     pumpRestarts();
@@ -977,6 +1052,14 @@ void App::wireSession(claude::ClaudeSession& s) {
     s.promptDir = util::pathToUtf8(util::pathFromUtf8(settingsPath_).parent_path() / "prompts");
     s.onRateLimit = [this](const json& info) { usage_.onRateLimitEvent(info); };
     s.onAuthError = [this](claude::ClaudeSession& sess) { onAuthError(sess); };
+    s.onModelRefused = [this](claude::ClaudeSession& sess) { onModelRefused(sess); };
+    s.onModelAnswered = [this](claude::ClaudeSession&, const std::string& model) {
+        std::string plan = accountPlan();
+        if (plan.empty()) return;
+        auto before = settings_.modelAccess.toJson();
+        settings_.modelAccess.recordSuccess(model, plan, util::nowUnix());
+        if (settings_.modelAccess.toJson() != before) settings_.save(settingsPath_);
+    };
     s.onTurnFinished = [this](claude::ClaudeSession& sess) {
         if (!sess.accountPlan.empty()) usage_.subscription = sess.accountPlan;
         for (auto& oc : open_)
@@ -991,6 +1074,38 @@ void App::wireSession(claude::ClaudeSession& s) {
             }
         if (!windowFocused_ && settings_.notifyOnFinish) SDL_FlashWindow(window_, SDL_FLASH_UNTIL_FOCUSED);
     };
+}
+
+std::string App::accountPlan() const {
+    if (auth_.known && !auth_.plan.empty()) return util::toLower(auth_.plan);
+    std::string s = util::toLower(usage_.subscription);  // « Claude Pro » (réponse de la CLI)
+    if (util::startsWith(s, "claude ")) s = s.substr(7);
+    return s;
+}
+
+// Modèle refusé (Fable hors abonnement Pro, modèle inexistant) : on retient l'information pour ne plus le proposer ;
+// une tâche de l'orchestrateur repart aussitôt avec le meilleur modèle utilisable, une conversation affiche une carte
+// « changer de modèle » (drawModelRefusedCard).
+void App::onModelRefused(claude::ClaudeSession& s) {
+    std::string plan = accountPlan();
+    if (const claude::ModelFamily* f = claude::findModelFamily(s.modelRefusedName)) {
+        settings_.modelAccess.record(f->alias, plan.empty() ? "?" : plan, s.modelRefused, util::nowUnix());
+        settings_.save(settingsPath_);
+        if (orch_) orch_->blockedModels = settings_.modelAccess.blocked(plan);
+    }
+    std::string name = claude::modelDisplayName(s.modelRefusedName);
+    for (auto& oc : open_)
+        if (oc->session.get() == &s) pushActivity(*oc, ActivityKind::Error, "modèle " + name + " refusé");
+    if (orch_ && orchManages(s.localId)) {
+        std::vector<std::string> usable = claude::usableModels(orch_->settings.allowedModels, orch_->blockedModels);
+        std::string next = claude::clampModel(s.modelRefusedName, usable);
+        if (claude::modelTier(next) == claude::modelTier(s.modelRefusedName) || next.empty()) next = "opus";
+        s.setModel(next);
+        s.resendLast();
+        toast(name + " n'est pas utilisable avec votre abonnement : la tâche repart avec " + claude::modelDisplayName(next) + ".");
+        return;
+    }
+    toast(name + " n'est pas utilisable avec votre abonnement : choisissez un autre modèle.", true);
 }
 
 ws::Folder* App::folderOf(const OpenConversation& oc) {
@@ -1347,6 +1462,7 @@ OpenConversation* App::replaceConversation(const std::string& convId, ws::Folder
         s.config.enabledTools = orch_ ? orch_->brainTools() : std::vector<std::string>{"Read", "Glob", "Grep"};
     }
     oc->meta.status = "active";
+    oc->meta.continues = convId;  // panneau Projets : la nouvelle session est la suite de l'ancienne
     oc->injectContext = true;  // notes, synthèses et récaps du dossier — dont celui de l'ancienne conversation
     std::string nid = s.localId;
     saveConversation(*oc);

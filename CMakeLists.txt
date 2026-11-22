@@ -68,6 +68,7 @@ add_library(desk_core STATIC
     src/claude/Transcript.cpp
     src/claude/ClaudeSession.cpp
     src/claude/Auth.cpp
+    src/claude/Models.cpp
     src/claude/OneShot.cpp
     src/claude/UsageTracker.cpp
     src/claude/History.cpp
@@ -111,6 +112,9 @@ if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
     set_target_properties(ClaudeDesk PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 desk_warnings(ClaudeDesk)
+# Polices fournies (Inter, JetBrains Mono ; licence SIL OFL) : dossier fonts/ à côté de l'exécutable.
+add_custom_command(TARGET ClaudeDesk POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/fonts $<TARGET_FILE_DIR:ClaudeDesk>/fonts)
 if(WIN32)
     # Toutes les DLL nécessaires (SDL3, FreeType + dépendances, runtime) à côté de l'exe :
     # l'application se lance ensuite hors de MSYS2 (double-clic).
@@ -134,6 +138,7 @@ if(CLAUDEDESK_BUILD_TESTS)
         tests/test_main.cpp
         tests/test_strings.cpp
         tests/test_protocol.cpp
+        tests/test_models.cpp
         tests/test_workspace.cpp
         tests/test_orchestrator.cpp
         tests/test_designer.cpp

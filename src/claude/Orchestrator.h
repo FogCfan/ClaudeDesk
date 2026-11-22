@@ -96,6 +96,9 @@ int modelTier(const std::string& model);
 // Ramène un modèle demandé dans la liste autorisée (vide = tous). Si la liste est
 // restreinte, un modèle vide ou inconnu devient le plus capable des modèles autorisés.
 std::string clampModel(const std::string& requested, const std::vector<std::string>& allowed);
+// Modèles autorisés moins ceux que le compte ne peut pas utiliser (familles : « fable »…). Jamais vide : si rien ne
+// reste, la liste autorisée telle quelle.
+std::vector<std::string> usableModels(const std::vector<std::string>& allowed, const std::vector<std::string>& blocked);
 // Plafonne l'effort (low < medium < high < xhigh < max) ; inconnu -> "".
 std::string clampEffort(const std::string& requested, const std::string& maxEffort);
 
@@ -341,6 +344,9 @@ public:
     double budgetSpentUsd() const { return spentUsd - costBaseline_; }  // API : dépense comptée dans le budget
     double ceiling() const { return settings.usagePause > 0 ? settings.usagePause : 1.0; }
     bool subscription = false;     // budget effectif : abonnement (sinon dollars)
+    // Familles de modèles que le compte ne peut pas utiliser (ex. « fable » avec Pro), tenues à jour par l'hôte :
+    // jamais confiées à un agent ni au cerveau (voir usableModels).
+    std::vector<std::string> blockedModels;
     std::string brainConvId;
     std::map<std::string, std::string> agentConv;  // agent -> conversation utilisée
     std::vector<OrchTask> tasks;                   // tâches en cours, en file, ou terminées pas encore traitées par le cerveau

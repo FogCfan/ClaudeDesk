@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "claude/Models.h"
 #include "claude/SessionConfig.h"
 
 namespace app {
@@ -32,9 +33,17 @@ struct Settings {
     std::vector<PromptPreset> promptPresets;
 
     // Éditeur / affichage
-    float fontSize = 17.0f;
+    float fontSize = 18.0f;
+    // Polices fournies avec ClaudeDesk (dossier fonts/) : interface "plex" (IBM Plex Sans), "noto", "inter", ou
+    // "system" (Segoe UI…) ; code "jetbrains" ou "system" (Consolas…).
+    std::string uiFont = "plex";
+    std::string monoFont = "jetbrains";
+    // Densité du texte (ImFontConfig::RasterizerMultiply) : > 1 épaissit les traits fins, plus net sur fond sombre.
+    float fontWeight = 1.3f;
+    int fontsVersion = 2;               // migrations des réglages de police (voir Settings::load)
     float uiScale = 1.0f;
     int theme = 0;                      // 0 sombre, 1 clair, 2 crépuscule
+    bool compactUi = false;             // densité compacte (marges et espacements réduits)
     bool enterSends = true;             // Entrée envoie, Maj+Entrée = nouvelle ligne
     bool showThinking = true;
     bool expandTools = false;
@@ -57,7 +66,9 @@ struct Settings {
     bool smoothScroll = true;
     bool glowEffects = true;
     bool highQuality = true;            // courbes / cercles plus finement tessellés
-    int fontRenderer = 0;               // 0 FreeType léger, 1 FreeType sans grille, 2 stb_truetype
+    // 0 FreeType léger, 1 FreeType sans grille (doux mais flou), 2 stb_truetype, 3 FreeType avec le hinting de la police
+    // (le plus net : chaque trait tombe sur un pixel)
+    int fontRenderer = 3;
     std::string renderDriver;           // "" = auto ; direct3d12, direct3d11, vulkan, opengl, gpu, software          // premier lancement : proposer la visite guidée
     // Énergie : préréglage choisi (EnergyMode). Automatique = Performance sur secteur, Économie sur batterie
     // (réglables). Modifier un réglage de détail fait passer en « Personnalisé ».
@@ -71,6 +82,8 @@ struct Settings {
     bool injectContext = true;          // contexte du dossier dans les nouvelles sessions
     bool autoRecap = false;             // récap automatique à la fermeture d'une conversation
     std::string recapModel = "haiku";
+    // Accès aux modèles observé pour ce compte (Fable hors abonnement Pro…), cf. claude/Models.h
+    claude::ModelAccessBook modelAccess;
     int autosaveSeconds = 5;
 
     std::vector<std::string> recentCwds;
@@ -80,6 +93,7 @@ struct Settings {
 
     void load(const std::string& path);
     void save(const std::string& path) const;
+    std::string dump() const;  // le JSON enregistré par save()
     void pushRecentCwd(const std::string& cwd);
     void pushPromptHistory(const std::string& text);
 };
