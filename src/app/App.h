@@ -3,6 +3,7 @@
 // conversations, panneaux d'usage / configuration / espace de travail.
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -14,6 +15,7 @@
 
 #include "app/Settings.h"
 #include "claude/ClaudeSession.h"
+#include "claude/Designer.h"
 #include "claude/History.h"
 #include "claude/OneShot.h"
 #include "claude/Orchestrator.h"
@@ -98,7 +100,9 @@ struct OpenConversation {
     std::string search;
     bool showSearch = false;
     bool focusSearch = false;
-    std::set<int> selectable;          // entrées affichées en mode « sélection de texte »
+    std::set<int> selectable;          // entrées affichées en mode « sélection de texte » (clés < 0 : « tout afficher » des outils)
+    bool hasTextSelection() const { return !selectable.empty() && *selectable.rbegin() >= 0; }
+    void clearTextSelection() { selectable.erase(selectable.lower_bound(0), selectable.end()); }
     std::set<int> expanded;            // outils / réflexions dépliés
     std::set<int> collapsedOverride;   // outils repliés alors que « tout déplier » est actif
     std::vector<EntryCache> cache;
@@ -127,6 +131,11 @@ struct Toast {
 class App {
 public:
     int run(int argc, char** argv);
+    // Redessine pendant le redimensionnement en direct (boucle modale de Windows), appelé depuis un event watch SDL.
+    // Tick : minuteur de la boucle modale (dessine toujours) ; Resize : nouvelle taille (dessine si elle change) ;
+    // Move : fenêtre déplacée (dessine à la cadence choisie).
+    enum class LiveEvent { Tick, Resize, Move };
+    void onLiveResize(uint32_t windowId, LiveEvent kind);
 
 private:
     // --- Cycle de vie ---
@@ -139,6 +148,9 @@ private:
     void useFonts(const FontSet& f);
     void applyTheme();
     void frame();
+    bool inFrame_ = false;
+    int drawnW_ = 0, drawnH_ = 0;  // taille (pixels) de la dernière image dessinée
+    uint64_t frameStartNs_ = 0;    // début de la dernière image (cadence pendant un déplacement)
     void buildDefaultLayout(unsigned int dockId);
     void processAsyncResults();
 
@@ -215,14 +227,29 @@ private:
     void requestFolderRecap(ws::Folder* f);   // récaps manquants/périmés d'abord, puis synthèse
     void runFolderSynthesis(ws::Folder* f);
     void pumpFolderSyntheses();
+    // Récaps (absents ou périmés) d'une liste de conversations, 3 à la fois, sans synthèse ni fermeture.
+    void requestRecaps(const std::vector<std::string>& convIds);
+    // Jamais fait, ou la conversation a avancé depuis.
+    static bool needsRecap(const ws::ConversationMeta& m) {
+        return m.messages >= 1 && (m.recap.empty() || m.recapTime < m.updated - 60);
+    }
     struct FolderSynthesis {                  // synthèse en préparation : récaps à générer avant
-        std::string path;                     // dossier (UTF-8)
+        std::string path;                     // dossier (UTF-8) ; vide = simple lot de récaps (requestRecaps)
         std::deque<std::string> toStart;      // conversations dont le récap reste à lancer
         std::set<std::string> running;        // récaps en cours
         int total = 0;
+        bool synthesize = true;               // une fois les récaps faits : synthèse du dossier
     };
     std::vector<FolderSynthesis> syntheses_;
     std::set<std::string> rotating_;          // orchestrateur : conversations dont le récap de rotation est lancé
+    // « Repartir du récap » : récap (si absent ou périmé), puis conversation neuve dans le même dossier qui le reçoit
+    // en contexte ; l'ancienne passe « terminée » et se ferme (elle reste dans l'espace de travail).
+    void restartFromRecap(const std::string& convId);
+    void pumpRestarts();                       // termine les « Repartir du récap » dont le récap est prêt
+    // Conversation neuve qui succède à `convId` (même réglages, contexte cowork injecté) ; nullptr si impossible.
+    OpenConversation* replaceConversation(const std::string& convId, ws::Folder* folder, const std::string& title);
+    std::map<std::string, int64_t> restarting_;  // conversation → recapTime au lancement du récap
+    bool restartPending(const std::string& convId) const { return restarting_.count(convId) > 0; }
     const FolderSynthesis* synthesisFor(const ws::Folder* f) const;
     void refreshUsage(bool silent = false);
     void autoRefreshUsage(bool atLaunch);    // actualise si la mesure est absente ou périmée
@@ -257,8 +284,33 @@ private:
     void saveOrchestrator();
     bool orchestratorStart();
     void orchestratorResume();
+    bool orchestratorAnswer(const std::string& answer);  // répond à la question en attente (WaitingHuman)
+    void orchestratorRefreshBrain();  // prompt et outils du cerveau à jour avant un message direct de l'humain
     ws::Folder* orchProjectFolder();
     int indexOfConversation(const std::string& id) const;
+
+    // --- Designer (DesignerPanel.cpp) : projet + équipe d'agents + orchestrateur conçus à partir d'une description ---
+    void drawDesignerPage();
+    void designerRun(bool refine);  // conception (ou questions de clarification), ou affinage de la conception actuelle
+    void designerCancel();
+    void designerCreate();          // projet cowork, thèmes, fichiers de départ, orchestrateur réglé
+    void designerReset();
+    bool designerBusy() const;
+    std::string designerSuggestedCwd();
+    void loadDesigner();
+    void saveDesigner();
+    claude::DesignerDraft designer_;
+    std::string designerPath_;
+    bool designerDirty_ = false;
+    double designerSaved_ = 0;
+    double designerStarted_ = 0;
+    bool designerRefining_ = false;
+    std::vector<std::string> designerActivity_;  // ce que fait Claude pendant la conception
+    std::string designerError_, designerRaw_, designerPlanText_;
+    bool designerConfirmReset_ = false;
+    double designerConfirmAt_ = 0;
+    int designerOpenRole_ = -1;     // fiche de rôle à déplier (agent ajouté)
+    int designerFilePreview_ = 0;
 
     // --- Données ---
     SDL_Window* window_ = nullptr;
@@ -267,6 +319,7 @@ private:
     std::string optDataDir_, optWorkspace_, optSend_, optScreenshot_, optCwd_;
     double optAfter_ = 3.0;
     std::string optPanel_;
+    std::string optDesign_;        // --design "<description>" : lance le Designer (tests)
     std::string optOrchestrate_;   // --orchestrate "<objectif>" : lance l'orchestrateur sur le 1er projet
     bool optNoWait_ = false;
     ImGuiContext* mainCtx_ = nullptr;
@@ -279,10 +332,13 @@ private:
     FontSet mainFonts_;
     std::unique_ptr<SecondaryWindow> dash_;
 
-    // Pages : 0 = cockpit, 1 = tableau de bord des conversations
+    // Pages : 0 = cockpit, 1 = tableau de bord des conversations, 2 = orchestrateur, 3 = designer
     int page_ = 0;
     int dashFilter_ = 0;           // 0 toutes, 1 actives, 2 attendent une action
-    std::deque<ActivityEvent> activity_;
+    std::deque<ActivityEvent> activity_;   // plus récent en tête
+    uint64_t activitySeq_ = 0;             // nombre total d'entrées ajoutées (repère des « nouvelles »)
+    uint64_t feedSeenSeq_ = 0;             // dernière entrée vue avec le fil tout en bas
+    bool feedJump_ = false;                // ramener le fil tout en bas à la prochaine frame
 
     // Tutoriel
     int tourStep_ = -1;
@@ -340,6 +396,8 @@ private:
     std::vector<int> orchAnswerSel_;         // option choisie par question (-1 aucune, -2 « Autre »)
     std::vector<std::string> orchAnswerOther_;
     std::string orchAnswerExtra_;
+    // Option cliquée dans le fil de la discussion du cerveau (envoyée hors du rendu, voir tickOrchestrator).
+    std::string orchQuickAnswer_, orchQuickAnswerConv_;
     int orchSettingsTab_ = -1;              // onglet des réglages à sélectionner (-1 : aucun)
     bool orchAdvanced_ = false;              // réglages avancés affichés (sinon : niveaux de budget)
 

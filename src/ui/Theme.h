@@ -31,6 +31,15 @@ void spinner(float t, const ImVec4& color);
 void badge(const char* text, const ImVec4& color);
 // Bouton d'aide « (?) » avec infobulle.
 void helpMarker(const char* text);
+// --- Mise en page qui s'adapte aux panneaux étroits ---
+// Largeur d'un bouton portant ce libellé (texte visible + marges du cadre).
+float buttonWidth(const char* label);
+// À appeler avant un élément de largeur `w` : il reste sur la ligne courante s'il y tient, sinon il passe dessous.
+void sameLineIfFits(float w);
+// Largeur d'un champ à étiquette : `desired`, réduite pour que champ + étiquette tiennent dans la place restante.
+float fitItemWidth(float desired, const char* label = nullptr);
+// Note grisée à la suite de l'élément précédent, avec retour à la ligne (ou dessous si la place manque).
+void sideNote(const char* text);
 // Barre de progression colorée selon le seuil.
 // `animId` non nul : le remplissage glisse en douceur vers la valeur.
 void usageBar(float fraction, const char* overlay, float height = 0, float width = -1, const char* animId = nullptr);

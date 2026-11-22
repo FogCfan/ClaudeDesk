@@ -88,8 +88,11 @@ struct FakeHost : OrchestratorHost {
     std::string brainPrompt;
 
     std::vector<AgentInfo> agents() override { return agentList; }
-    std::string openBrain(const std::string& hint, const std::string& sp) override {
+    std::vector<std::string> brainTools;
+    std::vector<std::string> interrupted;
+    std::string openBrain(const std::string& hint, const std::string& sp, const std::vector<std::string>& tools) override {
         brainPrompt = sp;
+        brainTools = tools;
         std::string id = hint.empty() ? "brain" : hint;
         convs[id].st.exists = true;
         return id;
@@ -126,6 +129,7 @@ struct FakeHost : OrchestratorHost {
         return nid;
     }
     int64_t now() override { return t; }
+    void interrupt(const std::string& id) override { interrupted.push_back(id); }
 
     // Simule la fin d'un tour.
     void answer(const std::string& id, const std::string& text, double cost = 0.5) {
@@ -134,6 +138,7 @@ struct FakeHost : OrchestratorHost {
         c.st.turns++;
         c.st.costUsd += cost;
         c.st.lastText = text;
+        c.st.lastTurnAt = t;
     }
 };
 
@@ -183,6 +188,114 @@ TEST_CASE("orchestrateur : cycle complet jusqu'à @@TERMINE") {
     CHECK(o.state == OrchState::Finished);
     CHECK(o.finalSummary == "Livré.");
     CHECK_FALSE(o.running());
+}
+
+TEST_CASE("orchestrateur : discussion après la fin, une question relance l'orchestration (cas réel)") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@TERMINE\nLivré.\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::Finished);
+    o.tick(h);  // la réponse déjà traitée n'est pas relue
+    CHECK(o.state == OrchState::Finished);
+
+    // Simple discussion (pas de directive) : l'orchestration reste terminée.
+    h.answer("brain", "Oui : le dashboard web fait office d'interface.");
+    o.tick(h);
+    CHECK(o.state == OrchState::Finished);
+
+    // Le cerveau propose du travail en posant une question : elle devient cliquable (WaitingHuman).
+    h.answer("brain", "Explications.\n@@HUMAIN\nVoulez-vous cet exemple ?\n- [ ] Oui, HP et HE (recommandé)\n- [ ] Non\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::WaitingHuman);
+    REQUIRE(o.questions.size() == 1);
+    CHECK(o.questions[0].options.size() == 2);
+    CHECK(o.finalSummary == "Livré.");  // le bilan précédent reste lisible
+
+    REQUIRE(o.answerHuman(h, "Oui, HP et HE"));
+    CHECK(o.state == OrchState::Thinking);
+    h.answer("brain", "@@DELEGUER 02 | modele=sonnet\nÉcris l'exemple.\n@@FIN");
+    o.tick(h);
+    CHECK(o.state == OrchState::Working);
+    CHECK(h.convs["conv:02 Build"].received.size() == 1);
+}
+
+TEST_CASE("orchestrateur : discussion directe sans directive, ni relance ni bilan forcé") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.maxParallel = 2;
+    REQUIRE(o.start(h));
+    CHECK(h.brainPrompt.find("Quand l'humain t'écrit directement") != std::string::npos);
+
+    // Question en attente : vous posez une question à côté, il répond simplement → la question reste posée.
+    h.answer("brain", "@@HUMAIN\nQuel UART ?\n- [ ] UART2\n- [ ] UART4\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::WaitingHuman);
+    size_t sent = h.convs["brain"].received.size();
+    h.answer("brain", "L'UART2 est relié au connecteur J4, l'UART4 au débogueur.");
+    o.tick(h);
+    CHECK(o.state == OrchState::WaitingHuman);
+    CHECK(o.questions.size() == 1);
+    CHECK(h.convs["brain"].received.size() == sent);  // pas de « Ta réponse ne contient aucune directive »
+
+    // Réponse à la question → délégations → l'équipe travaille.
+    REQUIRE(o.answerHuman(h, "UART2"));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN\n@@DELEGUER 02\nb\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::Working);
+    o.tick(h);
+    CHECK(o.tasks.size() == 2);
+
+    // Pendant le travail : simple discussion → l'équipe continue, rien n'est relancé.
+    sent = h.convs["brain"].received.size();
+    h.answer("brain", "Le build se lance avec `cmake --build`.");
+    o.tick(h);
+    CHECK(o.state == OrchState::Working);
+    CHECK(o.tasks.size() == 2);
+    CHECK(h.convs["brain"].received.size() == sent);
+
+    // Pendant le travail : la discussion aboutit à une délégation → appliquée.
+    h.answer("brain", "Bonne idée.\n@@DELEGUER 03\nVérifie le README.\n@@FIN");
+    o.tick(h);
+    CHECK(o.tasks.size() == 3);
+    CHECK(h.convs.count("conv:03 Check") == 0);  // en file : deux agents travaillent déjà (maxParallel = 2)
+    o.tick(h);  // déjà lue : pas de doublon
+    CHECK(o.tasks.size() == 3);
+    h.answer("conv:01 Modèle", "ok");
+    o.tick(h);
+    CHECK(h.convs["conv:03 Check"].received.size() == 1);
+}
+
+TEST_CASE("orchestrateur : sauvegarde ancienne en plein travail, la dernière réponse n'est pas rejouée") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::Working);
+    auto j = o.toJson();
+    j.erase("brainSeenTurns");  // fichier d'une version précédente
+    Orchestrator o2;
+    o2.fromJson(j);
+    o2.resume(h);
+    o2.tick(h);
+    o2.tick(h);
+    CHECK(o2.tasks.size() == 1);
+}
+
+TEST_CASE("orchestrateur : bilan et question dans la même réponse : la question l'emporte") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@TERMINE\nFait.\n@@FIN\n@@HUMAIN\nJe continue avec la suite ?\n- [ ] Oui\n- [ ] Non\n@@FIN");
+    o.tick(h);
+    CHECK(o.state == OrchState::WaitingHuman);
+    CHECK(o.finalSummary == "Fait.");
 }
 
 TEST_CASE("orchestrateur : agent inconnu, relance sans directive, question humaine") {
@@ -817,14 +930,14 @@ TEST_CASE("orchestrateur : contexte allégé par récap + nouvelle conversation"
     FakeHost h;
     Orchestrator o;
     o.settings.objective = "Construire E7 Twin";
-    o.settings.rotateAtContext = 0.45;
+    o.settings.rotateAtTokens = 120000;
     o.settings.rotateAfterTasks = 2;
     REQUIRE(o.start(h));
     // Cycle 1 : une tâche pour 01
     h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
     o.tick(h);
     REQUIRE(h.convs["conv:01 Modèle"].received.size() == 1);
-    h.convs["conv:01 Modèle"].st.context = 0.60;  // la conversation de l'agent a beaucoup grossi
+    h.convs["conv:01 Modèle"].st.contextTokens = 180000;  // la conversation de l'agent a beaucoup grossi
     h.answer("conv:01 Modèle", "ok");
     o.tick(h);
     // Cycle 2 : nouvelle tâche pour 01 → récap d'abord (en cours), puis nouvelle conversation
@@ -841,7 +954,7 @@ TEST_CASE("orchestrateur : contexte allégé par récap + nouvelle conversation"
     CHECK(logged);
 
     // L'orchestrateur aussi : son contexte chargé → nouvelle conversation, avec un rappel de l'objectif.
-    h.convs["brain"].st.context = 0.50;
+    h.convs["brain"].st.contextTokens = 150000;
     h.answer("conv:01 Modèle#1", "ok");
     o.tick(h);  // récap de l'orchestrateur en cours
     o.tick(h);
@@ -850,6 +963,34 @@ TEST_CASE("orchestrateur : contexte allégé par récap + nouvelle conversation"
     CHECK(h.convs["brain#2"].received[0].find("Contexte allégé") != std::string::npos);
     CHECK(h.convs["brain#2"].received[0].find("Construire E7 Twin") != std::string::npos);
     CHECK(h.convs["brain#2"].received[0].find("Comptes rendus") != std::string::npos);
+}
+
+TEST_CASE("orchestrateur : « Repartir du récap » — le cerveau et l'agent suivent la nouvelle conversation") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "Construire E7 Twin";
+    o.settings.contextRotation = false;
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.agentConv["01 Modèle"] == "conv:01 Modèle");
+    // L'utilisateur remet à zéro la conversation de l'agent, puis celle de l'orchestrateur.
+    o.conversationReplaced("conv:01 Modèle", "neuve-01");
+    CHECK(o.agentConv["01 Modèle"] == "neuve-01");
+    o.conversationReplaced("brain", "brain-neuf");
+    CHECK(o.brainConvId == "brain-neuf");
+    // Le rappel attendu survit à un rechargement.
+    Orchestrator o2;
+    o2.fromJson(o.toJson());
+    CHECK(o2.toJson().value("brainRefresh", false));
+    // La tâche en vol (ancienne conversation) se termine : le compte rendu part au nouveau cerveau, avec le rappel.
+    h.answer("conv:01 Modèle", "ok");
+    o.tick(h);
+    REQUIRE(h.convs["brain-neuf"].received.size() == 1);
+    const std::string& first = h.convs["brain-neuf"].received[0];
+    CHECK(first.find("Contexte allégé") != std::string::npos);
+    CHECK(first.find("Construire E7 Twin") != std::string::npos);
+    CHECK_FALSE(o.toJson().value("brainRefresh", true));  // une seule fois
 }
 
 TEST_CASE("orchestrateur : rotation après N tâches, et désactivable") {
@@ -874,7 +1015,7 @@ TEST_CASE("orchestrateur : rotation après N tâches, et désactivable") {
     REQUIRE(off.start(h2));
     h2.answer("brain", "@@DELEGUER 01\na\n@@FIN");
     off.tick(h2);
-    h2.convs["conv:01 Modèle"].st.context = 0.95;
+    h2.convs["conv:01 Modèle"].st.contextTokens = 900000;
     h2.answer("conv:01 Modèle", "ok");
     off.tick(h2);
     h2.answer("brain", "@@DELEGUER 01\nb\n@@FIN");
@@ -1162,4 +1303,443 @@ TEST_CASE("orchestrateur : une annonce de pause enregistrée comme question est 
     r.tick(h);
     CHECK(r.state == OrchState::Thinking);
     CHECK(h.convs["brain"].received.back().find("# Reprise après ta pause") == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Économie de contexte et de cache (diagnostic du 2026-11-21 : contextes à 470 k, cache réécrit après les pauses
+// et les changements de modèle, cerveau Opus qui lançait lui-même les tests)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("économie : raisons de repartir d'une conversation neuve") {
+    OrchestratorSettings s;
+    ParticipantStatus st;
+    st.contextTokens = 50000;
+    st.lastTurnAt = 1000;
+    st.model = "claude-sonnet-5-5";
+    st.effort = "medium";
+    const int64_t ttl = 3300;
+    CHECK(rotationReason(s, st, 0, false, 1100, ttl, "sonnet", "medium").empty());
+    // Seuil en jetons, quelle que soit la fenêtre du modèle
+    st.contextTokens = 130000;
+    CHECK(rotationReason(s, st, 0, false, 1100, ttl, "", "").find("contexte de 130 k") == 0);
+    // Cache froid : seulement au-delà de la taille où réécrire coûte plus que repartir du récap
+    st.contextTokens = 90000;
+    CHECK(rotationReason(s, st, 0, false, 1000 + 3300, ttl, "", "").find("cache expiré") == 0);
+    CHECK(rotationReason(s, st, 0, false, 1000 + 3200, ttl, "", "").empty());
+    st.contextTokens = 60000;
+    CHECK(rotationReason(s, st, 0, false, 1000 + 9999, ttl, "", "").empty());
+    // Changement de modèle (cache propre au modèle) ou d'effort
+    st.contextTokens = 70000;
+    CHECK(rotationReason(s, st, 0, false, 1100, ttl, "haiku", "").find("changement de modèle") == 0);
+    CHECK(rotationReason(s, st, 0, false, 1100, ttl, "sonnet", "").empty());  // alias = même modèle
+    CHECK(rotationReason(s, st, 0, false, 1100, ttl, "", "high").find("changement d'effort") == 0);
+    st.contextTokens = 30000;
+    CHECK(rotationReason(s, st, 0, false, 1100, ttl, "haiku", "high").empty());  // petite conversation : on garde
+    // Nombre de tâches : agents seulement
+    CHECK(!rotationReason(s, st, 6, false, 1100, ttl, "", "").empty());
+    CHECK(rotationReason(s, st, 6, true, 1100, ttl, "", "").empty());
+    // Désactivations
+    st.contextTokens = 90000;
+    s.rotateWhenCold = false;
+    CHECK(rotationReason(s, st, 0, false, 1000 + 9999, ttl, "", "").empty());
+    s.rotateOnSwitch = false;
+    CHECK(rotationReason(s, st, 0, false, 1100, ttl, "haiku", "").empty());
+    s.contextRotation = false;
+    st.contextTokens = 900000;
+    CHECK(rotationReason(s, st, 0, false, 1100, ttl, "", "").empty());
+    CHECK(kTokens(1234567) == "1,2 M");
+    CHECK(kTokens(120000) == "120 k");
+}
+
+TEST_CASE("économie : un agent froid ou qui change de modèle repart du récap") {
+    FakeHost h;
+    h.sub = true;  // cache d'1 h
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01 | modele=sonnet\na\n@@FIN");
+    o.tick(h);
+    auto& a = h.convs["conv:01 Modèle"];
+    a.st.contextTokens = 100000;
+    a.st.model = "sonnet";
+    h.answer("conv:01 Modèle", "ok");
+    o.tick(h);
+    // Deux heures plus tard (le cerveau, lui, est léger) : le cache de l'agent a expiré
+    h.t += 2 * 3600;
+    h.answer("brain", "@@DELEGUER 01 | modele=sonnet\nb\n@@FIN");
+    o.tick(h);
+    o.tick(h);
+    CHECK(o.agentConv["01 Modèle"] == "conv:01 Modèle#1");
+    bool cold = false;
+    for (auto& l : o.log) cold |= l.text.find("cache expiré") != std::string::npos;
+    CHECK(cold);
+
+    // Changement de modèle sur une conversation chargée (cache encore chaud)
+    auto& b = h.convs["conv:01 Modèle#1"];
+    b.st.contextTokens = 90000;
+    b.st.model = "sonnet";
+    h.answer("conv:01 Modèle#1", "ok");
+    o.tick(h);
+    h.answer("brain", "@@DELEGUER 01 | modele=haiku effort=low\nc\n@@FIN");
+    o.tick(h);
+    o.tick(h);
+    CHECK(o.agentConv["01 Modèle"] == "conv:01 Modèle#1#2");
+    CHECK(h.convs["conv:01 Modèle#1#2"].last.model == "haiku");
+}
+
+TEST_CASE("économie : orchestrateur en lecture seule, et son contexte froid repart du récap") {
+    FakeHost h;
+    h.sub = true;
+    Orchestrator o;
+    o.settings.objective = "Construire E7 Twin";
+    REQUIRE(o.start(h));
+    CHECK(h.brainTools == std::vector<std::string>{"Read", "Glob", "Grep"});
+    CHECK(h.brainPrompt.find("LECTURE SEULE") != std::string::npos);
+    CHECK(h.brainPrompt.find("@@ROLE@@") == std::string::npos);
+    CHECK(h.brainPrompt.find("@@VERIFY@@") == std::string::npos);
+
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    h.convs["brain"].st.contextTokens = 100000;  // sous le seuil de 120 k, mais au-dessus de celui du cache froid
+    o.tick(h);
+    // L'agent travaille longtemps : le cache du cerveau expire
+    h.t += 3 * 3600;
+    h.answer("conv:01 Modèle", "fini");
+    o.tick(h);  // récap du cerveau en cours : le compte rendu attend
+    CHECK(o.brainConvId == "brain");
+    CHECK(h.convs["brain"].received.size() == 1);
+    o.tick(h);
+    CHECK(o.brainConvId == "brain#1");
+    REQUIRE(h.convs["brain#1"].received.size() == 1);
+    CHECK(h.convs["brain#1"].received[0].find("Contexte allégé") != std::string::npos);
+    CHECK(h.convs["brain#1"].received[0].find("fini") != std::string::npos);
+
+    FakeHost h2;
+    Orchestrator full;
+    full.settings.objective = "x";
+    full.settings.brainReadOnly = false;
+    REQUIRE(full.start(h2));
+    CHECK(h2.brainTools.empty());
+    CHECK(h2.brainPrompt.find("LECTURE SEULE") == std::string::npos);
+}
+
+TEST_CASE("économie : garde-fou d'une tâche qui s'emballe, mesures et compte rendu court") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.maxCallsPerTask = 100;
+    o.settings.reportMaxChars = 1000;
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    o.tick(h);
+    auto& a = h.convs["conv:01 Modèle"];
+    REQUIRE(a.st.busy);
+    a.st.apiCalls = 60;
+    o.tick(h);
+    CHECK(h.interrupted.empty());
+    a.st.apiCalls = 120;
+    a.st.contextTokens = 210000;
+    o.tick(h);
+    REQUIRE(h.interrupted.size() == 1);
+    o.tick(h);
+    CHECK(h.interrupted.size() == 1);  // une seule fois
+    a.st.cacheReadTokens = 5000000;
+    h.answer("conv:01 Modèle", "Long travail " + std::string(5000, 'x') + " **Fait** : FIN-DU-COMPTE-RENDU");
+    o.tick(h);
+    const std::string& rep = h.convs["brain"].received.back();
+    CHECK(rep.find("INTERROMPUE") != std::string::npos);
+    CHECK(rep.find("120 appels") != std::string::npos);
+    CHECK(rep.find("contexte final 210 k") != std::string::npos);
+    CHECK(rep.find("FIN-DU-COMPTE-RENDU") != std::string::npos);  // la fin (le compte rendu) est gardée
+    CHECK(rep.find("début omis") != std::string::npos);
+    CHECK(rep.size() < 3000);
+}
+
+TEST_CASE("économie : réglages persistés, ancien seuil en pourcentage ignoré") {
+    Orchestrator o;
+    o.settings.rotateAtTokens = 90000;
+    o.settings.rotateWhenCold = false;
+    o.settings.brainReadOnly = false;
+    o.settings.maxCallsPerTask = 42;
+    o.settings.taskContextLimit = 300000;
+    o.settings.reportMaxChars = 2000;
+    Orchestrator r;
+    r.fromJson(o.toJson());
+    CHECK(r.settings.rotateAtTokens == 90000);
+    CHECK_FALSE(r.settings.rotateWhenCold);
+    CHECK_FALSE(r.settings.brainReadOnly);
+    CHECK(r.settings.maxCallsPerTask == 42);
+    CHECK(r.settings.taskContextLimit == 300000);
+    CHECK(r.settings.reportMaxChars == 2000);
+    nlohmann::json old = {{"settings", {{"rotateAtContext", 0.45}}}};
+    Orchestrator legacy;
+    legacy.fromJson(old);
+    CHECK(legacy.settings.rotateAtTokens == 120000);
+}
+
+TEST_CASE("économie : conversations allégées demandées pour les agents et le cerveau") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    CHECK(h.convs["brain"].last.lean);
+    h.answer("brain", "@@DELEGUER 01\na\n@@FIN");
+    o.tick(h);
+    CHECK(h.convs["conv:01 Modèle"].last.lean);
+    Orchestrator r;
+    o.settings.leanAgents = false;
+    r.fromJson(o.toJson());
+    CHECK_FALSE(r.settings.leanAgents);
+}
+
+// ---------------------------------------------------------------------------
+// Équipe évolutive : nouveaux agents proposés par le cerveau, toujours soumis à l'humain
+// ---------------------------------------------------------------------------
+
+namespace {
+struct TeamHost : FakeHost {
+    std::vector<std::pair<std::string, std::string>> created;  // nom, notes
+    std::string createAgent(const std::string& name, const std::string& notes, std::string& error) override {
+        for (auto& a : agentList)
+            if (a.name == name) {
+                error = "Un dossier porte déjà ce nom.";
+                return {};
+            }
+        created.push_back({name, notes});
+        agentList.push_back({name, notes});
+        return name;
+    }
+};
+}  // namespace
+
+TEST_CASE("orchestrateur : directive @@NOUVEL_AGENT (variantes d'écriture)") {
+    Directives d = parseDirectives(
+        "Il faut une interface.\n"
+        "@@NOUVEL_AGENT **09 Interface**\nPourquoi : une appli de bureau.\nMission : …\n@@FIN\n"
+        "@@NOUVEL AGENT 10 Docs | inutile\nPourquoi : doc.\n@@FIN\n"
+        "@@CRÉER_AGENT 11 Perf/Bench\nPourquoi : mesures.\n@@FIN\n");
+    REQUIRE(d.newAgents.size() == 3);
+    CHECK(d.newAgents[0].name == "09 Interface");
+    CHECK(d.newAgents[0].notes == "Pourquoi : une appli de bureau.\nMission : …");
+    CHECK(d.newAgents[1].name == "10 Docs");
+    CHECK(d.newAgents[2].name == "11 Perf Bench");  // « / » interdit dans un nom de dossier
+    CHECK_FALSE(d.empty());
+    auto segs = splitDirectiveSegments("@@NOUVEL_AGENT 09 Interface\nPourquoi : x\n@@FIN");
+    REQUIRE(segs.size() == 1);
+    CHECK(segs[0].kind == TextSegment::NewAgent);
+    CHECK(cleanAgentName("  `a:b`.  ") == "a b");
+}
+
+TEST_CASE("orchestrateur : un nouvel agent n'est créé qu'avec l'accord de l'humain") {
+    TeamHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    CHECK(h.brainPrompt.find("@@NOUVEL_AGENT") != std::string::npos);
+    CHECK(h.convs["brain"].received[0].find("proposer un nouvel agent") != std::string::npos);
+
+    // Proposition + tâche pour un agent existant + tâche (prématurée) pour l'agent proposé.
+    h.answer("brain",
+             "@@NOUVEL_AGENT 09 Interface\nPourquoi : une appli de bureau distincte.\nMission : l'UI.\n@@FIN\n"
+             "@@DELEGUER 02 Build | modele=haiku\nCompile.\n@@FIN\n"
+             "@@DELEGUER 09 Interface\nFais l'UI.\n@@FIN");
+    o.tick(h);
+    CHECK(h.created.empty());  // rien de créé sans réponse
+    CHECK(o.state == OrchState::WaitingHuman);
+    REQUIRE(o.pendingAgents.size() == 1);
+    REQUIRE(o.questions.size() == 1);
+    CHECK(o.questions[0].text.find("une appli de bureau distincte") != std::string::npos);
+    REQUIRE(o.questions[0].options.size() == 2);
+    CHECK(o.questions[0].options[0] == Orchestrator::agentAcceptLabel("09 Interface"));
+    // L'agent existant travaille pendant que l'humain décide ; la tâche de l'agent proposé est écartée.
+    CHECK(h.convs["conv:02 Build"].received.size() == 1);
+    CHECK(h.convs.count("conv:09 Interface") == 0);
+
+    // Rechargement pendant l'attente : la question est reconstruite.
+    Orchestrator o2;
+    o2.fromJson(o.toJson());
+    REQUIRE(o2.pendingAgents.size() == 1);
+    REQUIRE(o2.questions.size() == 1);
+    CHECK(o2.questions[0].options[1] == Orchestrator::agentRefuseLabel("09 Interface"));
+
+    REQUIRE(o.answerHuman(h, "**" + o.questions[0].title + "**\n" + Orchestrator::agentAcceptLabel("09 Interface") +
+                                 "\n\nPrécisions : en Python/Qt."));
+    REQUIRE(h.created.size() == 1);
+    CHECK(h.created[0].first == "09 Interface");
+    CHECK(h.created[0].second.find("Mission : l'UI.") != std::string::npos);
+    CHECK(h.created[0].second.find("en Python/Qt.") != std::string::npos);  // précisions gardées dans la fiche
+    CHECK(o.pendingAgents.empty());
+    const std::string& msg = h.convs["brain"].received.back();
+    CHECK(msg.find("accepté et créé") != std::string::npos);
+    CHECK(msg.find("n'existe pas encore") != std::string::npos);  // la tâche écartée est rapportée
+
+    // L'agent créé est aussitôt délégable.
+    h.answer("brain", "@@DELEGUER 09 Interface | modele=sonnet\nFais l'UI.\n@@FIN");
+    o.tick(h);
+    CHECK(h.convs["conv:09 Interface"].received.size() == 1);
+}
+
+TEST_CASE("orchestrateur : nouvel agent refusé, ou précisions à intégrer") {
+    TeamHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@NOUVEL_AGENT 09 Interface\nPourquoi : UI.\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::WaitingHuman);
+    REQUIRE(o.answerHuman(h, Orchestrator::agentRefuseLabel("09 Interface")));
+    CHECK(h.created.empty());
+    CHECK(h.convs["brain"].received.back().find("refusé par l'humain") != std::string::npos);
+
+    // Réponse libre (« Autre ») : pas de création, le cerveau révise et soumet de nouveau.
+    h.answer("brain", "@@NOUVEL_AGENT 09 Interface\nPourquoi : UI.\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::WaitingHuman);
+    REQUIRE(o.answerHuman(h, "Plutôt une page web servie par 05, pas une appli de bureau."));
+    CHECK(h.created.empty());
+    CHECK(h.convs["brain"].received.back().find("révise ta proposition") != std::string::npos);
+    CHECK(o.pendingAgents.empty());
+}
+
+TEST_CASE("orchestrateur : propositions écartées d'office (désactivé, plafond, nom pris)") {
+    TeamHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.maxAgents = 4;  // 3 agents au départ
+    REQUIRE(o.start(h));
+    h.answer("brain",
+             "@@NOUVEL_AGENT 02 Build\nPourquoi : doublon.\n@@FIN\n"
+             "@@NOUVEL_AGENT 09 Interface\nPourquoi : UI.\n@@FIN\n"
+             "@@NOUVEL_AGENT 10 Docs\nPourquoi : doc.\n@@FIN");
+    o.tick(h);
+    // Seule « 09 Interface » est soumise : « 02 Build » existe, « 10 Docs » dépasserait le plafond.
+    REQUIRE(o.pendingAgents.size() == 1);
+    CHECK(o.pendingAgents[0].name == "09 Interface");
+    REQUIRE(o.answerHuman(h, Orchestrator::agentAcceptLabel("09 Interface")));
+    const std::string& msg = h.convs["brain"].received.back();
+    CHECK(msg.find("un agent porte déjà ce nom") != std::string::npos);
+    CHECK(msg.find("plafond de 4 agents") != std::string::npos);
+
+    // Désactivé : rien n'est soumis, le motif part aussitôt au cerveau (personne ne travaille).
+    o.settings.allowNewAgents = false;
+    size_t before = h.convs["brain"].received.size();
+    h.answer("brain", "@@NOUVEL_AGENT 11 Perf\nPourquoi : mesures.\n@@FIN");
+    o.tick(h);
+    CHECK(o.state != OrchState::WaitingHuman);
+    CHECK(o.pendingAgents.empty());
+    REQUIRE(h.convs["brain"].received.size() == before + 1);
+    CHECK(h.convs["brain"].received.back().find("désactivée par l'humain") != std::string::npos);
+    CHECK(Orchestrator::systemPrompt(true, false).find("tu ne peux pas créer d'agent") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Fin de phase : récaps de l'équipe (sans fermer les conversations)
+// ---------------------------------------------------------------------------
+
+namespace {
+struct RecapHost : FakeHost {
+    std::vector<std::vector<std::string>> recaps;
+    void recapConversations(const std::vector<std::string>& ids) override { recaps.push_back(ids); }
+};
+}  // namespace
+
+TEST_CASE("orchestrateur : récaps de l'équipe à @@TERMINE, agents encore au travail exclus") {
+    RecapHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01\nA.\n@@FIN\n@@DELEGUER 02\nB.\n@@FIN");
+    o.tick(h);
+    h.answer("conv:01 Modèle", "Fait.");
+    o.tick(h);  // compte rendu intermédiaire
+    h.answer("brain", "@@TERMINE\nLivré (02 finit sa tâche).\n@@FIN");
+    o.tick(h);
+    REQUIRE(o.state == OrchState::Finished);
+    REQUIRE(h.recaps.size() == 1);
+    const auto& ids = h.recaps[0];
+    CHECK(std::find(ids.begin(), ids.end(), "brain") != ids.end());
+    CHECK(std::find(ids.begin(), ids.end(), "conv:01 Modèle") != ids.end());
+    CHECK(std::find(ids.begin(), ids.end(), "conv:02 Build") == ids.end());  // encore au travail
+    CHECK(o.toJson()["settings"]["recapOnPhaseEnd"] == true);
+}
+
+TEST_CASE("orchestrateur : récaps à la pause de l'orchestrateur, pas sur le plafond du compte ni si désactivé") {
+    {
+        RecapHost h;
+        h.sub = true;
+        Orchestrator o;
+        o.settings.objective = "x";
+        REQUIRE(o.start(h));
+        h.answer("brain", "@@PAUSE\nQuota bas : reprise demain.\n@@FIN");
+        o.tick(h);
+        REQUIRE(o.state == OrchState::UsagePause);
+        CHECK(h.recaps.size() == 1);
+    }
+    {
+        RecapHost h;
+        h.sub = true;
+        Orchestrator o;
+        o.settings.objective = "x";
+        o.settings.usagePause = 0.9;
+        REQUIRE(o.start(h));
+        h.answer("brain", "@@DELEGUER 01\nA.\n@@FIN");
+        h.usage = 0.95;  // plafond du compte atteint : pause, sans récap (quota à préserver)
+        o.tick(h);
+        o.tick(h);
+        CHECK(o.state == OrchState::UsagePause);
+        CHECK(h.recaps.empty());
+    }
+    {
+        RecapHost h;
+        Orchestrator o;
+        o.settings.objective = "x";
+        o.settings.recapOnPhaseEnd = false;
+        REQUIRE(o.start(h));
+        h.answer("brain", "@@TERMINE\nLivré.\n@@FIN");
+        o.tick(h);
+        REQUIRE(o.state == OrchState::Finished);
+        CHECK(h.recaps.empty());
+    }
+}
+
+TEST_CASE("vérification visuelle : captures et agents équipés du navigateur") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    o.settings.browserAgents = {"02 Build"};
+    REQUIRE(o.start(h));
+    // Le cerveau sait qu'il peut regarder les captures et qui a le navigateur
+    CHECK(h.brainPrompt.find("Vérification VISUELLE") != std::string::npos);
+    CHECK(h.brainPrompt.find("Agents équipés du navigateur") != std::string::npos);
+    CHECK(h.convs["brain"].received[0].find("**02 Build** 🌐 navigateur") != std::string::npos);
+    CHECK(h.convs["brain"].received[0].find("**01 Modèle** —") != std::string::npos);
+    h.answer("brain", "@@DELEGUER 01 | modele=sonnet\na\n@@FIN\n@@DELEGUER 02 | modele=sonnet\nb\n@@FIN");
+    o.tick(h);
+    auto& a1 = h.convs["conv:01 Modèle"];
+    auto& a2 = h.convs["conv:02 Build"];
+    REQUIRE(!a1.received.empty());
+    REQUIRE(!a2.received.empty());
+    CHECK_FALSE(a1.last.chrome);
+    CHECK(a2.last.chrome);
+    CHECK(a2.last.lean);  // le navigateur reste compatible avec les conversations allégées
+    CHECK(a1.received.back().find("_captures/") != std::string::npos);
+    CHECK(a1.received.back().find("Claude in Chrome") == std::string::npos);
+    CHECK(a2.received.back().find("Claude in Chrome") != std::string::npos);
+
+    // Désactivée : ni consigne de capture, ni section dans le prompt du cerveau
+    o.settings.visualChecks = false;
+    o.settings.browserAgents.clear();
+    CHECK(o.brainPrompt().find("VISUELLE") == std::string::npos);
+    CHECK(o.brainPrompt().find("navigateur (🌐)") == std::string::npos);
+
+    // Réglages sauvegardés
+    OrchestratorSettings s;
+    s.visualChecks = false;
+    s.browserAgents = {"03 Check"};
+    Orchestrator p;
+    p.settings = s;
+    Orchestrator q;
+    q.fromJson(p.toJson());
+    CHECK_FALSE(q.settings.visualChecks);
+    REQUIRE(q.settings.browserAgents.size() == 1);
+    CHECK(q.settings.browserAgents[0] == "03 Check");
 }

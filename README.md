@@ -63,7 +63,7 @@ Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/
 - Repère discret « ── hh:mm ── » dans le fil à chaque changement de minute.
 - La barre des tâches clignote quand Claude a fini ou attend une décision.
 
-### Trois pages : Cockpit, Tableau de bord, Orchestrateur
+### Quatre pages : Cockpit, Tableau de bord, Orchestrateur, Designer
 - **Cockpit** (Ctrl+1) : la page principale décrite ci-dessus.
 - **Tableau de bord des conversations** (Ctrl+2) : toutes les conversations ouvertes en cartes, triées
   par urgence (⚠ attend votre décision, en cours, prête, en veille). Chaque carte montre l'état et la durée,
@@ -74,14 +74,17 @@ Réglages : `~/Library/Application Support/ClaudeDesk` ; espace de travail : `~/
   contexte ImGui), à poser sur un deuxième écran. Son état est mémorisé au redémarrage.
 - **Orchestrateur** (Ctrl+3) : le chef de projet automatique et son équipe (voir plus bas). Quand une
   orchestration existe, le tableau de bord l'affiche en tête (carte « Orchestration » + équipe).
+- **Designer** (Ctrl+4) : conçoit un projet et son équipe d'agents à partir d'une description (voir plus bas).
 
 ### Usage en direct (équivalent de `/usage`)
 - Limites du forfait : fenêtre de 5 h et semaine, % utilisé, heure de réinitialisation,
-  historique sur 24 h. Mis à jour à chaque réponse (événements `rate_limit_event` du CLI) ;
-  bouton **Actualiser** (requête minuscule à Haiku).
-- **Actualisation automatique** (Configuration › Application) : au lancement si la mesure date de plus de 2 min,
-  puis si elle date de plus de 15 min ou que la fenêtre de 5 h s'est réinitialisée — au plus une requête toutes
-  les 10 min, jamais pendant qu'une session travaille ni quand la fenêtre n'est pas regardée.
+  historique sur 24 h (heures locales, session en cours surlignée, détail au survol). Mis à jour à chaque
+  réponse (événements `rate_limit_event` du CLI) ; bouton **Actualiser** = commande locale `/usage` du CLI
+  (`claude -p "/usage"` → `usage_report.rate_limits`) : aucun appel au modèle, donc gratuite, et elle répond
+  même quand la limite est atteinte. Une date de réinitialisation dépassée s'affiche « réinitialisée » (0 %).
+- **Actualisation automatique** (Configuration › Application) : au lancement si la mesure date de plus de 1 min,
+  puis si elle date de plus de 5 min (fenêtre regardée, aucune session au travail), et dès qu'une limite s'est
+  réinitialisée — au plus une fois par minute.
 - Conversation active : coût équivalent API, jetons (dont cache), tours, temps API,
   **remplissage de la fenêtre de contexte**, coût par tour, tâches de Claude, serveurs MCP.
 
@@ -136,7 +139,9 @@ ClaudeDesk\
   d'abord générés (3 en parallèle), l'inspecteur affiche « récaps x / n ».
 - **Contexte injecté** : une nouvelle conversation reçoit dans son prompt système les notes et
   synthèses du projet et des thèmes parents, plus les récaps des échanges précédents du dossier.
-  « Repartir de ce contexte » ouvre une conversation neuve, légère, mais informée.
+  « ↻ Repartir du récap » (en-tête de conversation ou Inspecteur) génère le récap s'il manque, ouvre une
+  conversation neuve, légère mais informée, avec les mêmes réglages, et range l'ancienne en « Terminée ».
+  Sur la discussion de l'orchestrateur, le cerveau suit la nouvelle conversation (rappel de l'objectif inclus).
 - Glisser-déposer pour ranger une conversation, statuts (Idée, En cours, Bloqué, Terminé),
   épingles, recherche dans les titres et récaps.
 - **Importer depuis Claude Code** : les sessions faites dans le terminal
@@ -160,6 +165,12 @@ le bouton de page *Orchestrateur*, ou **Orchestrer…** dans l'inspecteur d'un p
   aussitôt les agents libres ; une tâche confiée à un agent occupé part après la sienne. L'équipe continue
   aussi pendant qu'il réfléchit ou qu'une question vous attend (la réponse lui transmet ce qui a avancé).
   Désactivable : *Réglages avancés › Exécution › Comptes rendus au fil de l'eau*.
+- **Équipe évolutive** : quand un besoin durable n'est couvert par aucun agent, le cerveau peut proposer un
+  nouvel agent (`@@NOUVEL_AGENT <nom>`, avec « Pourquoi : … » et sa fiche de rôle). **Rien n'est créé sans votre
+  accord** : la proposition vous est soumise comme une question (*Créer* / *Ne pas créer* / *Autre* : vos
+  précisions, qu'il intègre avant de la soumettre de nouveau). Une fois accepté, l'agent devient un nouveau thème
+  du projet, avec sa fiche dans les notes (et vos précisions éventuelles). Pendant que vous décidez, les autres
+  agents continuent. Réglages : *Exécution › L'orchestrateur peut proposer de nouveaux agents*, plafond 12 par défaut.
 - **Budget** — la contrainte principale, toujours un **plafond** (le cerveau optimise : Haiku pour la
   mécanique, Sonnet pour le courant, Opus pour le difficile). Quatre niveaux simples :
 
@@ -179,14 +190,55 @@ le bouton de page *Orchestrateur*, ou **Orchestrer…** dans l'inspecteur d'un p
 - **Questions** : un bloc `@@HUMAIN` devient un formulaire (questions numérotées séparées, options
   cliquables `- [ ]`, la recommandée présélectionnée, réponses suggérées, « Laisse-le décider », Ctrl+Entrée).
   La barre des tâches clignote.
-- **Contexte maîtrisé** : avant d'envoyer une tâche, une conversation d'agent trop chargée (45 % de contexte
-  ou 6 tâches par défaut) est récapitulée puis remplacée par une conversation neuve du même thème, qui reçoit
-  la mémoire cowork. Idem pour le cerveau.
+- **Contexte et cache maîtrisés** (chaque appel d'outil relit tout le contexte ; c'est là que part le quota) :
+  avant d'envoyer un message, une conversation est récapitulée puis remplacée par une conversation neuve du
+  même thème (qui reçoit la mémoire cowork) si son contexte dépasse **120 k jetons** (seuil en jetons, pas en
+  % d'une fenêtre de 1 M), après 6 tâches, si son **cache a expiré** (≈ 1 h sous abonnement : reprendre
+  froid réécrirait tout le contexte au prix fort), ou si l'on s'apprête à **changer son modèle ou son effort**
+  (le cache est propre au modèle). Idem pour le cerveau, dont le message attend la fin du récap.
+  **En fin de phase** (`@@TERMINE`, pause de l'orchestrateur ou du budget jusqu'à la session suivante), les
+  conversations de l'équipe sont récapitulées sans être fermées : la mémoire du projet suit le travail fait, et à
+  la reprise (cache expiré), une rotation repart aussitôt du récap déjà prêt. Pas lors d'une pause sur le plafond
+  du compte. Réglage : *Exécution › Récaps de l'équipe en fin de phase*.
+- **Économie** : conversations **allégées** (`--disable-slash-commands`, sans sous-agents ni serveurs MCP :
+  contexte fixe d'un agent de 29,7 k à 17,6 k jetons sur E7 Twin, appliqué aux conversations neuves) ;
+  le cerveau est en **lecture seule** (Read, Glob, Grep) et délègue tests et builds ; les
+  agents reçoivent des consignes d'économie et rendent un compte rendu de 15 lignes, transmis avec ses
+  mesures (appels, contexte final, jetons relus/écrits) et tronqué par le début au-delà de 3 000 caractères ;
+  **garde-fous** par tâche (150 appels, 250 k de contexte) : l'agent est interrompu et le cerveau redécoupe.
+- **Vérification visuelle** (*Exécution*, activée par défaut) : tout changement visible est livré avec une capture
+  PNG dans `_captures/` à la racine du dépôt (dossier auto-ignoré par git), que l'agent examine ; le cerveau, même en
+  lecture seule, peut l'ouvrir avec Read (~1,5 k jetons par image). **Agents équipés du navigateur** : cochés dans
+  *Exécution*, ils reçoivent `--chrome` (outils Claude in Chrome : ouvrir une page, cliquer, console, capture),
+  compatible avec les conversations allégées ; marqués « 🌐 navigateur » pour le cerveau.
 - **La page** : cartes Avancement et Budget (jauge, repère 75 %, cible, tolérance), l'équipe (statut, modèle,
   contexte de chaque agent), réglages, journal, et la discussion du cerveau à droite, rendue en cartes
   (tâches confiées, questions, bilan) — vous pouvez lui écrire directement. Onglet « Bilan ✓ » à la fin.
 - **Persistance** : `<projet>/_orchestrateur.json`, rechargé au démarrage ; une orchestration interrompue par
   la fermeture reste en pause jusqu'à *Reprendre* (les tâches interrompues sont renvoyées).
+
+### Designer : de l'idée à l'équipe d'agents
+Page 4 (Ctrl+4, ou *Fichier › Concevoir un projet avec le Designer…*), en quatre étapes :
+1. **Décrire** : ce qu'on veut construire ; facultatif : un dossier (existant → Claude lit le code, en lecture
+   seule, pour bâtir l'équipe sur l'existant), technologies imposées, contraintes, taille d'équipe, niveau de budget.
+2. **Clarifier** (seulement si besoin) : jusqu'à 4 questions de Claude, réponses à cliquer, la recommandée
+   présélectionnée ; « Laisser Claude trancher ».
+3. **Ajuster** : projet (nom, résumé, pile, conventions), orchestrateur (objectif, jalons ordonnés, budget,
+   vérification visuelle) et une carte par agent (nom, mission, modèle/effort conseillés, navigateur, fiche de
+   rôle). Tout s'édite à la main ; **Demander un changement** fait affiner par Claude (il garde vos
+   modifications) ; **Version précédente** annule une génération. Points bloquants en rouge, conseils en orange.
+4. **Créer** : projet cowork + un thème par agent (fiche en notes, mission + modèle conseillé en tête pour le
+   résumé vu par l'orchestrateur), fichiers de départ dans le dépôt (`CLAUDE.md`, `docs/PLAN.md`,
+   `docs/agents/*.md`, jamais d'écrasement), `_orchestrateur.json` réglé (niveau de budget, objectif + jalons,
+   visuel, agents navigateur). Ouvre ensuite la page Orchestrateur ; démarrage immédiat en option.
+
+Le designer est un appel `claude -p` (stream-json, fil d'activité en direct, annulable) en **mode Plan par
+défaut** ; modèle (Opus par défaut), effort et mode réglables. Réponse attendue : un bloc JSON (`questions` ou
+`design`) ; en mode plan, un plan rendu par ExitPlanMode est aussi accepté. Brouillon persistant :
+`designer.json` dans le dossier de données. Moteur testé : `src/claude/Designer` (`tests/test_designer.cpp`).
+Test réel : `--design "<description>"` (réglages lus dans le `designer.json` du dossier de données de test) ;
+captures : `--panel designer[:questions|:demo|:creer]`, `designer:creer!` crée le projet d'exemple dans
+`<espace de test>/../depot-test`.
 
 ### Prise en main
 - **Premier lancement** : le guide s'ouvre sur sa page *Bienvenue*. **Lancements 2 à 11** : une bulle animée,
@@ -220,7 +272,7 @@ F1 dans l'application affiche la liste complète.
 | Ctrl+F | Rechercher dans la conversation |
 | Ctrl+Maj+C | Copier la dernière réponse |
 | Ctrl+Maj+R | Générer le récap |
-| Ctrl+1 / Ctrl+2 / Ctrl+3 | Cockpit / tableau de bord / orchestrateur |
+| Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 | Cockpit / tableau de bord / orchestrateur / designer |
 | Ctrl+Maj+D | Tableau de bord dans une fenêtre séparée |
 | Maj+F1 | Guide de démarrage |
 | Ctrl+S | Tout enregistrer |
@@ -243,6 +295,8 @@ src/
                History        lecture des sessions de ~/.claude/projects
                Orchestrator   moteur de l'orchestrateur, sans UI : directives, file de
                               tâches, comptes rendus au fil de l'eau, budget, rotation
+               Designer       conception projet + équipe : prompts, analyse JSON,
+                              validation, fichiers de départ, réglages de l'orchestrateur
   workspace/   Workspace      arborescence cowork sur disque + contexte injecté
   app/         App (boucle SDL, actions), AppMenus, Settings
   ui/          ConversationView, PromptEditor, PermissionPanel, UsagePanel,

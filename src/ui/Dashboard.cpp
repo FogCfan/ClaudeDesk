@@ -160,6 +160,15 @@ void App::drawPageSwitch() {
             ImGui::SetTooltip("Le chef de projet automatique et son équipe d'agents (Ctrl+3)\n"
                               "● = l'orchestration avance   ❓ = elle attend votre réponse");
     }
+    {
+        std::string dl = "Designer";
+        if (designerBusy()) dl += "  ●";
+        dl += "###designpage";
+        if (pageButton(dl.c_str(), page_ == 3)) page_ = 3;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Concevoir un projet et son équipe d'agents à partir d'une description (Ctrl+4)\n"
+                              "● = Claude est en train de concevoir");
+    }
     if (pageButton(dash_ ? "⧉ Rattacher" : "⧉", false)) {
         if (dash_) closeDashboardWindow();
         else openDashboardWindow();
@@ -216,9 +225,9 @@ void App::drawDashboard(bool detached) {
             for (auto* w : ws) {
                 char buf[48];
                 std::snprintf(buf, sizeof buf, "%s : %d %%", w->name == "five_hour" ? "5 h" : "7 jours",
-                              (int)(w->utilization * 100 + 0.5));
+                              (int)(w->current(util::nowUnix()) * 100 + 0.5));
                 ImGui::SetCursorPosY(midY);
-                ui::usageBar((float)w->utilization, buf, ImGui::GetTextLineHeight(), barW, w->name.c_str());
+                ui::usageBar((float)w->current(util::nowUnix()), buf, ImGui::GetTextLineHeight(), barW, w->name.c_str());
                 if (ImGui::IsItemHovered() && w->resetsAt)
                     ImGui::SetTooltip("%s — réinitialisation dans %s", claude::windowLabel(w->name).c_str(),
                                       util::humanDuration(w->resetsAt - util::nowUnix()).c_str());
@@ -674,14 +683,31 @@ void App::drawActivityFeed() {
     ImGui::SameLine();
     if (ImGui::SmallButton("Effacer")) activity_.clear();
     ImGui::Separator();
+    // Ordre chronologique, le plus récent en bas. Comportement « hybride » : tant que le fil est tout en bas
+    // (ou à l'ouverture), il suit les nouvelles entrées ; si l'utilisateur remonte pour lire une entrée, il
+    // reste en place et un bouton signale les nouveautés.
     ImGui::BeginChild("##events");
+    const float tol = ImGui::GetTextLineHeight() * 0.5f;
+    // Mesures de la frame précédente : à la première frame, max = 0, donc « en bas » (suivi par défaut).
+    bool atBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - tol;
+    if (feedJump_) {  // bouton « ↓ nouvelles entrées » cliqué
+        feedJump_ = false;
+        atBottom = true;
+    }
     if (activity_.empty())
         ImGui::TextWrapped("Les actions de Claude dans toutes les conversations ouvertes s'afficheront ici : "
                            "outils utilisés, demandes d'autorisation, fins de tour, erreurs.");
-    int n = 0;
+    // Les 250 plus récentes (selon le filtre), affichées de la plus ancienne à la plus récente.
+    std::vector<const ActivityEvent*> shown;
     for (auto& ev : activity_) {
         if (onlyImportant && ev.kind == ActivityKind::Tool) continue;
-        if (++n > 250) break;
+        shown.push_back(&ev);
+        if (shown.size() >= 250) break;
+    }
+    int n = 0;
+    for (auto it = shown.rbegin(); it != shown.rend(); ++it) {
+        const ActivityEvent& ev = **it;
+        ++n;
         ImVec4 c = ev.kind == ActivityKind::Attention ? pal.warn
                    : ev.kind == ActivityKind::Done    ? pal.ok
                    : ev.kind == ActivityKind::Error   ? pal.err
@@ -712,6 +738,28 @@ void App::drawActivityFeed() {
         ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
         ImGui::PopID();
+    }
+    if (atBottom) {
+        ImGui::SetScrollHereY(1.0f);
+        feedSeenSeq_ = activitySeq_;
+    } else {
+        // Remonté dans le fil : bouton flottant, en bas de la zone visible, vers les entrées les plus récentes.
+        uint64_t fresh = activitySeq_ > feedSeenSeq_ ? activitySeq_ - feedSeenSeq_ : 0;
+        std::string label = fresh > 0 ? "↓ " + std::to_string(fresh) + (fresh > 1 ? " nouvelles entrées" : " nouvelle entrée")
+                                      : std::string("↓ Plus récentes");
+        const ImGuiStyle& st = ImGui::GetStyle();
+        ImVec2 sz = ImGui::CalcTextSize(label.c_str());
+        sz.x += st.FramePadding.x * 2;
+        sz.y += st.FramePadding.y * 2;
+        ImVec2 winPos = ImGui::GetWindowPos(), winSize = ImGui::GetWindowSize();
+        ImGui::SetCursorScreenPos(ImVec2(winPos.x + std::max(0.0f, (winSize.x - sz.x) * 0.5f),
+                                         winPos.y + winSize.y - sz.y - st.ItemSpacing.y));
+        ImGui::PushStyleColor(ImGuiCol_Button, fresh > 0 ? pal.accent : ImGui::GetStyleColorVec4(ImGuiCol_Button));
+        if (fresh > 0) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+        if (ImGui::Button(label.c_str())) feedJump_ = true;
+        if (fresh > 0) ImGui::PopStyleColor();
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Revenir en bas : le fil suivra de nouveau les nouvelles entrées");
     }
     ImGui::EndChild();
 }

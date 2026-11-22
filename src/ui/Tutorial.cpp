@@ -63,7 +63,7 @@ const std::vector<TourStep>& tourSteps() {
          "Il affiche les détails de ce que vous sélectionnez dans l'arbre :\n\n"
          "- pour un **dossier** : ses **notes** (que Claude recevra automatiquement) et sa **synthèse** ;\n"
          "- pour une **conversation** : son **récap** et les boutons **Reprendre** (même session Claude, "
-         "historique complet) ou **Repartir de ce contexte** (nouvelle session légère qui reçoit les récaps).",
+         "historique complet) ou **↻ Repartir du récap** (nouvelle session légère qui reçoit le récap ; aussi dans l'en-tête de chaque conversation).",
          "Inspecteur", 0},
         {"Le fil de la conversation",
          "Chaque conversation ouverte a son onglet (plusieurs peuvent tourner **en parallèle**).\n\n"
@@ -416,7 +416,7 @@ const std::vector<GuideSection>& guideSections() {
          "- les **sous-agents** (outil Task) affichent leur propre activité à l'intérieur.\n\n"
          "Sous le fil, un indicateur montre ce que fait Claude (requête, réflexion, outil) et depuis combien de temps.\n\n"
          "### Lire et copier\n"
-         "- survolez un message : **Copier** ou **Sélectionner** (texte sélectionnable à la souris) ;\n"
+         "- survolez un message : **Copier** ou **Sélectionner** (texte brut sélectionnable à la souris, Échap pour revenir) ;\n"
          "- les blocs de code ont leur propre bouton **Copier** ;\n"
          "- **clic droit** : réutiliser un de vos messages, copier toute la conversation en Markdown ;\n"
          "- **Ctrl+F** filtre les messages, **Ctrl+Maj+C** copie la dernière réponse."},
@@ -455,7 +455,7 @@ const std::vector<GuideSection>& guideSections() {
          "Le panneau **Usage** est l'équivalent de `/usage`, en direct :\n\n"
          "- **Session (fenêtre 5 h)** et **Semaine** : pourcentage de votre forfait consommé et heure de "
          "réinitialisation. Vert < 50 %, orange < 80 %, rouge au-delà.\n"
-         "- La mesure arrive avec chaque réponse de Claude ; *Actualiser* envoie une requête minuscule à Haiku.\n"
+         "- La mesure arrive avec chaque réponse de Claude ; *Actualiser* lance /usage (gratuit, sans quota consommé).\n"
          "- **Fenêtre de contexte** : la mémoire de travail de la conversation. Quand elle se remplit, tapez "
          "`/compact` ou repartez d'un récap.\n"
          "- Le **coût** affiché est l'équivalent au tarif de l'API : avec un abonnement, c'est le quota qui est "
@@ -578,8 +578,8 @@ const std::vector<GuideSection>& guideSections() {
         {"Comprendre et bien utiliser", "Reprendre ou repartir ?",
          "## Reprendre ou repartir ?\n\n"
          "Deux façons de continuer un travail, pour deux situations différentes.\n\n"
-         "| | **Reprendre** | **Repartir de ce contexte** |\n|---|---|---|\n"
-         "| Ce qui se passe | la même session Claude Code continue | une nouvelle conversation du même dossier démarre |\n"
+         "| | **Reprendre** | **↻ Repartir du récap** |\n|---|---|---|\n"
+         "| Ce qui se passe | la même session Claude Code continue | une nouvelle conversation du même dossier démarre, l'ancienne passe « Terminée » |\n"
          "| Ce que Claude sait | tout l'historique, mot pour mot | les notes, synthèses et récaps du dossier |\n"
          "| Contexte utilisé | élevé, et il grandit | faible |\n"
          "| Idéal pour | finir une tâche en cours, détails frais | une nouvelle étape, un nouveau sous-sujet |\n\n"
@@ -593,8 +593,8 @@ const std::vector<GuideSection>& guideSections() {
          "chaque message coûte plus ;\n"
          "- la discussion a **dérivé** et vous voulez repartir sur des bases propres.\n\n"
          "### La méthode recommandée\n"
-         "1. **Récap** de la conversation qui se termine.\n"
-         "2. Dans l'Inspecteur : **Repartir de ce contexte**.\n"
+         "1. **↻ Repartir du récap** (en-tête de la conversation, ou Inspecteur). Le récap est généré s'il manque ou date, puis la nouvelle conversation s'ouvre avec les mêmes réglages.\n"
+         "2. L'ancienne conversation est rangée en « Terminée » : elle reste consultable.\n"
          "3. Premier message : l'étape suivante, sans réexpliquer. Claude a déjà le récap.\n\n"
          "> Alternative intermédiaire : `/compact` résume la conversation **sur place**. Pratique, mais le résumé "
          "n'est ni relisible ni réutilisable par les autres conversations du thème, contrairement à un récap."},
@@ -702,6 +702,40 @@ const std::vector<GuideSection>& guideSections() {
          "- fermer l'onglet d'un agent en plein travail compte comme un échec de sa tâche ;\n"
          "- l'état est enregistré dans `_orchestrateur.json` à la racine du projet : après une fermeture de "
          "ClaudeDesk, l'orchestration est en pause, *Reprendre* renvoie ce qui était en cours."},
+        {"Comprendre et bien utiliser", "Le Designer : de l'idée à l'équipe",
+         "## Le Designer : de l'idée à l'équipe\n\n"
+         "### Le problème\n"
+         "Pour qu'un orchestrateur travaille bien, il faut une **bonne équipe** : des agents qui possèdent chacun une "
+         "partie du dépôt (sinon ils se marchent dessus), une fiche de rôle précise pour chacun, un objectif vérifiable "
+         "et des jalons. Préparer tout ça à la main prend du temps, et c'est là que se jouent la plupart des échecs.\n\n"
+         "### Comment ça marche\n"
+         "Page **Designer** (*Ctrl+4*), en quatre étapes :\n"
+         "1. **Décrire** le projet en quelques phrases. Facultatif : un dossier existant (Claude lit alors le code pour "
+         "bâtir l'équipe sur l'existant), des technologies imposées, des contraintes, la taille de l'équipe, le budget.\n"
+         "2. **Clarifier** : s'il manque une information qui change vraiment la conception, Claude pose quelques "
+         "questions avec des réponses à cliquer (la recommandée est présélectionnée).\n"
+         "3. **Ajuster** la conception : projet, objectif, jalons, budget, et une carte par agent (mission, modèle "
+         "conseillé, navigateur, fiche de rôle). Tout est modifiable à la main ; *Demander un changement* fait refaire "
+         "à Claude seulement ce que vous demandez, et *Version précédente* annule une génération.\n"
+         "4. **Créer** : le projet cowork, un thème par agent (sa fiche en notes), les fichiers de départ du dépôt "
+         "(CLAUDE.md, docs/PLAN.md, docs/agents/ — jamais d'écrasement) et l'orchestrateur réglé. Il ne reste qu'à "
+         "relire l'objectif et lancer l'orchestration.\n\n"
+         "Le designer travaille par défaut en **mode Plan** : il lit, ne modifie rien. Modèle, effort et mode se "
+         "règlent dans *Réglages du designer*. Le brouillon est gardé entre deux lancements.\n\n"
+         "### Quand c'est utile\n"
+         "- démarrer un projet neuf qui mérite une équipe (plusieurs parties distinctes : moteur, interface, tests…) ;\n"
+         "- mettre une équipe d'agents sur un dépôt existant, sans écrire les fiches à la main.\n\n"
+         "### Quand c'est inutile\n"
+         "- une petite tâche ou un script : une simple conversation suffit, une équipe coûterait plus qu'elle ne rapporte ;\n"
+         "- un projet déjà organisé en thèmes : réglez directement son orchestrateur.\n\n"
+         "### Exemple\n"
+         "« Un outil en ligne de commande Python qui renomme les photos d'après leur date EXIF, avec un mode "
+         "simulation et des tests » → en une trentaine de secondes avec Haiku : deux agents (Noyau ; Tests et docs), "
+         "cinq jalons, budget bas.\n\n"
+         "### Pièges\n"
+         "- une description vague donne une équipe vague : précisez la plateforme, le public, les fonctionnalités clés ;\n"
+         "- relisez les **frontières** des fiches : deux agents qui possèdent les mêmes fichiers se gêneront ;\n"
+         "- la conception consomme du quota comme une conversation (Opus : 1 à 3 minutes)."},
         {"Comprendre et bien utiliser", "Doser l'autonomie et la réflexion",
          "## Doser l'autonomie et la réflexion\n\n"
          "Trois réglages déterminent **combien Claude réfléchit** et **combien il agit seul**. Les bons réglages "
@@ -766,7 +800,7 @@ const std::vector<GuideSection>& guideSections() {
          "Le contexte cowork ne contient que ce qui est dans les **récaps** et les **notes**. Générez le récap de la "
          "conversation où la décision a été prise, vérifiez qu'elle y figure, ou ajoutez-la aux notes du dossier.\n\n"
          "### Le contexte est presque plein\n"
-         "Générez un **récap**, puis *Repartir de ce contexte* (voir *Reprendre ou repartir ?*), ou tapez `/compact`.\n\n"
+         "Cliquez **↻ Repartir du récap** (voir *Reprendre ou repartir ?*), ou tapez `/compact`.\n\n"
          "### Mon changement de réglage ne s'applique pas\n"
          "Cliquez *Appliquer à la conversation*. Pour l'effort, les outils et le prompt, la session redémarre au "
          "prochain message (historique conservé).\n\n"
@@ -1048,7 +1082,7 @@ Petite calculatrice en ligne de commande (C++17), **volontairement imparfaite** 
 - Conversation *Code › Parseur › Division par zéro* : répondez « Ajoute le test puis applique le correctif ».
 - Passez en **mode Plan** et demandez : « Propose un plan pour gérer la priorité des opérateurs ».
 - Ouvrez deux conversations en parallèle et suivez-les dans le **tableau de bord** (Ctrl+2).
-- Générez un **récap**, puis « Repartir de ce contexte » depuis l'Inspecteur.
+- Cliquez « ↻ Repartir du récap » dans l'en-tête d'une conversation.
 )";
 
 const char* kCalcH = R"(#pragma once

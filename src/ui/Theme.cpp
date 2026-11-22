@@ -187,6 +187,41 @@ void helpMarker(const char* text) {
     }
 }
 
+float buttonWidth(const char* label) {
+    return ImGui::CalcTextSize(label, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+}
+
+void sameLineIfFits(float w) {
+    ImGui::SameLine();
+    // NewLine juste après SameLine annule ce dernier : l'élément suivant repart au début de la ligne d'en dessous.
+    if (ImGui::GetContentRegionAvail().x < w) ImGui::NewLine();
+}
+
+float fitItemWidth(float desired, const char* label) {
+    float avail = ImGui::GetContentRegionAvail().x;
+    if (label && *label) {
+        float lw = ImGui::CalcTextSize(label, nullptr, true).x;
+        if (lw > 0) avail -= lw + ImGui::GetStyle().ItemInnerSpacing.x;
+    }
+    return std::max(ImGui::GetFontSize() * 4.0f, std::min(desired, avail));
+}
+
+void sideNote(const char* text) {
+    if (!text || !*text) return;
+    ImGui::SameLine();
+    float avail = ImGui::GetContentRegionAvail().x;
+    bool below = avail < ImGui::GetFontSize() * 9.0f && avail < ImGui::CalcTextSize(text).x;
+    float indent = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x;
+    if (below) {
+        ImGui::NewLine();
+        ImGui::Indent(indent);
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopStyleColor();
+    if (below) ImGui::Unindent(indent);
+}
+
 void usageBar(float f, const char* overlay, float height, float width, const char* animId) {
     const Palette& p = palette();
     f = f < 0 ? 0 : f > 1 ? 1 : f;

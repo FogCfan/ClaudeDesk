@@ -134,6 +134,7 @@ private:
     int controlCounter_ = 0;
     std::string initRequestId_;
     double lastProcessCost_ = 0;   // total_cost_usd est cumulatif par processus
+    std::string lastUsageMsgId_;   // un message assistant arrive en plusieurs événements (un par bloc)
     bool sawInit_ = false;
     bool triedResume_ = false;
     std::string lastUserText_;     // pour relancer sans --resume si la session est introuvable

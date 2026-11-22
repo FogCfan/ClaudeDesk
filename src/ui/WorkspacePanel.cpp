@@ -350,14 +350,16 @@ void App::drawInspector() {
                 ImGui::SetTooltip("Rouvre la conversation : votre prochain message reprend la session Claude Code\n"
                                   "avec tout son historique (--resume).");
             ImGui::SameLine();
-            if (ImGui::Button("Repartir de ce contexte")) {
-                OpenConversation* oc = newConversation(folder);
-                oc->injectContext = true;
-                if (m->recap.empty()) requestRecap(m->id);
+            ImGui::BeginDisabled(restartPending(m->id));
+            if (ImGui::Button("↻ Repartir du récap")) {
+                std::string id = m->id;  // `m` peut être invalidé par l'ouverture
+                if (openConversation(id, false)) restartFromRecap(id);
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Nouvelle conversation dans le même dossier, qui reçoit les récaps du dossier\n"
-                                  "(dont celui-ci) au lieu de tout l'historique : plus léger en contexte.");
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Remet le contexte à zéro : récap (s'il manque ou date), puis conversation neuve dans\n"
+                                  "le même dossier qui le reçoit en contexte, avec les mêmes réglages. Celle-ci passe\n"
+                                  "« terminée ». Plus léger que tout l'historique.");
             ImGui::SeparatorText("Récap");
             bool generating = false;
             for (auto& j : jobs_)

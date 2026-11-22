@@ -24,6 +24,7 @@ void App::drawMenuBar() {
     if (ImGui::BeginMenu("Fichier")) {
         if (ImGui::MenuItem("Nouvelle conversation", "Ctrl+N")) newConversation(nullptr);
         if (ImGui::MenuItem("Nouveau projet…")) openNewProject_ = true;
+        if (ImGui::MenuItem("Concevoir un projet avec le Designer…", "Ctrl+4")) page_ = 3;
         if (ImGui::MenuItem("Importer depuis Claude Code…")) {
             showHistory_ = true;
             histProjects_ = claude::listHistoryProjects();
@@ -121,6 +122,7 @@ void App::drawMenuBar() {
             else openDashboardWindow();
         }
         if (ImGui::MenuItem("Orchestrateur (agents automatiques)", "Ctrl+3", page_ == 2)) page_ = 2;
+        if (ImGui::MenuItem("Designer (concevoir un projet et son équipe)", "Ctrl+4", page_ == 3)) page_ = 3;
         ImGui::Separator();
         if (ImGui::BeginMenu("Thème")) {
             const char* themes[] = {"Sombre", "Clair", "Crépuscule"};
@@ -173,11 +175,12 @@ void App::drawMenuBar() {
 
     // À droite : rappel de l'usage 5 h
     if (auto* w = usage_.find("five_hour")) {
+        const double used = w->current(util::nowUnix());
         char buf[64];
-        std::snprintf(buf, sizeof buf, "5 h : %d %%", (int)(w->utilization * 100 + 0.5));
+        std::snprintf(buf, sizeof buf, "5 h : %d %%", (int)(used * 100 + 0.5));
         float width = ImGui::GetFontSize() * 6;
         ImGui::SameLine(ImGui::GetWindowWidth() - width - 12);
-        ui::usageBar((float)w->utilization, buf, ImGui::GetTextLineHeight(), -1, "##mb5h");
+        ui::usageBar((float)used, buf, ImGui::GetTextLineHeight(), -1, "##mb5h");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Usage de la fenêtre de 5 h (détails dans le panneau Usage)");
         if (ImGui::IsItemClicked()) showUsage_ = true;
     }
@@ -304,6 +307,8 @@ void App::drawShortcutTables() {
                               {"Alt+A / Alt+T / Alt+R", "Autoriser / toujours / refuser"}});
     section("Pages", {{"Ctrl+1", "Cockpit (page principale)"},
                       {"Ctrl+2", "Tableau de bord des conversations"},
+                      {"Ctrl+3", "Orchestrateur"},
+                      {"Ctrl+4", "Designer"},
                       {"Ctrl+Maj+D", "Tableau de bord dans une fenêtre séparée"}});
     section("Application", {{"Ctrl+S", "Tout enregistrer"},
                             {"Ctrl+,", "Configuration"},

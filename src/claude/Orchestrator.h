@@ -39,8 +39,15 @@ struct HumanQuestion {
     std::vector<std::string> suggestions;  // réponses suggérées dans le texte (« réponds « … » »)
 };
 
+// @@NOUVEL_AGENT <nom> … @@FIN : le cerveau agrandit l'équipe (un nouveau thème du projet, la fiche de rôle en notes).
+struct NewAgent {
+    std::string name;
+    std::string notes;  // fiche de rôle : mission, fichiers possédés, frontières avec les autres agents
+};
+
 struct Directives {
     std::vector<Delegation> delegations;
+    std::vector<NewAgent> newAgents;
     bool finished = false;
     std::string summary;                   // @@TERMINE
     bool wait = false;                     // @@ATTENDRE : attendre les comptes rendus des agents encore au travail
@@ -49,14 +56,15 @@ struct Directives {
     bool needHuman = false;
     std::string question;                  // @@HUMAIN : texte brut complet
     std::vector<HumanQuestion> questions;  // @@HUMAIN : une entrée par bloc, options détectées
-    bool empty() const { return delegations.empty() && !finished && !needHuman && !pause; }
+    bool empty() const { return delegations.empty() && newAgents.empty() && !finished && !needHuman && !pause; }
 };
 
 // Un bloc @@HUMAIN qui n'est en réalité qu'une annonce de pause (« Orchestration en pause : quota presque épuisé…
 // Relance-moi après la réinitialisation ») : aucune question, aucun choix, et un vocabulaire de pause.
 bool looksLikePauseNotice(const std::string& body);
 
-// Analyse les blocs « @@DELEGUER <agent> [| modele=… effort=…] / @@HUMAIN / @@TERMINE / @@ATTENDRE … @@FIN ».
+// Analyse les blocs « @@DELEGUER <agent> [| modele=… effort=…] / @@NOUVEL_AGENT <nom> / @@HUMAIN / @@TERMINE /
+// @@ATTENDRE … @@FIN ».
 Directives parseDirectives(const std::string& text);
 // Sépare une question de ses options. Sont des options : les cases « - [ ] … » où qu'elles soient,
 // sinon une liste finale d'au moins deux puces / numéros de premier niveau (les sous-puces
@@ -72,7 +80,7 @@ std::string lastTurnText(const std::vector<Entry>& entries);
 
 // Découpe une réponse du cerveau pour l'affichage : texte libre et blocs de directives.
 struct TextSegment {
-    enum Kind { Text, Delegate, Human, Done, Wait, Pause } kind = Text;
+    enum Kind { Text, Delegate, Human, Done, Wait, Pause, NewAgent } kind = Text;
     std::string header;  // après le mot-clé (« 02 Build | modele=… »)
     std::string body;
 };
@@ -100,6 +108,13 @@ struct ParticipantStatus {
     double costUsd = 0;       // coût cumulé de la conversation
     double context = 0;       // occupation de la fenêtre de contexte (0..1), 0 si inconnue
     std::string lastText;     // réponse du dernier tour
+    // Économie : ce qui détermine le coût du prochain envoi (cache de prompt, taille relue à chaque appel)
+    int64_t contextTokens = 0;  // jetons du contexte au dernier appel API (0 = inconnu)
+    int64_t lastTurnAt = 0;     // fin du dernier tour (secondes Unix ; 0 = jamais) : au-delà du TTL, le cache est perdu
+    std::string model;          // modèle actuel de la conversation (alias ou identifiant ; "" = inconnu)
+    std::string effort;         // effort actuel ("" = défaut)
+    int apiCalls = 0;           // appels API cumulés (un tour d'agent = souvent des dizaines d'appels)
+    int64_t cacheReadTokens = 0, cacheWriteTokens = 0, outputTokens = 0;  // cumulés
 };
 
 struct AgentInfo {
@@ -111,6 +126,11 @@ struct SendOptions {
     std::string permissionMode;
     std::string model;   // vide = inchangé
     std::string effort;  // vide = inchangé
+    // Conversation allégée (sans liste de skills, sans sous-agents, sans serveurs MCP) : appliqué seulement à une
+    // conversation qui n'a pas encore démarré, pour ne pas invalider le cache d'une conversation en cours.
+    bool lean = false;
+    // Agent équipé du navigateur (--chrome : outils Claude in Chrome) pour vérifier visuellement des pages web.
+    bool chrome = false;
 };
 
 class OrchestratorHost {
@@ -118,7 +138,9 @@ public:
     virtual ~OrchestratorHost() = default;
     virtual std::vector<AgentInfo> agents() = 0;
     // Ouvre (ou crée) la conversation du cerveau / d'un agent ; renvoie son id ("" = échec).
-    virtual std::string openBrain(const std::string& convHint, const std::string& systemPrompt) = 0;
+    // `tools` : outils autorisés au cerveau (vide = tous).
+    virtual std::string openBrain(const std::string& convHint, const std::string& systemPrompt,
+                                  const std::vector<std::string>& tools) = 0;
     virtual std::string openAgent(const std::string& agent, const std::string& convHint) = 0;
     virtual bool ensureOpen(const std::string& convId) = 0;
     // Envoie un message (après avoir appliqué mode, modèle, effort) ; false = échec.
@@ -135,7 +157,22 @@ public:
     // cowork — notes, synthèse, récaps — y est injectée). Renvoie "" tant que le récap est en cours, puis l'id de la
     // nouvelle conversation. `agent` vide = la conversation de l'orchestrateur.
     virtual std::string rotate(const std::string& /*agent*/, const std::string& /*convId*/) { return {}; }
+    // Interrompt le tour en cours (garde-fou d'une tâche qui s'emballe).
+    virtual void interrupt(const std::string& /*convId*/) {}
+    // Fin de phase : récaps de ces conversations, SANS les fermer (mémoire cowork à jour ; une rotation ultérieure
+    // repartira d'un récap déjà prêt). L'hôte ignore celles dont le récap est à jour.
+    virtual void recapConversations(const std::vector<std::string>& /*convIds*/) {}
+    // Nouvel agent : crée le thème `name` dans le projet, avec `notes` comme notes du dossier (fiche de rôle).
+    // Renvoie le nom réellement donné au thème ("" = échec, `error` dit pourquoi).
+    virtual std::string createAgent(const std::string& /*name*/, const std::string& /*notes*/, std::string& error) {
+        error = "création d'agents non prise en charge";
+        return {};
+    }
 };
+
+// Nom d'agent proposé par le cerveau, nettoyé (décorations Markdown, caractères interdits dans un nom de dossier,
+// longueur) ; "" s'il n'en reste rien.
+std::string cleanAgentName(const std::string& name);
 
 // --- Moteur -------------------------------------------------------------------
 struct OrchestratorSettings {
@@ -145,6 +182,17 @@ struct OrchestratorSettings {
     // Comptes rendus au fil de l'eau : dès qu'un agent termine alors que d'autres travaillent encore (et qu'une place
     // se libère), le cerveau reçoit un compte rendu intermédiaire et peut relancer aussitôt les agents libres.
     bool rollingReports = true;
+    // Équipe évolutive : le cerveau peut créer un agent (@@NOUVEL_AGENT) quand un besoin durable n'est couvert par
+    // personne — un nouveau thème du projet, sa fiche de rôle en notes. Plafonné par maxAgents (0 = sans plafond).
+    bool allowNewAgents = true;
+    int maxAgents = 12;
+    // Vérification visuelle : un changement visible (interface, page, graphique) est livré avec une capture PNG
+    // (dossier _captures/ du dépôt, ignoré par git), que l'agent contrôle et que le cerveau peut ouvrir avec Read
+    // — même en lecture seule. Une image coûte ~1,5 k jetons : seulement pour les livrables visuels.
+    bool visualChecks = true;
+    // Agents équipés du navigateur (Claude in Chrome, --chrome) : ils ouvrent et inspectent les pages web (rendu,
+    // console, clics). Compatible avec les conversations allégées.
+    std::vector<std::string> browserAgents;
     std::string workerMode = "auto";   // mode de permission des agents
     std::string brainMode = "auto";    // mode de permission du cerveau
 
@@ -166,11 +214,47 @@ struct OrchestratorSettings {
     std::string brainModel;            // modèle / effort de l'orchestrateur ("" = inchangés)
     std::string brainEffort;
 
-    // Contexte : comme le reste de l'application, on allège régulièrement (récap + nouvelle conversation)
+    // Contexte : comme le reste de l'application, on allège régulièrement (récap + nouvelle conversation).
+    // Chaque appel API relit tout le contexte : une conversation de 300 k jetons coûte ~4× une de 80 k, à
+    // chaque appel, et une tâche d'agent en fait des dizaines. Les seuils sont en JETONS, pas en part de la
+    // fenêtre : avec une fenêtre de 1 M, « 45 % » laissait monter jusqu'à 450 k.
     bool contextRotation = true;
-    double rotateAtContext = 0.45;     // part de la fenêtre de contexte au-delà de laquelle on repart à neuf
+    // Fin de phase (@@TERMINE, pause de l'orchestrateur ou du budget jusqu'à la session suivante) : récaps des
+    // conversations de l'équipe, pour que la mémoire cowork suive le travail et que les rotations à la reprise
+    // (cache alors expiré) partent d'un récap prêt. Pas lors d'une pause sur le plafond du compte (quota à préserver).
+    bool recapOnPhaseEnd = true;
+    int64_t rotateAtTokens = 120000;   // contexte au-delà duquel la prochaine tâche part dans une conversation neuve
     int rotateAfterTasks = 6;          // ou après ce nombre de tâches dans la même conversation (0 = jamais)
+    // Cache de prompt : il expire (1 h sous abonnement, 5 min en API). Reprendre une grosse conversation froide
+    // réécrit TOUT son contexte au prix fort ; repartir du récap est alors bien moins cher.
+    bool rotateWhenCold = true;
+    int64_t coldRotateTokens = 80000;  // taille à partir de laquelle une conversation froide repart du récap
+    int cacheTtlMinutes = 0;           // 0 = automatique (55 min abonnement, 4 min API)
+    // Le cache est propre au modèle (et aux réglages de réflexion) : changer le modèle ou l'effort d'une grosse
+    // conversation la relit entièrement sans cache. Au-delà de ce seuil, la tâche part d'une conversation neuve.
+    bool rotateOnSwitch = true;
+    int64_t switchRotateTokens = 60000;
+
+    // Orchestrateur en lecture seule (Read, Glob, Grep) : il ne lance ni tests ni build lui-même — c'est le
+    // modèle le plus cher, et chaque sortie de commande resterait dans son contexte. Il délègue les vérifications.
+    bool brainReadOnly = true;
+    // Conversations allégées : --disable-slash-commands, --disallowedTools Agent Task, --strict-mcp-config.
+    // Mesuré sur E7 Twin : contexte fixe d'un agent 29,7 k -> 17,6 k jetons, payé à chaque appel et à chaque
+    // nouvelle conversation (rotation). Les agents n'ont besoin ni des skills, ni de sous-agents, ni des MCP.
+    bool leanAgents = true;
+    // Comptes rendus : longueur maximale transmise au cerveau par tâche (caractères)
+    int reportMaxChars = 3000;
+    // Garde-fous par tâche (0 = désactivé) : au-delà, ClaudeDesk interrompt l'agent et demande de redécouper
+    int maxCallsPerTask = 150;         // appels API pendant une seule tâche
+    int64_t taskContextLimit = 250000; // contexte atteint pendant une tâche
 };
+
+// Raison de repartir d'une conversation neuve avant d'envoyer un message ("" = inutile).
+// `ttlSeconds` : durée de vie du cache ; `nextModel` / `nextEffort` : réglages du prochain envoi ("" = inchangés).
+std::string rotationReason(const OrchestratorSettings& s, const ParticipantStatus& st, int tasksInConv, bool isBrain,
+                           int64_t now, int64_t ttlSeconds, const std::string& nextModel, const std::string& nextEffort);
+// « 120 k », « 1,2 M »
+std::string kTokens(int64_t n);
 
 enum class OrchState {
     Idle,          // jamais lancé
@@ -202,6 +286,12 @@ struct OrchTask {
     int cycle = 0;
     int turnsAtSend = 0;
     double costAtSend = 0;
+    // Mesures de la tâche (deltas de la conversation entre l'envoi et la fin)
+    int callsAtSend = 0;
+    int64_t readAtSend = 0, writeAtSend = 0, outAtSend = 0;
+    int calls = 0;
+    int64_t cacheRead = 0, cacheWrite = 0, output = 0, contextEnd = 0;
+    std::string guardNote;      // garde-fou déclenché (tâche interrompue) : pourquoi
     bool sent = false, done = false, failed = false, notifiedHuman = false;
     bool reported = false;      // compte rendu transmis au cerveau
     std::string report;
@@ -249,6 +339,12 @@ public:
     std::vector<HumanQuestion> questions;          // questions en attente (structurées)
     int questionSeq = 0;                           // change à chaque nouvelle question
     std::deque<QaEntry> qaHistory;                 // questions posées et vos réponses
+    // Nouveaux agents proposés par le cerveau, en attente de l'accord de l'humain (une question chacun, après celles
+    // du cerveau). Rien n'est créé sans réponse « Créer ».
+    std::vector<NewAgent> pendingAgents;
+    static std::string agentAcceptLabel(const std::string& name);  // « Créer l'agent « X » »
+    static std::string agentRefuseLabel(const std::string& name);  // « Ne pas créer « X » »
+    static HumanQuestion agentQuestion(const NewAgent& a);
     // Pause décidée par l'orchestrateur (@@PAUSE) : son message, et la réinitialisation de la fenêtre de 5 h
     // attendue pour reprendre seul (0 = inconnue : reprise manuelle, ou dès qu'elle est connue).
     std::string pauseNote;
@@ -264,6 +360,9 @@ public:
     void tick(OrchestratorHost& h);
     // Réponse de l'utilisateur à une question @@HUMAIN (envoyée au cerveau).
     bool answerHuman(OrchestratorHost& h, const std::string& answer);
+    // Une conversation a été remplacée par une neuve (« Repartir du récap », rotation de contexte) : le cerveau
+    // ou l'agent concerné suit la nouvelle ; un cerveau neuf recevra le rappel de l'objectif à son prochain message.
+    void conversationReplaced(const std::string& oldId, const std::string& newId);
 
     bool running() const;  // Thinking / Working / WaitingHuman / UsagePause
     OrchState resumeState() const { return resumeState_; }
@@ -275,7 +374,12 @@ public:
     std::string budgetLabel() const;  // « 12 % / 40 % de la fenêtre 5 h » ou « 3,20 $ / 25,00 $ »
     static bool resolveSubscription(const OrchestratorSettings& s, bool hostSubscription);
 
-    static std::string systemPrompt();
+    static std::string systemPrompt(bool brainReadOnly = true, bool canCreateAgents = false, bool visualChecks = false);
+    std::string brainPrompt() const;  // systemPrompt(…) + agents équipés du navigateur
+    bool isBrowserAgent(const std::string& agent) const;
+    // Outils du cerveau selon les réglages (vide = tous).
+    std::vector<std::string> brainTools() const;
+    int64_t cacheTtlSeconds() const;
     std::string firstMessage(const std::vector<AgentInfo>& agents, const std::string& planName = {}) const;
 
     nlohmann::json toJson() const;
@@ -287,6 +391,9 @@ private:
     void handleBrainAnswer(OrchestratorHost& h, const std::string& text);
     void tickThinking(OrchestratorHost& h);
     void tickWorking(OrchestratorHost& h);
+    void tickFinished(OrchestratorHost& h);   // discussion après la fin : une question ou une délégation la relance
+    // Réponse du cerveau à un message direct de l'humain (équipe au travail) : appliquée si elle contient des directives.
+    bool brainChatReply(OrchestratorHost& h);
     void collectTasks(OrchestratorHost& h);   // relève les tâches terminées (quel que soit l'état du cerveau)
     void reviveTasks(OrchestratorHost& h);    // rouvre les conversations des tâches en vol ; renvoie celles interrompues
     bool sendReport(OrchestratorHost& h, bool partial);
@@ -304,6 +411,18 @@ private:
     std::string buildReport(bool partial, int64_t now) const;
     std::string progressSection(int64_t now) const;
     void markReported();
+    // @@NOUVEL_AGENT : les propositions valables deviennent des questions pour l'humain (pendingAgents) ; les autres
+    // (création désactivée, plafond, nom déjà pris, fiche vide) sont refusées d'office, motif dans teamNotes_.
+    std::vector<HumanQuestion> proposeAgents(OrchestratorHost& h, const std::vector<NewAgent>& list);
+    // Réponse de l'humain : crée les agents acceptés ; renvoie la décision pour chaque proposition (pour le cerveau).
+    std::string resolveAgentProposals(OrchestratorHost& h, const std::string& answer);
+    void askHuman(OrchestratorHost& h, const std::string& rawQuestion, const std::vector<HumanQuestion>& qs,
+                  const std::string& logExtra);
+    // Crée les tâches d'un nouveau cycle et les envoie ; `reportFailures` : si aucune n'est valable et que personne ne
+    // travaille, le compte rendu des échecs part aussitôt (sinon au prochain message au cerveau).
+    void delegate(OrchestratorHost& h, const std::vector<Delegation>& dels, bool reportFailures);
+    void recapTeam(OrchestratorHost& h, const std::string& why);  // fin de phase (voir recapOnPhaseEnd)
+    std::vector<std::string> teamNotes_;  // propositions refusées d'office, pas encore transmises au cerveau
     void addLog(OrchestratorHost* h, const std::string& text, bool important = false);
     void pauseFrom(OrchState from, const std::string& reason, OrchestratorHost* h);
     void budgetPause(OrchestratorHost& h);
@@ -312,6 +431,9 @@ private:
 
     OrchState resumeState_ = OrchState::Idle;
     int brainTurnsAtSend_ = 0;
+    // Dernier tour du cerveau déjà lu (directives appliquées ou simple discussion). -1 : à resynchroniser sans relire
+    // (fichier d'une version précédente, conversation remplacée).
+    int brainSeenTurns_ = -1;
     double brainCostAtSend_ = 0;
     std::string lastBrainMessage_;
     int nudges_ = 0;
@@ -321,8 +443,12 @@ private:
     double lastActiveAt_ = -1e18;  // dernier instant où l'orchestrateur ou un agent travaillait
     int64_t windowResetsAt_ = 0;
     std::map<std::string, int> convTasks_;  // tâches confiées par conversation (rotation)
-    bool needsRotation(const ParticipantStatus& st, const std::string& convId) const;
+    std::string rotationReasonFor(const ParticipantStatus& st, const std::string& convId, int64_t now,
+                                  const std::string& nextModel, const std::string& nextEffort) const;
+    bool brainRotating_ = false;             // récap du cerveau en cours : le message attend dans pendingBrain_
+    std::string pendingBrain_;
     std::string brainRefresher() const;      // rappel de l'objectif et de l'équipe pour un cerveau tout neuf
+    bool brainRefresh_ = false;              // cerveau neuf : son prochain message commence par brainRefresher()
     bool reviveOnTick_ = false;              // rechargée avec une question en attente et des tâches en vol
     double allowanceOverride_ = -1;  // limite figée par « Relancer le budget » (-1 : calcul normal)
     double overrideShare_ = -1;      // niveau en vigueur lors de la relance (un autre niveau annule la limite figée)

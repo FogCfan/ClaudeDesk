@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 
 #include "util/Strings.h"
@@ -129,6 +130,11 @@ int indentOf(const std::string& line) {
         else break;
     }
     return n;
+}
+
+// Une réponse du cerveau qui change la suite (sinon : simple discussion avec l'humain).
+bool hasDirectives(const Directives& d) {
+    return !d.delegations.empty() || !d.newAgents.empty() || d.needHuman || d.finished || d.pause;
 }
 
 // « - [ ] x », « - [x] x », « [ ] x » : choix explicite.
@@ -282,10 +288,42 @@ std::vector<HumanQuestion> splitQuestions(const std::string& body) {
     return {splitQuestion(body)};
 }
 
+namespace {
+// « @@NOUVEL_AGENT », « @@NOUVEL AGENT », « @@CRÉER_AGENT »…
+bool newAgentKey(const std::string& k) { return util::startsWith(k, "@@nouvel") || util::startsWith(k, "@@creer"); }
+// Nom après le mot-clé ; « @@NOUVEL AGENT 09 Interface » laisse « AGENT 09 Interface » : on retire « agent ».
+std::string newAgentName(const std::string& line) {
+    std::string n = afterKeyword(line);
+    if (util::startsWith(normKey(n), "agent ") || util::startsWith(normKey(n), "agent:")) n = util::trim(n.substr(6));
+    size_t bar = n.find('|');
+    if (bar != std::string::npos) n = n.substr(0, bar);
+    return cleanAgentName(n);
+}
+}  // namespace
+
+std::string cleanAgentName(const std::string& name) {
+    std::string s = util::trim(name);
+    while (!s.empty() && (s.back() == '.' || s.back() == ' ')) s.pop_back();  // « `Nom`. » : ponctuation de phrase
+    s = cleanName(s);
+    std::string out;
+    for (char c : s) {
+        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' ||
+            (unsigned char)c < 0x20)
+            c = ' ';
+        if (c == ' ' && (out.empty() || out.back() == ' ')) continue;
+        out += c;
+    }
+    out = util::trim(out);
+    while (!out.empty() && (out.back() == '.' || out.back() == ' ')) out.pop_back();  // interdit en fin de nom (Windows)
+    if (out.size() > 60) out = util::trim(util::truncateUtf8(out, 60));
+    return out;
+}
+
 Directives parseDirectives(const std::string& text) {
     Directives d;
-    enum class Mode { None, Delegate, Human, Done, Wait, Pause } mode = Mode::None;
+    enum class Mode { None, Delegate, Human, Done, Wait, Pause, NewAgent } mode = Mode::None;
     Delegation cur;
+    std::string newName;
     std::string body;
     auto flush = [&] {
         std::string b = util::trim(body);
@@ -295,6 +333,9 @@ Directives parseDirectives(const std::string& text) {
                     cur.task = b;
                     d.delegations.push_back(cur);
                 }
+                break;
+            case Mode::NewAgent:
+                if (!newName.empty()) d.newAgents.push_back({newName, b});
                 break;
             case Mode::Pause:
                 d.pause = true;
@@ -319,6 +360,7 @@ Directives parseDirectives(const std::string& text) {
         }
         mode = Mode::None;
         cur = Delegation{};
+        newName.clear();
         body.clear();
     };
     for (const std::string& raw : util::splitLines(text)) {
@@ -335,6 +377,12 @@ Directives parseDirectives(const std::string& text) {
                 flush();
                 mode = Mode::Delegate;
                 parseDelegationHeader(afterKeyword(t), cur);
+                continue;
+            }
+            if (newAgentKey(k)) {
+                flush();
+                mode = Mode::NewAgent;
+                newName = newAgentName(t);
                 continue;
             }
             if (util::startsWith(k, "@@humain")) {
@@ -445,6 +493,7 @@ std::vector<TextSegment> splitDirectiveSegments(const std::string& text) {
                 continue;
             }
             if (util::startsWith(k, "@@deleguer")) kind = TextSegment::Delegate;
+            else if (newAgentKey(k)) kind = TextSegment::NewAgent;
             else if (util::startsWith(k, "@@humain")) kind = TextSegment::Human;
             else if (util::startsWith(k, "@@termine")) kind = TextSegment::Done;
             else if (util::startsWith(k, "@@attendre")) kind = TextSegment::Wait;
@@ -517,6 +566,47 @@ std::string clampEffort(const std::string& requested, const std::string& maxEffo
     int m = effortRank(maxEffort);
     if (m > 0 && r > m) return maxEffort;
     return requested;
+}
+
+// ---------------------------------------------------------------------------
+// Économie de contexte et de cache
+// ---------------------------------------------------------------------------
+
+std::string kTokens(int64_t n) {
+    char buf[32];
+    if (n < 1000) std::snprintf(buf, sizeof buf, "%lld", (long long)n);
+    else if (n < 1000000) std::snprintf(buf, sizeof buf, "%lld k", (long long)((n + 500) / 1000));
+    else {
+        std::snprintf(buf, sizeof buf, "%.1f M", n / 1e6);
+        for (char* c = buf; *c; ++c)
+            if (*c == '.') *c = ',';
+    }
+    return buf;
+}
+
+std::string rotationReason(const OrchestratorSettings& s, const ParticipantStatus& st, int tasksInConv, bool isBrain,
+                           int64_t now, int64_t ttlSeconds, const std::string& nextModel, const std::string& nextEffort) {
+    if (!s.contextRotation) return {};
+    const int64_t ctx = st.contextTokens;
+    if (s.rotateAtTokens > 0 && ctx >= s.rotateAtTokens)
+        return "contexte de " + kTokens(ctx) + " (seuil " + kTokens(s.rotateAtTokens) + ")";
+    if (!isBrain && s.rotateAfterTasks > 0 && tasksInConv >= s.rotateAfterTasks)
+        return std::to_string(tasksInConv) + " tâches dans la même conversation";
+    // Conversation froide : son cache a expiré, le prochain appel réécrirait tout le contexte.
+    if (s.rotateWhenCold && ttlSeconds > 0 && st.lastTurnAt > 0 && ctx >= s.coldRotateTokens &&
+        now - st.lastTurnAt >= ttlSeconds)
+        return "cache expiré (inactive depuis " + util::humanDuration(now - st.lastTurnAt) + ", " + kTokens(ctx) +
+               " à réécrire)";
+    // Changement de modèle ou d'effort : le cache ne sert plus.
+    if (s.rotateOnSwitch && ctx >= s.switchRotateTokens) {
+        int from = modelTier(st.model), to = modelTier(nextModel);
+        if (!nextModel.empty() && from > 0 && to > 0 && from != to)
+            return "changement de modèle (" + st.model + " → " + nextModel + ") sur " + kTokens(ctx) +
+                   " de contexte : le cache est propre au modèle";
+        if (!nextEffort.empty() && nextEffort != st.effort && !st.effort.empty())
+            return "changement d'effort (" + st.effort + " → " + nextEffort + ") sur " + kTokens(ctx) + " de contexte";
+    }
+    return {};
 }
 
 const char* orchStateLabel(OrchState s) {
@@ -783,12 +873,50 @@ std::string Orchestrator::budgetNotes() const {
 // Messages
 // ---------------------------------------------------------------------------
 
-std::string Orchestrator::systemPrompt() {
-    return R"(# Rôle : ORCHESTRATEUR (piloté par ClaudeDesk)
-Tu coordonnes des agents spécialisés. Chaque agent est une conversation Claude Code distincte, dans le même dépôt, avec son propre rôle (décrit dans les notes de son dossier). Tu ne développes pas toi-même : tu planifies, tu délègues, tu vérifies et tu décides de la suite. Tu peux lire le dépôt et lancer des commandes de vérification (tests, build) pour contrôler le travail rapporté.
+std::vector<std::string> Orchestrator::brainTools() const {
+    if (settings.brainReadOnly) return {"Read", "Glob", "Grep"};
+    return {};
+}
+
+int64_t Orchestrator::cacheTtlSeconds() const {
+    if (settings.cacheTtlMinutes > 0) return (int64_t)settings.cacheTtlMinutes * 60;
+    return subscription ? 55 * 60 : 4 * 60;
+}
+
+std::string Orchestrator::brainPrompt() const {
+    std::string p = systemPrompt(settings.brainReadOnly, settings.allowNewAgents, settings.visualChecks);
+    if (!settings.browserAgents.empty()) {
+        p += "\n\n## Agents équipés du navigateur (🌐)\n";
+        for (auto& a : settings.browserAgents) p += "- " + a + "\n";
+        p += "Eux seuls peuvent ouvrir une page web dans Chrome (rendu, clics, console, captures).";
+    }
+    return p;
+}
+
+bool Orchestrator::isBrowserAgent(const std::string& agent) const {
+    return std::find(settings.browserAgents.begin(), settings.browserAgents.end(), agent) != settings.browserAgents.end();
+}
+
+std::string Orchestrator::systemPrompt(bool brainReadOnly, bool canCreateAgents, bool visualChecks) {
+    std::string role = brainReadOnly
+        ? "Tu ne développes pas toi-même : tu planifies, tu délègues, tu contrôles et tu décides de la suite. Tes outils sont en "
+          "LECTURE SEULE (Read, Glob, Grep) : tu ne lances ni tests, ni build, ni commandes. Pour exécuter une vérification, "
+          "confie-la à un agent (souvent haiku, effort low : « lance X, rends le résultat en 5 lignes »), ou exige dans la "
+          "tâche elle-même la preuve (commande lancée + résultat résumé)."
+        : "Tu ne développes pas toi-même : tu planifies, tu délègues, tu vérifies et tu décides de la suite. Tu peux lire le "
+          "dépôt et lancer des commandes de vérification (tests, build) pour contrôler le travail rapporté — avec parcimonie : "
+          "tu es le modèle le plus coûteux et chaque sortie reste dans ton contexte.";
+    std::string verify = brainReadOnly
+        ? "- ClaudeDesk te transmet les comptes rendus des agents (au fil de l'eau, puis quand toute l'équipe a fini). Contrôle-les "
+          "(lis au besoin les fichiers clés, partiellement) avant de considérer une étape comme faite ; s'il manque une preuve, "
+          "délègue une vérification courte ou renvoie une correction."
+        : "- ClaudeDesk te transmet les comptes rendus des agents (au fil de l'eau, puis quand toute l'équipe a fini). Vérifie "
+          "l'essentiel avant de considérer une étape comme faite ; renvoie une correction si besoin.";
+    std::string p = R"(# Rôle : ORCHESTRATEUR (piloté par ClaudeDesk)
+Tu coordonnes des agents spécialisés. Chaque agent est une conversation Claude Code distincte, dans le même dépôt, avec son propre rôle (décrit dans les notes de son dossier). @@ROLE@@
 
 ## Protocole (obligatoire)
-Termine CHAQUE réponse par un ou plusieurs blocs de directives, chaque marqueur seul sur sa ligne :
+Termine CHAQUE réponse à un message de ClaudeDesk par un ou plusieurs blocs de directives, chaque marqueur seul sur sa ligne :
 
 @@DELEGUER <nom exact de l'agent> | modele=<haiku|sonnet|opus|fable> effort=<low|medium|high|xhigh|max>
 <tâche précise, autonome et vérifiable : contexte utile, fichiers concernés, critère de fin>
@@ -816,6 +944,16 @@ Termine CHAQUE réponse par un ou plusieurs blocs de directives, chaque marqueur
 seul à la prochaine session de 5 h, avec ce message. N'utilise JAMAIS @@HUMAIN pour annoncer une pause : @@HUMAIN est
 réservé aux vraies questions.)
 
+## Quand l'humain t'écrit directement
+Les messages de ClaudeDesk commencent par un titre « # … » (Objectif, Comptes rendus, Compte rendu intermédiaire,
+Réponse de l'humain, Reprise…) ou par une note en italique « _(…)_ ». Tout autre message vient de l'humain, qui discute
+avec toi (une question, une explication, comment utiliser ce qui a été livré…). Réponds-lui alors comme dans une
+conversation normale : directement, sans section de bilan, sans récapitulatif de l'équipe, sans liste d'« actions
+prévues » ni « aucune action ». N'ajoute une directive que si ta réponse change vraiment la suite : confier un travail
+(@@DELEGUER), lui poser une décision à trancher (@@HUMAIN), conclure (@@TERMINE). Sans directive, l'orchestration
+reste dans son état : l'équipe continue, une question en attente reste posée, une orchestration terminée le reste.
+Si son message tranche une question en attente, donne en revanche tes directives pour la suite.
+
 ## Travail au fil de l'eau
 Tu n'attends pas la fin de toute l'équipe : dès qu'un agent termine alors que d'autres travaillent encore, ClaudeDesk
 t'envoie un **compte rendu intermédiaire** (ce qui vient de finir + qui travaille encore). Vérifie si besoin, puis :
@@ -839,24 +977,69 @@ tâches d'un projet ne demandent pas le modèle le plus puissant :
 Les modèles autorisés et le budget rappelés par ClaudeDesk sont des limites, pas des consignes d'utilisation ; plus la
 fin du budget approche, plus tu économises.
 
+## Économie de contexte (ce qui coûte vraiment)
+Chaque appel d'outil d'un agent relit TOUT son contexte : une tâche de 100 appels sur 200 k jetons coûte bien plus que
+trois tâches nettes de 30 appels. ClaudeDesk indique sous chaque compte rendu les appels et le contexte consommés.
+- Des tâches ciblées : donne les chemins de fichiers et le critère de fin, pour que l'agent n'explore pas tout le dépôt.
+  Une tâche qui dépasse ~60 appels est trop grosse : redécoupe la suite.
+- Garde le même modèle pour un agent quand c'est possible : changer le modèle (ou l'effort) d'une conversation déjà
+  chargée oblige ClaudeDesk à repartir d'une conversation neuve (récap), le cache étant propre au modèle. Regroupe les
+  petites tâches mécaniques sur un agent déjà réglé sur haiku plutôt que de basculer un agent sonnet très chargé.
+- Les comptes rendus doivent rester courts ; ne demande jamais de recopier des journaux ou des fichiers entiers.
+
 ## Questions à l'humain
 Une seule question par bloc @@HUMAIN ; pour plusieurs questions, écris plusieurs blocs. ClaudeDesk les affiche dans un formulaire :
 - si la réponse est un choix, termine le bloc par la liste des options, une par ligne au format « - [ ] option » : l'humain pourra cliquer ; mets en premier celle que tu recommandes, suivie de « (recommandé) » ;
 - tout le contexte se place AVANT les options, en phrases ou en sous-puces indentées (les puces de premier niveau en fin de bloc sont lues comme des choix).
 
+@@TEAM@@
+
 ## Règles
 - Plusieurs @@DELEGUER vers des agents différents s'exécutent en parallèle : ne parallélise que des tâches indépendantes. Un agent ne reçoit qu'une tâche à la fois.
 - L'agent ne voit PAS cette conversation : donne-lui tout le contexte nécessaire dans la tâche.
-- ClaudeDesk te transmet les comptes rendus des agents (au fil de l'eau, puis quand toute l'équipe a fini). Vérifie (lis les fichiers, lance les tests) avant de considérer une étape comme faite ; renvoie une correction si besoin.
+@@VERIFY@@
 - Découpe en étapes de taille raisonnable : une tâche ≈ un livrable vérifiable.
 - @@HUMAIN pour : décision majeure non tranchée, information manquante, action irréversible ou externe (commit, push, publication, achat, matériel physique). Ne demande jamais de commit ou de push aux agents.
 - @@TERMINE seulement quand l'objectif est atteint et vérifié, ou quand ClaudeDesk annonce le budget épuisé.
-- Sans directive, l'orchestration ne peut pas avancer.)";
+- En réponse à ClaudeDesk, sans directive, l'orchestration ne peut pas avancer.)";
+    std::string team = canCreateAgents
+        ? R"(## Faire évoluer l'équipe
+Si un besoin DURABLE apparaît qu'aucun agent ne couvre (un nouveau sous-système, une application distincte comme une
+interface graphique…), propose un nouvel agent :
+
+@@NOUVEL_AGENT <nom du thème, selon la convention de l'équipe (ex. « 09 Interface »)>
+Pourquoi : <le besoin, pourquoi aucun agent actuel ne le couvre, ce que ce nouvel agent apportera au projet>
+<fiche de rôle : mission, fichiers et dossiers possédés, frontières avec les autres agents, conventions, vérifications attendues>
+@@FIN
+
+- ClaudeDesk soumet TOUJOURS la proposition à l'humain, avec ta fiche : il accepte, refuse ou apporte des précisions.
+  Rien n'est créé sans son accord ; inutile d'ajouter un @@HUMAIN pour demander la permission.
+- Commence par « Pourquoi : » : c'est ce que l'humain lira pour décider. La fiche devient ensuite les notes du thème,
+  relues par l'agent à chaque tâche : écris-la pour lui, autonome et précise.
+- Ne confie aucune tâche au nouvel agent avant la décision : ClaudeDesk te la transmettra (créé, refusé, ou précisions :
+  révise alors ta proposition et soumets-la de nouveau). Les autres agents peuvent continuer pendant ce temps.
+- Une tâche ponctuelle ne justifie pas un agent : confie-la à l'agent le plus proche. Chaque agent ajoute un contexte
+  fixe et de la coordination.
+- Si le dépôt tient des fiches d'agents (ex. docs/agents/), fais-y ajouter la sienne une fois l'agent créé.)"
+        : "## Équipe\nL'équipe est fixée par l'humain : tu ne peux pas créer d'agent. Si un besoin durable n'est couvert par "
+          "aucun agent, signale-le (@@HUMAIN) en proposant le rôle à créer.";
+    if (visualChecks)
+        verify += "\n- Vérification VISUELLE : pour tout livrable visible (interface, page web, graphique, rendu), exige dans la "
+                  "tâche une capture PNG enregistrée dans `_captures/` à la racine du dépôt, que l'agent examine lui-même et "
+                  "dont il donne le chemin. Tu peux ouvrir une capture avec Read (les images s'affichent) pour juger "
+                  "toi-même : ~1,5 k jetons par image, réserve-le aux livrables visuels importants ou douteux. Pour une page "
+                  "web, confie la vérification à un agent équipé du navigateur (repéré « 🌐 navigateur » dans la liste des "
+                  "agents) : il peut l'ouvrir, cliquer, lire la console et faire la capture.";
+    util::replaceAll(p, "@@ROLE@@", role);
+    util::replaceAll(p, "@@VERIFY@@", verify);
+    util::replaceAll(p, "@@TEAM@@", team);
+    return p;
 }
 
 std::string Orchestrator::firstMessage(const std::vector<AgentInfo>& agents, const std::string& planName) const {
     std::string m = "# Objectif\n" + util::trim(settings.objective) + "\n\n# Agents disponibles\n";
-    for (auto& a : agents) m += "- **" + a.name + "**" + (a.brief.empty() ? "" : " — " + a.brief) + "\n";
+    for (auto& a : agents)
+        m += "- **" + a.name + "**" + (isBrowserAgent(a.name) ? " 🌐 navigateur" : "") + (a.brief.empty() ? "" : " — " + a.brief) + "\n";
     m += "\n# Moyens\n";
     if (subscription)
         m += "Compte avec abonnement" + (planName.empty() ? std::string() : " (" + planName + ")") +
@@ -866,17 +1049,34 @@ std::string Orchestrator::firstMessage(const std::vector<AgentInfo>& agents, con
     m += budgetNotes() + "\n";
     if (settings.strictBudget && budgetFraction() >= 0)
         m += "Le résultat doit tenir dans ce budget : planifie en conséquence (l'essentiel d'abord).\n";
-    m += "Jusqu'à " + std::to_string(std::max(1, settings.maxParallel)) + " agents travaillent en parallèle.\n\n";
-    m += "Utilise exactement les noms ci-dessus dans @@DELEGUER. Commence par examiner l'état du dépôt (plan, "
+    m += "Jusqu'à " + std::to_string(std::max(1, settings.maxParallel)) + " agents travaillent en parallèle.\n";
+    if (settings.allowNewAgents)
+        m += "Équipe de " + std::to_string(agents.size()) + " agents" +
+             (settings.maxAgents > 0 ? " (au plus " + std::to_string(settings.maxAgents) + ")" : std::string()) +
+             " : tu peux proposer un nouvel agent (@@NOUVEL_AGENT), soumis à l'accord de l'humain.\n";
+    m += "\nUtilise exactement les noms ci-dessus dans @@DELEGUER. Commence par examiner l'état du dépôt (plan, "
          "documentation, code existant), puis donne tes premières directives.";
     return m;
 }
 
-static std::string taskMessage(const OrchTask& t) {
+static std::string taskMessage(const OrchTask& t, bool visualChecks, bool browser) {
+    std::string visual;
+    if (visualChecks)
+        visual = "Si la tâche change quelque chose de visible (interface, page, graphique), fais-en une capture PNG dans "
+                 "`_captures/` à la racine du dépôt (crée le dossier au besoin, avec un `.gitignore` contenant `*`), "
+                 "nommée d'après la tâche ; examine-la toi-même avec Read et donne son chemin dans **Vérifié**. " +
+                 std::string(browser ? "Tu disposes du navigateur (outils Claude in Chrome) : pour une page web, ouvre-la, "
+                                       "vérifie le rendu et la console, puis capture-la.\n"
+                                     : "Utilise l'option de capture du projet s'il en a une.\n");
     return "[Tâche de l'orchestrateur — cycle " + std::to_string(t.cycle) + "]\n\n" + t.task +
            "\n\n---\nTravaille en autonomie jusqu'au bout de cette tâche (pas de question à l'humain sauf décision "
-           "irréversible ; ni commit ni push). Termine ta réponse par un compte rendu court : **Fait**, **Vérifié** "
-           "(comment), **Reste / bloquant**.";
+           "irréversible ; ni commit ni push).\n"
+           "Économise ton contexte (chaque appel d'outil relit toute la conversation) : limite les sorties de commandes "
+           "(`| tail -n 30`, `grep`, options silencieuses), lis les fichiers par parties utiles, évite les boucles d'essais "
+           "à l'aveugle. Si la tâche s'avère bien plus grosse que prévu, livre une étape propre et arrête-toi : "
+           "l'orchestrateur redécoupera la suite.\n" + visual +
+           "Termine par un compte rendu de 15 lignes au plus, sans journaux ni code recopiés : **Fait**, **Vérifié** "
+           "(commande + résultat en une ligne), **Fichiers**, **Reste / bloquant**.";
 }
 
 int Orchestrator::tasksInFlight() const {
@@ -889,6 +1089,7 @@ int Orchestrator::tasksInFlight() const {
 void Orchestrator::markReported() {
     for (auto& t : tasks)
         if (t.done) t.reported = true;
+    teamNotes_.clear();
     changed = true;
 }
 
@@ -899,14 +1100,33 @@ std::string Orchestrator::progressSection(int64_t now) const {
     for (auto& t : tasks) {
         if (!t.done || t.reported) continue;
         any = true;
-        r += "## " + t.agent + (t.failed ? " — ÉCHEC" : " — terminé");
+        r += "## " + t.agent + (t.failed ? " — ÉCHEC" : !t.guardNote.empty() ? " — INTERROMPUE" : " — terminé");
         if (!t.model.empty() || !t.effort.empty())
             r += " (" + (t.model.empty() ? std::string("modèle par défaut") : t.model) +
                  (t.effort.empty() ? "" : ", effort " + t.effort) + ")";
-        r += "\n**Tâche :** " + util::firstLine(t.task, 200) + "\n\n";
+        r += "\n**Tâche :** " + util::firstLine(t.task, 200) + "\n";
+        if (t.calls > 0)
+            r += "_Coût : " + std::to_string(t.calls) + " appels · contexte final " + kTokens(t.contextEnd) + " · " +
+                 kTokens(t.cacheRead) + " relus en cache · " + kTokens(t.cacheWrite) + " écrits_\n";
+        if (!t.guardNote.empty())
+            r += "**⚠ Interrompue par ClaudeDesk : " + t.guardNote +
+                 ".** Le travail est partiel : vérifie l'état, puis confie la suite en tâches plus petites et plus ciblées.\n";
+        r += "\n";
         std::string rep = util::trim(t.report).empty() ? "(aucun texte rendu)" : t.report;
-        if (rep.size() > 8000) rep = util::truncateUtf8(rep, 8000) + "\n(… compte rendu tronqué)";
+        size_t cap = (size_t)std::max(500, settings.reportMaxChars);
+        if (rep.size() > cap) {
+            // Le compte rendu structuré est à la fin du tour : on garde la fin (UTF-8 respecté).
+            size_t cut = rep.size() - cap;
+            while (cut < rep.size() && ((unsigned char)rep[cut] & 0xC0) == 0x80) ++cut;
+            rep = "(… début omis — texte complet dans la conversation de l'agent)\n" + rep.substr(cut);
+        }
         r += rep + "\n\n";
+    }
+    if (!teamNotes_.empty()) {
+        any = true;
+        r += "## Équipe\n";
+        for (auto& n : teamNotes_) r += "- " + n + "\n";
+        r += "\n";
     }
     if (!any) r += "_(Aucun nouveau compte rendu depuis le précédent.)_\n\n";
     // Délégations sans modèle : le défaut a servi partout. Rappel pour que le cerveau optimise.
@@ -974,6 +1194,7 @@ void Orchestrator::budgetPause(OrchestratorHost& h) {
         pauseReason = "budget de cette session atteint (" + budgetLabel() + ") : reprise automatique à la prochaine session de 5 h";
         changed = true;
         addLog(&h, "Pause : " + pauseReason, true);
+        recapTeam(h, "pause du budget");
         return;
     }
     pauseFrom(state, "budget épuisé (" + budgetLabel() + ") — augmentez-le puis reprenez", &h);
@@ -998,6 +1219,24 @@ void Orchestrator::brainPause(OrchestratorHost& h, const std::string& note) {
                         "cliquez sur Reprendre)";
     changed = true;
     addLog(&h, "⏸ L'orchestrateur se met en pause : " + util::firstLine(pauseNote, 150), true);
+    recapTeam(h, "pause");
+}
+
+void Orchestrator::recapTeam(OrchestratorHost& h, const std::string& why) {
+    if (!settings.recapOnPhaseEnd) return;
+    std::vector<std::string> ids;
+    auto add = [&](const std::string& id) {
+        if (id.empty() || std::find(ids.begin(), ids.end(), id) != ids.end()) return;
+        ParticipantStatus st = h.status(id);
+        if (st.busy) return;  // encore au travail : son récap se fera à sa prochaine rotation
+        ids.push_back(id);
+    };
+    add(brainConvId);
+    for (auto& [agent, id] : agentConv) add(id);
+    if (ids.empty()) return;
+    addLog(&h, "Fin de phase (" + why + ") : récaps de l'équipe pour la mémoire du projet (" + std::to_string(ids.size()) +
+                   " conversation(s), celles déjà à jour sont ignorées).");
+    h.recapConversations(ids);
 }
 
 std::string Orchestrator::resumeAfterPauseMessage() const {
@@ -1038,15 +1277,19 @@ bool Orchestrator::start(OrchestratorHost& h) {
     finalSummary.clear();
     humanQuestion.clear();
     questions.clear();
+    pendingAgents.clear();
+    teamNotes_.clear();
     pauseReason.clear();
     pauseNote.clear();
     pauseUntil = 0;
     nudges_ = 0;
     finalRequested_ = false;
+    brainRotating_ = false;
+    pendingBrain_.clear();
     subscription = resolveSubscription(settings, h.isSubscription());
     lastFiveHour_ = h.utilization("five_hour");
     if (lastFiveHour_ >= 0) beginWindow(lastFiveHour_);
-    std::string id = h.openBrain(brainConvId, systemPrompt());
+    std::string id = h.openBrain(brainConvId, brainPrompt(), brainTools());
     if (id.empty()) {
         addLog(&h, "Impossible d'ouvrir la conversation de l'orchestrateur.", true);
         return false;
@@ -1070,14 +1313,42 @@ bool Orchestrator::start(OrchestratorHost& h) {
     return sendBrain(h, first);
 }
 
-bool Orchestrator::sendBrain(OrchestratorHost& h, const std::string& text) {
+bool Orchestrator::sendBrain(OrchestratorHost& h, const std::string& msg) {
+    SendOptions opt{settings.brainMode, clampModel(settings.brainModel, settings.allowedModels),
+                    clampEffort(settings.brainEffort, settings.maxEffort), settings.leanAgents};
+    // Avant d'écrire au cerveau : s'il est trop chargé, ou froid (cache expiré pendant que l'équipe travaillait ou
+    // pendant une pause), il repart d'une conversation neuve — le message attend la fin du récap (voir tick).
+    // Réglages du cerveau (prompt, outils en lecture seule) tenus à jour : sans effet s'ils n'ont pas changé.
+    if (!brainConvId.empty() && h.ensureOpen(brainConvId))
+        h.openBrain(brainConvId, brainPrompt(), brainTools());
     ParticipantStatus st = h.status(brainConvId);
+    if (!st.busy) {
+        std::string why = rotationReasonFor(st, brainConvId, h.now(), opt.model, opt.effort);
+        if (!why.empty()) {
+            std::string nid = h.rotate("", brainConvId);
+            if (nid.empty()) {
+                if (!brainRotating_) addLog(&h, "↻ Orchestrateur : récap avant de repartir à neuf — " + why + ".", true);
+                brainRotating_ = true;
+                pendingBrain_ = msg;
+                lastBrainMessage_ = msg;  // rechargé en pause : resume() le renverra
+                brainTurnsAtSend_ = st.turns;
+                state = OrchState::Thinking;
+                changed = true;
+                return true;
+            }
+            addLog(&h, "↻ Orchestrateur : contexte allégé (récap + nouvelle conversation) — " + why + ".", true);
+            conversationReplaced(brainConvId, nid);
+            st = h.status(brainConvId);
+        }
+    }
+    brainRotating_ = false;
+    pendingBrain_.clear();
+    std::string text = brainRefresh_ ? brainRefresher() + msg : msg;
+    brainRefresh_ = false;
     brainTurnsAtSend_ = st.turns;
     brainCostAtSend_ = st.costUsd;
     lastBrainMessage_ = text;
     brainHumanNotified_ = false;
-    SendOptions opt{settings.brainMode, clampModel(settings.brainModel, settings.allowedModels),
-                    clampEffort(settings.brainEffort, settings.maxEffort)};
     if (!h.send(brainConvId, text, opt)) {
         pauseFrom(OrchState::Thinking, "envoi impossible à l'orchestrateur (Claude Code introuvable ?)", &h);
         return false;
@@ -1093,14 +1364,17 @@ bool Orchestrator::answerHuman(OrchestratorHost& h, const std::string& answer) {
     h.ensureOpen(brainConvId);
     ParticipantStatus st = h.status(brainConvId);
     if (!st.exists || st.busy) return false;
-    qaHistory.push_back({h.now(), humanQuestion, answer});
+    std::string asked = humanQuestion;
+    for (auto& a : pendingAgents) asked += (asked.empty() ? "" : "\n\n") + agentQuestion(a).title;
+    qaHistory.push_back({h.now(), asked, answer});
     while (qaHistory.size() > 50) qaHistory.pop_front();
     addLog(&h, "Vous : " + util::firstLine(answer, 150), true);
+    std::string decisions = resolveAgentProposals(h, answer);  // avant d'effacer la question (précisions : à qui ?)
     questions.clear();
     humanQuestion.clear();
-    std::string msg = "# Réponse de l'humain\n\n" + answer + "\n\n";
+    std::string msg = "# Réponse de l'humain\n\n" + answer + "\n\n" + decisions;
     // Pendant la question, l'équipe a continué : on joint ce qui a avancé.
-    bool news = tasksInFlight() > 0;
+    bool news = tasksInFlight() > 0 || !teamNotes_.empty();
     for (auto& t : tasks)
         if (t.done && !t.reported) news = true;
     if (news) {
@@ -1108,6 +1382,116 @@ bool Orchestrator::answerHuman(OrchestratorHost& h, const std::string& answer) {
         markReported();
     }
     return sendBrain(h, msg + "Poursuis et donne tes directives.");
+}
+
+// ---------------------------------------------------------------------------
+// Équipe évolutive : propositions de nouveaux agents, toujours soumises à l'humain
+// ---------------------------------------------------------------------------
+
+std::string Orchestrator::agentAcceptLabel(const std::string& name) { return "Créer l'agent « " + name + " »"; }
+std::string Orchestrator::agentRefuseLabel(const std::string& name) { return "Ne pas créer « " + name + " »"; }
+
+HumanQuestion Orchestrator::agentQuestion(const NewAgent& a) {
+    HumanQuestion q;
+    q.title = "Ajouter l'agent « " + a.name + " » à l'équipe ?";
+    q.text = "**L'orchestrateur propose un nouvel agent : « " + a.name + " »**\n\n" + a.notes +
+             "\n\n_Acceptez, refusez, ou choisissez « Autre » pour préciser ce que vous attendez de cet agent : "
+             "l'orchestrateur révisera sa proposition et vous la soumettra de nouveau._";
+    q.options = {agentAcceptLabel(a.name), agentRefuseLabel(a.name)};
+    return q;
+}
+
+std::vector<HumanQuestion> Orchestrator::proposeAgents(OrchestratorHost& h, const std::vector<NewAgent>& list) {
+    std::vector<HumanQuestion> qs;
+    if (list.empty()) return qs;
+    std::vector<std::string> names;
+    for (auto& a : h.agents()) names.push_back(a.name);
+    size_t count = names.size();
+    for (const NewAgent& a : list) {
+        std::string why;
+        bool taken = false;
+        for (auto& n : names) taken = taken || normKey(n) == normKey(a.name);
+        for (auto& p : pendingAgents) taken = taken || normKey(p.name) == normKey(a.name);
+        if (!settings.allowNewAgents)
+            why = "la création d'agents est désactivée par l'humain (réglages › Exécution) : répartis ce travail sur "
+                  "l'équipe actuelle, ou signale le besoin par @@HUMAIN";
+        else if (a.name.empty())
+            why = "nom manquant (« @@NOUVEL_AGENT <nom> »)";
+        else if (taken)
+            why = "un agent porte déjà ce nom : utilise-le, ou propose un autre nom";
+        else if (util::trim(a.notes).empty())
+            why = "fiche de rôle vide : explique « Pourquoi : … » puis décris sa mission et ses frontières";
+        else if (settings.maxAgents > 0 && count >= (size_t)settings.maxAgents)
+            why = "l'équipe a atteint son plafond de " + std::to_string(settings.maxAgents) +
+                  " agents (réglable par l'humain) : répartis ce travail sur l'équipe actuelle";
+        if (!why.empty()) {
+            teamNotes_.push_back("Proposition d'agent « " + (a.name.empty() ? std::string("?") : a.name) +
+                                 " » non soumise : " + why + ".");
+            addLog(&h, "Proposition d'agent écartée (" + (a.name.empty() ? std::string("sans nom") : a.name) + ") : " +
+                           util::firstLine(why, 120));
+            continue;
+        }
+        ++count;
+        pendingAgents.push_back(a);
+        qs.push_back(agentQuestion(a));
+        addLog(&h, "L'orchestrateur propose un nouvel agent : « " + a.name + " » (en attente de votre accord).", true);
+    }
+    changed = true;
+    return qs;
+}
+
+std::string Orchestrator::resolveAgentProposals(OrchestratorHost& h, const std::string& answer) {
+    if (pendingAgents.empty()) return {};
+    // Précisions libres jointes à la réponse : gardées dans la fiche de l'agent créé (s'il est seul en jeu).
+    std::string extra;
+    for (const std::string& l : util::splitLines(answer))
+        if (util::startsWith(util::trim(l), "Précisions :")) extra = util::trim(util::trim(l).substr(std::string("Précisions :").size()));
+    std::string r = "# Décision sur l'équipe\n";
+    for (const NewAgent& a : pendingAgents) {
+        if (answer.find(agentAcceptLabel(a.name)) != std::string::npos) {
+            std::string notes = a.notes;
+            if (!extra.empty() && pendingAgents.size() == 1 && util::trim(humanQuestion).empty())
+                notes += "\n\n## Précisions de l'humain\n" + extra;
+            std::string error;
+            std::string created = h.createAgent(a.name, notes, error);
+            if (!created.empty()) {
+                r += "- **" + created + "** : accepté et créé (sa fiche est dans les notes de son thème). Tu peux lui "
+                     "confier des tâches avec @@DELEGUER " + created + ".\n";
+                addLog(&h, "Nouvel agent créé : « " + created + " ».", true);
+                h.onEvent("Nouvel agent dans l'équipe : « " + created + " »", true);
+            } else {
+                r += "- **" + a.name + "** : accepté, mais la création a échoué (" + error +
+                     "). Poursuis avec l'équipe actuelle ou propose un autre nom.\n";
+                addLog(&h, "Création de l'agent « " + a.name + " » impossible : " + error, true);
+            }
+        } else if (answer.find(agentRefuseLabel(a.name)) != std::string::npos) {
+            r += "- **" + a.name + "** : refusé par l'humain. Répartis ce travail sur les agents existants ; ne repropose "
+                 "pas cet agent sans élément nouveau.\n";
+            addLog(&h, "Agent « " + a.name + " » refusé.");
+        } else {
+            r += "- **" + a.name + "** : ni accepté ni refusé — l'agent n'est PAS créé. Si l'humain a apporté des "
+                 "précisions, révise ta proposition en conséquence et soumets-la de nouveau (@@NOUVEL_AGENT) ; sinon "
+                 "poursuis avec l'équipe actuelle. La création d'un agent exige toujours son accord explicite.\n";
+            addLog(&h, "Agent « " + a.name + " » : précisions demandées, proposition à réviser.");
+        }
+    }
+    pendingAgents.clear();
+    changed = true;
+    return r + "\n";
+}
+
+void Orchestrator::askHuman(OrchestratorHost& h, const std::string& rawQuestion, const std::vector<HumanQuestion>& qs,
+                            const std::string& logExtra) {
+    state = OrchState::WaitingHuman;
+    humanQuestion = rawQuestion;
+    questions = qs;
+    ++questionSeq;
+    ParticipantStatus st = h.status(brainConvId);
+    brainTurnsAtSend_ = st.turns;
+    brainCostAtSend_ = st.costUsd;
+    if (!rawQuestion.empty() || pendingAgents.empty())
+        addLog(&h, "Question pour vous : " + util::firstLine(qs.empty() ? rawQuestion : qs[0].text, 150) + logExtra, true);
+    changed = true;
 }
 
 void Orchestrator::pause(const std::string& reason) {
@@ -1125,6 +1509,7 @@ void Orchestrator::stop() {
     pauseNote.clear();
     pauseUntil = 0;
     questions.clear();
+    pendingAgents.clear();
     addLog(nullptr, "Orchestration arrêtée.", true);
 }
 
@@ -1258,14 +1643,28 @@ void Orchestrator::tick(OrchestratorHost& h) {
         collectTasks(h);
         dispatch(h);
     }
+    // Message au cerveau en attente de son récap (rotation) : il part dès que la nouvelle conversation est prête.
+    if (state == OrchState::Thinking && !pendingBrain_.empty()) {
+        std::string m = pendingBrain_;
+        sendBrain(h, m);
+        return;
+    }
     switch (state) {
         case OrchState::Thinking: tickThinking(h); break;
         case OrchState::Working: tickWorking(h); break;
+        case OrchState::Finished: tickFinished(h); break;
         case OrchState::WaitingHuman: {
             // Réponse donnée directement dans la conversation de l'orchestrateur.
             ParticipantStatus st = h.status(brainConvId);
             if (st.exists && !st.busy && st.turns > brainTurnsAtSend_) {
                 spentUsd += std::max(0.0, st.costUsd - brainCostAtSend_);
+                if (!hasDirectives(parseDirectives(st.lastText))) {
+                    // Simple discussion (une précision, une question de votre part) : la question reste posée.
+                    brainTurnsAtSend_ = brainSeenTurns_ = st.turns;
+                    brainCostAtSend_ = st.costUsd;
+                    changed = true;
+                    break;
+                }
                 if (!humanQuestion.empty()) qaHistory.push_back({h.now(), humanQuestion, "(répondu dans la conversation)"});
                 humanQuestion.clear();
                 questions.clear();
@@ -1335,34 +1734,98 @@ void Orchestrator::tickThinking(OrchestratorHost& h) {
     pauseFrom(OrchState::Thinking, "le processus de l'orchestrateur s'est arrêté avant de répondre", &h);
 }
 
+bool Orchestrator::brainChatReply(OrchestratorHost& h) {
+    ParticipantStatus st = h.status(brainConvId);
+    if (!st.exists || st.busy) return false;
+    if (brainSeenTurns_ < 0 || st.turns < brainSeenTurns_) {  // ancienne sauvegarde ou conversation remplacée
+        brainSeenTurns_ = st.turns;
+        return false;
+    }
+    if (st.turns == brainSeenTurns_) return false;
+    spentUsd += std::max(0.0, st.costUsd - brainCostAtSend_);
+    brainCostAtSend_ = st.costUsd;
+    brainSeenTurns_ = st.turns;
+    changed = true;
+    if (!hasDirectives(parseDirectives(st.lastText))) return false;  // simple discussion : l'équipe continue
+    addLog(&h, "Directives données pendant votre discussion avec l'orchestrateur.");
+    brainTurnsAtSend_ = st.turns;
+    handleBrainAnswer(h, st.lastText);
+    return true;
+}
+
+// Orchestration terminée, mais vous continuez à discuter avec l'orchestrateur. S'il répond par une question
+// (@@HUMAIN) ou confie du travail (@@DELEGUER), l'orchestration reprend du service ; sinon ce n'est qu'une discussion
+// (un nouveau @@TERMINE met simplement le bilan à jour).
+void Orchestrator::tickFinished(OrchestratorHost& h) {
+    if (brainConvId.empty()) return;
+    ParticipantStatus st = h.status(brainConvId);
+    if (!st.exists || st.busy || st.turns <= brainTurnsAtSend_) return;
+    spentUsd += std::max(0.0, st.costUsd - brainCostAtSend_);
+    Directives d = parseDirectives(st.lastText);
+    if (!d.needHuman && d.delegations.empty()) {
+        brainTurnsAtSend_ = brainSeenTurns_ = st.turns;
+        brainCostAtSend_ = st.costUsd;
+        if (d.finished && !util::trim(d.summary).empty()) finalSummary = d.summary;
+        changed = true;
+        return;
+    }
+    addLog(&h, "Vous avez repris la discussion avec l'orchestrateur : l'orchestration reprend.", true);
+    nudges_ = 0;
+    state = OrchState::Thinking;
+    handleBrainAnswer(h, st.lastText);
+}
+
 void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& text) {
     Directives d = parseDirectives(text);
     changed = true;
-    if (d.finished) {
+    brainSeenTurns_ = h.status(brainConvId).turns;
+    // Propositions restées sans décision par le formulaire (l'humain a répondu dans la conversation) : caduques.
+    for (auto& a : pendingAgents)
+        teamNotes_.push_back("Proposition d'agent « " + a.name + " » restée sans décision (l'humain a répondu dans la "
+                             "conversation) : rien n'a été créé ; soumets-la de nouveau si elle reste utile.");
+    pendingAgents.clear();
+    // Nouveaux agents : jamais créés d'office. Chaque proposition devient une question pour l'humain.
+    std::vector<HumanQuestion> agentQs = proposeAgents(h, d.newAgents);
+    if (!agentQs.empty() && !d.needHuman) {
+        // Rien d'autre à trancher : les tâches confiées aux agents existants partent, l'humain décide pendant ce temps.
+        if (d.finished && !util::trim(d.summary).empty()) finalSummary = d.summary;
+        nudges_ = 0;
+        if (!d.delegations.empty()) delegate(h, d.delegations, false);
+        askHuman(h, "", agentQs, "");
+        return;
+    }
+    if (!agentQs.empty()) d.questions.insert(d.questions.end(), agentQs.begin(), agentQs.end());
+    // « J'ai fini… voulez-vous en plus … ? » : la question l'emporte (le bilan est gardé), sinon elle serait perdue.
+    if (d.finished && d.needHuman && !util::trim(d.summary).empty()) finalSummary = d.summary;
+    if (d.finished && !d.needHuman) {
         state = OrchState::Finished;
         finalSummary = d.summary;
+        {  // la réponse est traitée : tickFinished ne doit pas la relire
+            ParticipantStatus st = h.status(brainConvId);
+            brainTurnsAtSend_ = st.turns;
+            brainCostAtSend_ = st.costUsd;
+        }
         addLog(&h, "Objectif atteint : " + util::firstLine(d.summary, 150), true);
         if (int n = tasksInFlight(); n > 0)
             addLog(&h, std::to_string(n) + " tâche(s) encore en cours ou en file : celles déjà lancées se terminent dans "
                        "leur conversation.");
+        recapTeam(h, "objectif atteint");
         return;
     }
     if (d.needHuman) {
-        state = OrchState::WaitingHuman;
-        humanQuestion = d.question;
-        questions = d.questions;
-        ++questionSeq;
-        ParticipantStatus st = h.status(brainConvId);
-        brainTurnsAtSend_ = st.turns;
-        brainCostAtSend_ = st.costUsd;
-        std::string extra = d.delegations.empty() ? "" : " (ses délégations attendront votre réponse)";
-        addLog(&h, "Question pour vous : " + util::firstLine(questions.empty() ? d.question : questions[0].text, 150) + extra,
-               true);
+        askHuman(h, d.question, d.questions, d.delegations.empty() ? "" : " (ses délégations attendront votre réponse)");
         return;
     }
     if (d.pause) {
         nudges_ = 0;
         brainPause(h, d.pauseNote);
+        return;
+    }
+    if (d.delegations.empty() && !d.newAgents.empty()) {
+        // Propositions toutes écartées d'office (plafond, nom pris…) : le motif part au prochain compte rendu.
+        nudges_ = 0;
+        state = OrchState::Working;
+        if (tasksInFlight() == 0) sendReport(h, false);
         return;
     }
     if (d.delegations.empty() && tasksInFlight() > 0) {
@@ -1374,16 +1837,9 @@ void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& tex
     }
     if (d.delegations.empty()) {
         if (++nudges_ > 2) {
-            state = OrchState::WaitingHuman;
-            humanQuestion = "L'orchestrateur ne donne plus de directives. Que doit-il faire ?";
             HumanQuestion q;
-            q.title = q.text = humanQuestion;
-            questions = {q};
-            ++questionSeq;
-            ParticipantStatus st = h.status(brainConvId);
-            brainTurnsAtSend_ = st.turns;
-            brainCostAtSend_ = st.costUsd;
-            addLog(&h, humanQuestion, true);
+            q.title = q.text = "L'orchestrateur ne donne plus de directives. Que doit-il faire ?";
+            askHuman(h, q.text, {q}, "");
             return;
         }
         addLog(&h, "Réponse sans directive : relance de l'orchestrateur.");
@@ -1394,18 +1850,24 @@ void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& tex
         return;
     }
     nudges_ = 0;
+    delegate(h, d.delegations, true);
+}
+
+void Orchestrator::delegate(OrchestratorHost& h, const std::vector<Delegation>& dels, bool reportFailures) {
     std::vector<AgentInfo> ag = h.agents();
     std::vector<std::string> names;
     for (auto& a : ag) names.push_back(a.name);
     std::string available;
     for (auto& n : names) available += (available.empty() ? "" : ", ") + n;
+    std::vector<std::string> proposed;
+    for (auto& a : pendingAgents) proposed.push_back(a.name);
 
     ++cycle;
     // On garde les tâches encore en cours / en file et les comptes rendus pas encore transmis.
     tasks.erase(std::remove_if(tasks.begin(), tasks.end(), [](const OrchTask& t) { return t.done && t.reported; }),
                 tasks.end());
     int valid = 0;
-    for (auto& del : d.delegations) {
+    for (auto& del : dels) {
         OrchTask t;
         t.cycle = cycle;
         t.task = del.task;
@@ -1416,8 +1878,14 @@ void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& tex
         if (idx < 0) {
             t.agent = del.agent;
             t.done = t.failed = true;
-            t.report = "Agent inconnu « " + del.agent + " ». Agents disponibles : " + available + ".";
-            addLog(&h, "Agent inconnu : « " + del.agent + " »", true);
+            if (int p = matchAgent(del.agent, proposed); p >= 0) {
+                t.report = "« " + proposed[p] + " » n'existe pas encore : sa création attend l'accord de l'humain. "
+                           "Redélègue cette tâche une fois l'agent créé.";
+                addLog(&h, "Tâche pour « " + proposed[p] + " » écartée : agent pas encore accepté.");
+            } else {
+                t.report = "Agent inconnu « " + del.agent + " ». Agents disponibles : " + available + ".";
+                addLog(&h, "Agent inconnu : « " + del.agent + " »", true);
+            }
         } else {
             t.agent = names[idx];
             ++valid;
@@ -1426,7 +1894,7 @@ void Orchestrator::handleBrainAnswer(OrchestratorHost& h, const std::string& tex
     }
     state = OrchState::Working;
     if (valid == 0) {  // échecs immédiats : rapportés tout de suite si personne ne travaille, sinon au prochain compte rendu
-        if (tasksInFlight() == 0) sendReport(h, false);
+        if (reportFailures && tasksInFlight() == 0) sendReport(h, false);
         return;
     }
     addLog(&h, "Cycle " + std::to_string(cycle) + " : " + std::to_string(valid) + " tâche(s) déléguée(s).", true);
@@ -1469,19 +1937,19 @@ void Orchestrator::dispatch(OrchestratorHost& h) {
         agentConv[t.agent] = id;
         ParticipantStatus st = h.status(id);
         if (st.busy) continue;  // l'utilisateur s'en sert : la tâche partira au prochain passage
-        if (needsRotation(st, id)) {
-            std::string nid = h.rotate(t.agent, id);
-            if (nid.empty()) continue;  // récap en cours : la tâche partira au prochain passage
-            addLog(&h, "↻ " + t.agent + " : contexte allégé (récap + nouvelle conversation, " +
-                           std::to_string((int)std::lround(st.context * 100)) + " % de contexte avant).");
-            agentConv[t.agent] = id = nid;
-            st = h.status(id);
-        }
         // Modèle / effort : demande du cerveau, sinon défauts, dans les limites autorisées.
         std::string wantModel = !t.model.empty() ? t.model : settings.defaultWorkerModel;
         std::string wantEffort = !t.effort.empty() ? t.effort : settings.defaultWorkerEffort;
         std::string model = clampModel(wantModel, settings.allowedModels);
         std::string effort = clampEffort(wantEffort, settings.maxEffort);
+        // Conversation trop chargée, froide, ou qui changerait de modèle : on repart du récap.
+        if (std::string why = rotationReasonFor(st, id, h.now(), model, effort); !why.empty()) {
+            std::string nid = h.rotate(t.agent, id);
+            if (nid.empty()) continue;  // récap en cours : la tâche partira au prochain passage
+            addLog(&h, "↻ " + t.agent + " : contexte allégé (récap + nouvelle conversation) — " + why + ".");
+            agentConv[t.agent] = id = nid;
+            st = h.status(id);
+        }
         if (!t.model.empty() && model != t.model)
             addLog(&h, t.agent + " : modèle « " + t.model + " » non autorisé, remplacé par « " + model + " ».");
         t.model = model;
@@ -1489,7 +1957,13 @@ void Orchestrator::dispatch(OrchestratorHost& h) {
         t.convId = id;
         t.turnsAtSend = st.turns;
         t.costAtSend = st.costUsd;
-        if (!h.send(id, taskMessage(t), SendOptions{settings.workerMode, model, effort})) {
+        t.callsAtSend = st.apiCalls;
+        t.readAtSend = st.cacheReadTokens;
+        t.writeAtSend = st.cacheWriteTokens;
+        t.outAtSend = st.outputTokens;
+        const bool browser = isBrowserAgent(t.agent);
+        if (!h.send(id, taskMessage(t, settings.visualChecks, browser),
+                    SendOptions{settings.workerMode, model, effort, settings.leanAgents, browser})) {
             t.done = t.failed = true;
             t.report = "Envoi impossible (Claude Code introuvable ?).";
             addLog(&h, t.agent + " : envoi impossible.", true);
@@ -1523,7 +1997,30 @@ void Orchestrator::collectTasks(OrchestratorHost& h) {
             t.notifiedHuman = true;
             addLog(&h, t.agent + " attend votre autorisation.", true);
         }
-        if (st.busy) continue;
+        // Mesures en direct (affichées sur la carte de l'agent, transmises au cerveau)
+        if (st.apiCalls >= t.callsAtSend) {
+            t.calls = st.apiCalls - t.callsAtSend;
+            t.cacheRead = std::max<int64_t>(0, st.cacheReadTokens - t.readAtSend);
+            t.cacheWrite = std::max<int64_t>(0, st.cacheWriteTokens - t.writeAtSend);
+            t.output = std::max<int64_t>(0, st.outputTokens - t.outAtSend);
+            t.contextEnd = st.contextTokens;
+        }
+        if (st.busy) {
+            // Garde-fous : une tâche qui s'emballe (boucle d'essais, contexte qui enfle) est interrompue.
+            if (t.guardNote.empty()) {
+                if (settings.maxCallsPerTask > 0 && t.calls >= settings.maxCallsPerTask)
+                    t.guardNote = std::to_string(t.calls) + " appels API pour cette seule tâche (limite " +
+                                  std::to_string(settings.maxCallsPerTask) + ")";
+                else if (settings.taskContextLimit > 0 && st.contextTokens >= settings.taskContextLimit)
+                    t.guardNote = "contexte de " + kTokens(st.contextTokens) + " (limite " + kTokens(settings.taskContextLimit) + ")";
+                if (!t.guardNote.empty()) {
+                    h.interrupt(t.convId);
+                    addLog(&h, "⛔ " + t.agent + " interrompu : " + t.guardNote + ".", true);
+                    changed = true;
+                }
+            }
+            continue;
+        }
         t.done = true;
         t.doneAt = h.now();
         changed = true;
@@ -1560,15 +2057,7 @@ bool Orchestrator::partialReportUseful(OrchestratorHost& h) const {
 }
 
 bool Orchestrator::sendReport(OrchestratorHost& h, bool partial) {
-    std::string prefix;
-    ParticipantStatus bst = h.status(brainConvId);
-    if (needsRotation(bst, brainConvId)) {
-        std::string nid = h.rotate("", brainConvId);
-        if (nid.empty()) return false;  // récap de l'orchestrateur en cours
-        addLog(&h, "↻ Orchestrateur : contexte allégé (récap + nouvelle conversation).", true);
-        brainConvId = nid;
-        prefix = brainRefresher();
-    }
+    // La rotation éventuelle du cerveau (trop chargé, froid) est gérée par sendBrain.
     std::string report = buildReport(partial, h.now());
     std::string done;
     for (auto& t : tasks)
@@ -1579,12 +2068,13 @@ bool Orchestrator::sendReport(OrchestratorHost& h, bool partial) {
                        std::to_string(tasksInFlight()) + " agent(s) toujours au travail.");
     else
         addLog(&h, "Comptes rendus du cycle " + std::to_string(cycle) + " envoyés à l'orchestrateur.");
-    return sendBrain(h, prefix + report);
+    return sendBrain(h, report);
 }
 
 void Orchestrator::tickWorking(OrchestratorHost& h) {
     if (state != OrchState::Working) return;
     if (h.status(brainConvId).busy) return;  // l'utilisateur discute avec l'orchestrateur
+    if (brainChatReply(h)) return;
     if (tasksInFlight() > 0) {
         // Au fil de l'eau : un agent a fini, d'autres travaillent encore — le cerveau peut relancer les agents libres.
         if (partialReportUseful(h) && usageOk(h)) sendReport(h, true);
@@ -1609,13 +2099,27 @@ void Orchestrator::tickWorking(OrchestratorHost& h) {
     sendReport(h, false);
 }
 
-bool Orchestrator::needsRotation(const ParticipantStatus& st, const std::string& convId) const {
-    if (!settings.contextRotation || convId.empty()) return false;
-    if (settings.rotateAtContext > 0 && st.context >= settings.rotateAtContext) return true;
+std::string Orchestrator::rotationReasonFor(const ParticipantStatus& st, const std::string& convId, int64_t now,
+                                            const std::string& nextModel, const std::string& nextEffort) const {
+    if (convId.empty()) return {};
+    bool brain = convId == brainConvId;
     auto it = convTasks_.find(convId);
     int n = it == convTasks_.end() ? 0 : it->second;
-    if (convId == brainConvId) n = 0;  // l'orchestrateur : seul le contexte compte
-    return settings.rotateAfterTasks > 0 && n >= settings.rotateAfterTasks;
+    return rotationReason(settings, st, n, brain, now, cacheTtlSeconds(), nextModel, nextEffort);
+}
+
+void Orchestrator::conversationReplaced(const std::string& oldId, const std::string& newId) {
+    if (oldId.empty() || newId.empty() || oldId == newId) return;
+    if (brainConvId == oldId) {
+        brainConvId = newId;
+        brainSeenTurns_ = -1;
+        brainRefresh_ = true;
+        brainRotating_ = false;
+    }
+    for (auto& [agent, id] : agentConv)
+        if (id == oldId) id = newId;
+    convTasks_.erase(oldId);
+    changed = true;
 }
 
 std::string Orchestrator::brainRefresher() const {
@@ -1635,12 +2139,18 @@ json Orchestrator::toJson() const {
         jt.push_back({{"agent", t.agent},   {"task", t.task},     {"convId", t.convId},       {"model", t.model}, {"modelChosen", t.modelChosen},
                       {"effort", t.effort}, {"cycle", t.cycle},   {"turnsAtSend", t.turnsAtSend},
                       {"costAtSend", t.costAtSend}, {"sent", t.sent}, {"done", t.done}, {"failed", t.failed},
-                      {"report", t.report}, {"reported", t.reported}, {"sentAt", t.sentAt}, {"doneAt", t.doneAt}});
+                      {"report", t.report}, {"reported", t.reported}, {"sentAt", t.sentAt}, {"doneAt", t.doneAt},
+                      {"callsAtSend", t.callsAtSend}, {"readAtSend", t.readAtSend}, {"writeAtSend", t.writeAtSend},
+                      {"outAtSend", t.outAtSend}, {"calls", t.calls}, {"cacheRead", t.cacheRead},
+                      {"cacheWrite", t.cacheWrite}, {"output", t.output}, {"contextEnd", t.contextEnd},
+                      {"guardNote", t.guardNote}});
     json jl = json::array();
     for (auto& l : log) jl.push_back({{"t", l.time}, {"text", l.text}, {"important", l.important}});
     json jq = json::array();
     for (auto& q : questions)
         jq.push_back({{"title", q.title}, {"text", q.text}, {"options", q.options}, {"suggestions", q.suggestions}});
+    json ja = json::array();
+    for (auto& a : pendingAgents) ja.push_back({{"name", a.name}, {"notes", a.notes}});
     json jh = json::array();
     for (auto& q : qaHistory) jh.push_back({{"t", q.time}, {"q", q.question}, {"a", q.answer}});
     const auto& s = settings;
@@ -1650,6 +2160,10 @@ json Orchestrator::toJson() const {
               {"maxCycles", s.maxCycles},
               {"maxParallel", s.maxParallel},
               {"rollingReports", s.rollingReports},
+              {"allowNewAgents", s.allowNewAgents},
+              {"maxAgents", s.maxAgents},
+              {"visualChecks", s.visualChecks},
+              {"browserAgents", s.browserAgents},
               {"workerMode", s.workerMode},
               {"brainMode", s.brainMode},
               {"budgetMode", s.budgetMode},
@@ -1660,8 +2174,19 @@ json Orchestrator::toJson() const {
               {"strictBudget", s.strictBudget},
               {"budgetTolerance", s.budgetTolerance},
               {"contextRotation", s.contextRotation},
-              {"rotateAtContext", s.rotateAtContext},
+              {"recapOnPhaseEnd", s.recapOnPhaseEnd},
+              {"rotateAtTokens", s.rotateAtTokens},
               {"rotateAfterTasks", s.rotateAfterTasks},
+              {"rotateWhenCold", s.rotateWhenCold},
+              {"coldRotateTokens", s.coldRotateTokens},
+              {"cacheTtlMinutes", s.cacheTtlMinutes},
+              {"rotateOnSwitch", s.rotateOnSwitch},
+              {"switchRotateTokens", s.switchRotateTokens},
+              {"brainReadOnly", s.brainReadOnly},
+              {"leanAgents", s.leanAgents},
+              {"reportMaxChars", s.reportMaxChars},
+              {"maxCallsPerTask", s.maxCallsPerTask},
+              {"taskContextLimit", s.taskContextLimit},
               {"allowedModels", s.allowedModels},
               {"maxEffort", s.maxEffort},
               {"defaultWorkerModel", s.defaultWorkerModel},
@@ -1684,6 +2209,7 @@ json Orchestrator::toJson() const {
             {"convTasks", convTasks_},
             {"subscription", subscription},
             {"brainConvId", brainConvId},
+            {"brainRefresh", brainRefresh_},
             {"agentConv", agentConv},
             {"tasks", jt},
             {"log", jl},
@@ -1692,7 +2218,10 @@ json Orchestrator::toJson() const {
             {"questions", jq},
             {"questionSeq", questionSeq},
             {"qaHistory", jh},
+            {"pendingAgents", ja},
+            {"teamNotes", teamNotes_},
             {"brainTurnsAtSend", brainTurnsAtSend_},
+            {"brainSeenTurns", brainSeenTurns_},
             {"brainCostAtSend", brainCostAtSend_},
             {"lastBrainMessage", lastBrainMessage_},
             {"nudges", nudges_},
@@ -1709,6 +2238,13 @@ void Orchestrator::fromJson(const json& j) {
     st.maxCycles = s.value("maxCycles", st.maxCycles);
     st.maxParallel = s.value("maxParallel", st.maxParallel);
     st.rollingReports = s.value("rollingReports", st.rollingReports);
+    st.allowNewAgents = s.value("allowNewAgents", st.allowNewAgents);
+    st.maxAgents = std::max(0, s.value("maxAgents", st.maxAgents));
+    st.visualChecks = s.value("visualChecks", st.visualChecks);
+    st.browserAgents.clear();
+    if (s.contains("browserAgents") && s["browserAgents"].is_array())
+        for (auto& a : s["browserAgents"])
+            if (a.is_string()) st.browserAgents.push_back(a.get<std::string>());
     st.workerMode = s.value("workerMode", st.workerMode);
     st.brainMode = s.value("brainMode", st.brainMode);
     st.budgetMode = s.value("budgetMode", st.budgetMode);
@@ -1719,8 +2255,20 @@ void Orchestrator::fromJson(const json& j) {
     st.strictBudget = s.value("strictBudget", st.strictBudget);
     st.budgetTolerance = s.value("budgetTolerance", st.budgetTolerance);
     st.contextRotation = s.value("contextRotation", st.contextRotation);
-    st.rotateAtContext = s.value("rotateAtContext", st.rotateAtContext);
+    st.recapOnPhaseEnd = s.value("recapOnPhaseEnd", st.recapOnPhaseEnd);
+    // Ancien réglage « rotateAtContext » (part d'une fenêtre de 1 M, soit ~450 k) : ignoré, on passe au seuil en jetons.
+    st.rotateAtTokens = s.value("rotateAtTokens", st.rotateAtTokens);
     st.rotateAfterTasks = s.value("rotateAfterTasks", st.rotateAfterTasks);
+    st.rotateWhenCold = s.value("rotateWhenCold", st.rotateWhenCold);
+    st.coldRotateTokens = s.value("coldRotateTokens", st.coldRotateTokens);
+    st.cacheTtlMinutes = s.value("cacheTtlMinutes", st.cacheTtlMinutes);
+    st.rotateOnSwitch = s.value("rotateOnSwitch", st.rotateOnSwitch);
+    st.switchRotateTokens = s.value("switchRotateTokens", st.switchRotateTokens);
+    st.brainReadOnly = s.value("brainReadOnly", st.brainReadOnly);
+    st.leanAgents = s.value("leanAgents", st.leanAgents);
+    st.reportMaxChars = s.value("reportMaxChars", st.reportMaxChars);
+    st.maxCallsPerTask = s.value("maxCallsPerTask", st.maxCallsPerTask);
+    st.taskContextLimit = s.value("taskContextLimit", st.taskContextLimit);
     if (s.contains("allowedModels") && s["allowedModels"].is_array()) {
         st.allowedModels.clear();
         for (auto& m : s["allowedModels"])
@@ -1742,6 +2290,7 @@ void Orchestrator::fromJson(const json& j) {
     windowSpent = j.value("windowSpent", 0.0);
     subscription = j.value("subscription", false);
     brainConvId = j.value("brainConvId", std::string());
+    brainRefresh_ = j.value("brainRefresh", false);
     agentConv.clear();
     if (j.contains("agentConv") && j["agentConv"].is_object())
         for (auto& [k, v] : j["agentConv"].items())
@@ -1766,6 +2315,16 @@ void Orchestrator::fromJson(const json& j) {
         t.reported = jt.value("reported", t.done && j.value("state", std::string()) != "working");
         t.sentAt = jt.value("sentAt", (int64_t)0);
         t.doneAt = jt.value("doneAt", (int64_t)0);
+        t.callsAtSend = jt.value("callsAtSend", 0);
+        t.readAtSend = jt.value("readAtSend", (int64_t)0);
+        t.writeAtSend = jt.value("writeAtSend", (int64_t)0);
+        t.outAtSend = jt.value("outAtSend", (int64_t)0);
+        t.calls = jt.value("calls", 0);
+        t.cacheRead = jt.value("cacheRead", (int64_t)0);
+        t.cacheWrite = jt.value("cacheWrite", (int64_t)0);
+        t.output = jt.value("output", (int64_t)0);
+        t.contextEnd = jt.value("contextEnd", (int64_t)0);
+        t.guardNote = jt.value("guardNote", std::string());
         tasks.push_back(std::move(t));
     }
     log.clear();
@@ -1786,10 +2345,17 @@ void Orchestrator::fromJson(const json& j) {
         questions.push_back(std::move(q));
     }
     questionSeq = j.value("questionSeq", 0);
+    pendingAgents.clear();
+    for (auto& ja : j.value("pendingAgents", json::array()))
+        if (ja.is_object()) pendingAgents.push_back({ja.value("name", std::string()), ja.value("notes", std::string())});
+    teamNotes_.clear();
+    for (auto& n : j.value("teamNotes", json::array()))
+        if (n.is_string()) teamNotes_.push_back(n.get<std::string>());
     qaHistory.clear();
     for (auto& jh : j.value("qaHistory", json::array()))
         qaHistory.push_back({jh.value("t", (int64_t)0), jh.value("q", std::string()), jh.value("a", std::string())});
     brainTurnsAtSend_ = j.value("brainTurnsAtSend", 0);
+    brainSeenTurns_ = j.value("brainSeenTurns", -1);
     brainCostAtSend_ = j.value("brainCostAtSend", 0.0);
     lastBrainMessage_ = j.value("lastBrainMessage", std::string());
     nudges_ = j.value("nudges", 0);
@@ -1823,6 +2389,11 @@ void Orchestrator::fromJson(const json& j) {
             pauseReason = "l'orchestrateur s'est mis en pause : reprise automatique à la prochaine session de 5 h (ou "
                           "cliquez sur Reprendre)";
         }
+    }
+    // Propositions d'agents en attente : leurs questions sont reconstruites (après celles du cerveau).
+    if (state == OrchState::WaitingHuman && !pendingAgents.empty()) {
+        if (humanQuestion.empty()) questions.clear();
+        for (auto& a : pendingAgents) questions.push_back(agentQuestion(a));
     }
     // Rechargée en cours de route (ClaudeDesk fermé) : les processus ont disparu,
     // on attend une reprise explicite. Une question en attente reste une question.

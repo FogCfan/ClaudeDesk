@@ -21,6 +21,18 @@ namespace app {
 
 using json = nlohmann::json;
 
+namespace {
+// Redimensionnement en direct : voir App::init (relais vers App::onLiveResize).
+bool SDLCALL liveResizeWatch(void* userdata, SDL_Event* ev) {
+    auto* app = static_cast<App*>(userdata);
+    using K = App::LiveEvent;
+    if (ev->type == SDL_EVENT_WINDOW_EXPOSED && ev->window.data1 == 1) app->onLiveResize(ev->window.windowID, K::Tick);
+    else if (ev->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) app->onLiveResize(ev->window.windowID, K::Resize);
+    else if (ev->type == SDL_EVENT_WINDOW_MOVED) app->onLiveResize(ev->window.windowID, K::Move);
+    return true;  // l'événement continue normalement vers la file
+}
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Boucle principale
 // ---------------------------------------------------------------------------
@@ -32,6 +44,8 @@ int App::run(int argc, char** argv) {
     //   --send "<texte>"          ouvre une conversation et envoie ce message
     //   --screenshot <f.bmp>      capture la fenêtre puis quitte…
     //   --after <secondes>        …après ce délai (défaut 3 s ; avec --send : après la réponse)
+    //   --size <L>x<H>            taille de la fenêtre (tests de mise en page étroite)
+    int optW = 0, optH = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -44,8 +58,11 @@ int App::run(int argc, char** argv) {
         else if (a == "--panel") optPanel_ = next();
         else if (a == "--nowait") optNoWait_ = true;
         else if (a == "--orchestrate") optOrchestrate_ = next();
+        else if (a == "--design") optDesign_ = next();
+        else if (a == "--size") std::sscanf(next().c_str(), "%dx%d", &optW, &optH);
     }
     if (!init()) return 1;
+    if (optW > 0 && optH > 0) SDL_SetWindowSize(window_, optW, optH);
     if (optPanel_ == "history") showHistory_ = true;
     if (optPanel_ == "shortcuts") showShortcuts_ = true;
     if (optPanel_ == "newproject") openNewProject_ = true;
@@ -57,6 +74,8 @@ int App::run(int argc, char** argv) {
         if (optPanel_.size() > 5) guideSection_ = std::atoi(optPanel_.c_str() + 5);
     }
     if (optPanel_ == "gfx") showConfig_ = true, configTab_ = 6, settings_.showFps = true;
+    if (optPanel_.rfind("config", 0) == 0)  // config[:onglet]
+        showConfig_ = true, configTab_ = optPanel_.size() > 7 ? std::atoi(optPanel_.c_str() + 7) : 0;
     if (optPanel_.rfind("tour", 0) == 0) {
         startTour();
         if (optPanel_.size() > 4) tourStep_ = std::atoi(optPanel_.c_str() + 4);
@@ -71,6 +90,37 @@ int App::run(int argc, char** argv) {
                 break;
             }
     autoLoadOrchestrator();  // orchestration du dernier projet piloté (sa discussion reste hors des onglets)
+    // --panel designer[:demo|:questions|:ajuster|:creer] : page Designer (demo = conception d'exemple, sans Claude).
+    if (optPanel_.rfind("designer", 0) == 0) {
+        page_ = 3;
+        if (optPanel_ != "designer") {
+            designer_.req.description = "Une application web de recettes avec planning de la semaine et liste de courses.";
+            designer_.design = claude::demoDesign();
+            designer_.step = 2;
+        }
+        if (optPanel_ == "designer:questions") {
+            claude::DesignQuestion q;
+            q.question = "L'application doit-elle gérer plusieurs utilisateurs ?";
+            q.why = "Un compte par personne implique authentification et base partagée : un agent de plus.";
+            q.options = {"Non, un seul utilisateur local", "Oui, avec comptes"};
+            q.choice = 0;
+            designer_.questions = {q};
+            designer_.step = 1;
+        }
+        if (optPanel_.rfind("designer:creer", 0) == 0) {
+            // Test : dépôt dans le dossier de test (à côté de l'espace de travail), jamais chez l'utilisateur.
+            designer_.cwd = util::pathToUtf8(workspace_.root().parent_path() / "depot-test");
+            designer_.step = 3;
+            if (optPanel_ == "designer:creer!") designerCreate();  // création réelle, dans le dossier de test
+        }
+    }
+    // --design "<description>" : lance une conception réelle (réglages du designer.json du dossier de données).
+    if (!optDesign_.empty()) {
+        page_ = 3;
+        designer_.req.description = optDesign_;
+        designer_.step = 0;
+        designerRun(false);
+    }
     if (optPanel_ == "orchestrator:discussion") orchShowDiscussion_ = true;
     // --panel orchestrator[:budget|:modeles|:execution|:discussion] : ouvre la page (et un onglet).
     if (optPanel_.rfind("orchestrator", 0) == 0 || !optOrchestrate_.empty()) {
@@ -194,6 +244,8 @@ bool App::init() {
     iniPath_ = util::pathToUtf8(dataDir / "layout.ini");
     settings_.load(settingsPath_);
     usage_.load(usagePath_);
+    designerPath_ = util::pathToUtf8(dataDir / "designer.json");
+    loadDesigner();
 
     dpiScale_ = SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
     if (dpiScale_ <= 0) dpiScale_ = 1.0f;
@@ -238,7 +290,36 @@ bool App::init() {
     for (auto& id : settings_.openTabs) openConversation(id);
     for (size_t i = 0; i < open_.size(); ++i)
         if (open_[i]->session->localId == settings_.activeTab) selectTab_ = (int)i;
+    // Redimensionnement en direct : sous Windows, la boucle modale du système bloque notre boucle principale tant
+    // que l'utilisateur tient le bord de la fenêtre (zones noires, contenu pas recalé). SDL envoie alors des
+    // SDL_EVENT_WINDOW_EXPOSED (data1 = 1) qu'on peut traiter directement depuis un « event watch » : on y dessine.
+    // Ces « tics » viennent d'un minuteur Windows (WM_TIMER), priorité la plus basse : tant que la souris bouge, ils
+    // n'arrivent presque jamais, d'où des bandes noires en agrandissant. On dessine donc aussi au moment même où la
+    // taille change (SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED, envoyé pendant WM_WINDOWPOSCHANGED, après que le moteur de
+    // rendu SDL a redimensionné sa chaîne d'images). Même problème quand on DÉPLACE la fenêtre (même boucle modale) :
+    // le minuteur seul plafonnait à 30–50 i/s, on dessine donc aussi sur SDL_EVENT_WINDOW_MOVED, à la cadence voulue.
+    SDL_AddEventWatch(liveResizeWatch, this);
     return true;
+}
+
+void App::onLiveResize(uint32_t window, LiveEvent kind) {
+    if (inFrame_ || !running_ || !mainCtx_) return;
+    if (kind == LiveEvent::Resize && window == SDL_GetWindowID(window_)) {
+        int w = 0, h = 0;
+        SDL_GetWindowSizeInPixels(window_, &w, &h);
+        if (w == drawnW_ && h == drawnH_) return;  // déjà dessinée à cette taille
+    }
+    if (kind == LiveEvent::Move) {
+        // Un déplacement envoie un événement par mouvement de souris (jusqu'à 1000/s) : on dessine au rythme voulu,
+        // pas à chaque fois. En VSync, Present attend déjà le rafraîchissement : la marge évite de sauter une image.
+        uint64_t interval = 0;
+        if (settings_.fpsMode == 0) interval = (uint64_t)(1e9 / std::max(30.0f, displayHz_) * 0.75);
+        else if (settings_.fpsMode == 1) interval = 1000000000ull / (uint64_t)std::max(10, settings_.fpsCap);
+        if (SDL_GetTicksNS() - frameStartNs_ < interval) return;
+    }
+    // Le contexte ImGui courant doit être celui de la fenêtre principale (frame() gère celui du tableau de bord).
+    ImGui::SetCurrentContext(mainCtx_);
+    frame();
 }
 
 void App::useFonts(const FontSet& f) {
@@ -394,6 +475,7 @@ void App::applyTheme() {
 }
 
 void App::shutdown() {
+    SDL_RemoveEventWatch(liveResizeWatch, this);
     settings_.openTabs.clear();
     for (auto& oc : open_)
         if (!oc->session->entries.empty()) settings_.openTabs.push_back(oc->session->localId);
@@ -402,6 +484,7 @@ void App::shutdown() {
     closeDashboardWindow();
     settings_.dashDetached = detached;
     if (orch_) saveOrchestrator();
+    if (designerDirty_) saveDesigner();
     saveAll();
     // Ferme toutes les entrées d'abord : les processus se terminent en parallèle.
     for (auto& oc : open_) oc->session->stop();
@@ -419,6 +502,15 @@ void App::shutdown() {
 }
 
 void App::frame() {
+    // Pas de frame imbriquée : un « event watch » (redimensionnement en direct) peut se déclencher pendant le rendu.
+    if (inFrame_) return;
+    struct Guard {
+        bool& f;
+        explicit Guard(bool& b) : f(b) { f = true; }
+        ~Guard() { f = false; }
+    } guard(inFrame_);
+    frameStartNs_ = SDL_GetTicksNS();
+    SDL_GetWindowSizeInPixels(window_, &drawnW_, &drawnH_);
     now_ = SDL_GetTicks() / 1000.0;
     processAsyncResults();
 
@@ -469,6 +561,15 @@ void App::frame() {
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                          ImGuiWindowFlags_NoDocking);
         drawOrchestratorPage();
+        ImGui::End();
+    } else if (page_ == 3) {
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->WorkPos);
+        ImGui::SetNextWindowSize(vp->WorkSize);
+        ImGui::Begin("##designpage", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoDocking);
+        drawDesignerPage();
         ImGui::End();
     } else {
         if (showWorkspace_) drawWorkspacePanel();
@@ -521,6 +622,7 @@ void App::frame() {
     std::string title = "ClaudeDesk";
     if (page_ == 1) title = "Tableau de bord — ClaudeDesk";
     else if (page_ == 2) title = "Orchestrateur — ClaudeDesk";
+    else if (page_ == 3) title = "Designer — ClaudeDesk";
     else if (auto* oc = active()) title = oc->session->title + " — ClaudeDesk";
     if (title != lastTitle) {
         SDL_SetWindowTitle(window_, title.c_str());
@@ -542,7 +644,11 @@ void App::frame() {
                 waiting = true;
         if (orch_ && orch_->running() && orch_->state != claude::OrchState::UsagePause) waiting = true;
         if (!syntheses_.empty() || (optPanel_ == "synthesis" && !jobs_.empty())) waiting = true;
-        if (now_ > optAfter_ && (optNoWait_ || !waiting || now_ > optAfter_ + 120)) {
+        if (designerBusy()) waiting = true;
+        // Une seconde après la fin du travail : les cartes à hauteur automatique ont pris leur taille.
+        static double lastWaiting = 0;
+        if (waiting) lastWaiting = now_;
+        if (now_ > optAfter_ && (optNoWait_ || (!waiting && now_ > lastWaiting + 1.0) || now_ > optAfter_ + 120)) {
             if (SDL_Surface* surf = SDL_RenderReadPixels(renderer_, nullptr)) {
                 SDL_SaveBMP(surf, optScreenshot_.c_str());
                 SDL_DestroySurface(surf);
@@ -669,6 +775,7 @@ void App::focusConversation(int index) {
 
 void App::pushActivity(const OpenConversation& oc, ActivityKind kind, const std::string& text) {
     activity_.push_front({util::nowUnix(), oc.session->localId, oc.session->title, text, kind});
+    ++activitySeq_;
     while (activity_.size() > 400) activity_.pop_back();
 }
 
@@ -734,6 +841,7 @@ void App::processAsyncResults() {
     tickOrchestrator();
     for (auto& j : jobs_) j->update();
     pumpFolderSyntheses();
+    pumpRestarts();
     jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [](auto& j) { return j->finished(); }), jobs_.end());
 
     static double lastUsageCheck = 0;
@@ -951,6 +1059,9 @@ void App::sendText(OpenConversation& oc, const std::string& text, const std::vec
         return;
     }
     s.claudeExe = claudeExe_;
+    // Vous écrivez à l'orchestrateur : son prompt doit être à jour (règles de la discussion directe).
+    if (remember && orch_ && s.localId == orch_->brainConvId && s.state != claude::SessionState::Busy)
+        orchestratorRefreshBrain();
     if (!s.processRunning()) s.extraContext = contextFor(oc);
     if (remember) settings_.pushPromptHistory(text);
     s.send(text, images);
@@ -1080,9 +1191,120 @@ void App::requestRecap(const std::string& convId) {
     if (job->start(claudeExe_, settings_.recapModel, prompt, cwd)) jobs_.push_back(std::move(job));
 }
 
-// Une conversation a besoin d'un (nouveau) récap : jamais fait, ou la conversation a avancé depuis.
-static bool needsRecap(const ws::ConversationMeta& m) {
-    return m.messages >= 1 && (m.recap.empty() || m.recapTime < m.updated - 60);
+void App::requestRecaps(const std::vector<std::string>& convIds) {
+    if (claudeExe_.empty()) return;
+    FolderSynthesis s;
+    s.synthesize = false;
+    for (const std::string& id : convIds) {
+        const ws::ConversationMeta* meta = nullptr;
+        for (auto& oc : open_)
+            if (oc->session->localId == id) {
+                // Seulement si elle a changé : chaque sauvegarde repousse sa date de mise à jour (le récap paraîtrait périmé).
+                if (oc->session->dirty) saveConversation(*oc);
+                meta = &oc->meta;
+            }
+        if (!meta) meta = workspace_.findConversation(id).second;
+        if (meta && needsRecap(*meta)) s.toStart.push_back(id);
+    }
+    if (s.toStart.empty()) return;
+    s.total = (int)s.toStart.size();
+    syntheses_.push_back(std::move(s));
+}
+
+// ---------------------------------------------------------------------------
+// « Repartir du récap » : conversation neuve, contexte = récap de l'ancienne (+ mémoire cowork du dossier)
+// ---------------------------------------------------------------------------
+
+OpenConversation* App::replaceConversation(const std::string& convId, ws::Folder* folder, const std::string& title) {
+    if (!folder) return nullptr;
+    OpenConversation* old = nullptr;
+    for (auto& oc : open_)
+        if (oc->session->localId == convId) old = oc.get();
+    bool brain = isOrchBrain(convId);
+    std::string activeId = active_ >= 0 && active_ < (int)open_.size() ? open_[active_]->session->localId : std::string();
+    OpenConversation* oc = newConversation(folder, old ? old->session->cwd : std::string(), false);
+    if (!oc) return nullptr;
+    auto& s = *oc->session;
+    if (old) {
+        s.config = old->session->config;  // modèle, effort, mode, prompt système
+        oc->meta.pinned = old->meta.pinned;
+        oc->draft = old->draft;
+    }
+    s.title = title;
+    if (brain) {
+        oc->meta.pinned = true;
+        s.config.systemPromptMode = claude::SystemPromptMode::Append;
+        s.config.systemPrompt = orch_ ? orch_->brainPrompt() : claude::Orchestrator::systemPrompt(true);
+        s.config.enabledTools = orch_ ? orch_->brainTools() : std::vector<std::string>{"Read", "Glob", "Grep"};
+    }
+    oc->meta.status = "active";
+    oc->injectContext = true;  // notes, synthèses et récaps du dossier — dont celui de l'ancienne conversation
+    std::string nid = s.localId;
+    saveConversation(*oc);
+    if (old) {
+        old->meta.status = "done";
+        old->meta.pinned = false;
+        saveConversation(*old);
+        int idx = indexOfConversation(convId);
+        if (idx >= 0) closeConversation(idx);  // libère son processus ; elle reste dans l'espace de travail
+    }
+    // Les index ont bougé : la conversation affichée reste la même (ou devient la nouvelle si c'était l'ancienne).
+    int keep = indexOfConversation(activeId == convId ? nid : activeId);
+    if (keep >= 0) active_ = selectTab_ = keep;
+    if (orch_) orch_->conversationReplaced(convId, nid);
+    return indexOfConversation(nid) >= 0 ? open_[indexOfConversation(nid)].get() : nullptr;
+}
+
+void App::restartFromRecap(const std::string& convId) {
+    if (restarting_.count(convId)) return;
+    OpenConversation* oc = nullptr;
+    for (auto& o : open_)
+        if (o->session->localId == convId) oc = o.get();
+    if (!oc) return;
+    auto& s = *oc->session;
+    if (s.state == claude::SessionState::Busy || s.state == claude::SessionState::Starting || s.queuedMessages > 0) {
+        toast("Claude travaille encore dans cette conversation : attendez la fin du tour pour repartir du récap.", true);
+        return;
+    }
+    if (!folderOf(*oc)) {
+        toast("Conversation non classée : rangez-la dans un dossier pour repartir de son récap.", true);
+        return;
+    }
+    saveConversation(*oc);
+    if (needsRecap(oc->meta)) {
+        restarting_[convId] = oc->meta.recapTime;
+        requestRecap(convId);
+        toast("Récap en cours… la conversation repartira à neuf dès qu'il sera prêt.");
+    } else {
+        restarting_[convId] = -1;  // récap à jour (ou rien à résumer) : départ immédiat
+    }
+}
+
+void App::pumpRestarts() {
+    for (auto it = restarting_.begin(); it != restarting_.end();) {
+        const std::string id = it->first;
+        bool waiting = false;
+        for (auto& j : jobs_)
+            if (j->target == id && !j->finished()) waiting = true;
+        if (waiting) {
+            ++it;
+            continue;
+        }
+        int64_t before = it->second;
+        it = restarting_.erase(it);
+        OpenConversation* oc = nullptr;
+        for (auto& o : open_)
+            if (o->session->localId == id) oc = o.get();
+        if (!oc) continue;
+        if (before >= 0 && oc->meta.recapTime == before) {
+            toast("Récap indisponible : la conversation n'a pas été remise à zéro.", true);
+            continue;
+        }
+        std::string title = oc->session->title;
+        ws::Folder* f = folderOf(*oc);
+        if (replaceConversation(id, f, title))
+            toast("Nouvelle conversation « " + util::truncateUtf8(title, 40) + " » : elle repart du récap.");
+    }
 }
 
 const App::FolderSynthesis* App::synthesisFor(const ws::Folder* f) const {
@@ -1133,8 +1355,10 @@ void App::pumpFolderSyntheses() {
         }
         if (s.toStart.empty() && s.running.empty()) {
             std::string path = s.path;
+            bool synth = s.synthesize && !path.empty();
             syntheses_.erase(syntheses_.begin() + (long)k);
-            if (ws::Folder* f = workspace_.findFolderByPath(util::pathFromUtf8(path))) runFolderSynthesis(f);
+            if (synth)
+                if (ws::Folder* f = workspace_.findFolderByPath(util::pathFromUtf8(path))) runFolderSynthesis(f);
             continue;
         }
         ++k;
@@ -1185,30 +1409,48 @@ void App::refreshUsage(bool silent) {
     auto job = std::make_unique<claude::OneShot>();
     job->label = "Actualisation de l'usage";
     job->target = "#usage";
+    // La commande locale `/usage` du CLI : aucun appel au modèle (coût nul, aucun quota consommé) et elle
+    // répond même quand la limite est atteinte — contrairement à l'ancienne requête « ok » à Haiku.
     job->streamJson = true;
-    job->onEvent = [this](const json& j) {
-        if (j.value("type", "") == "rate_limit_event") usage_.onRateLimitEvent(j.value("rate_limit_info", json::object()));
+    job->slashCommands = true;
+    auto got = std::make_shared<bool>(false);
+    job->onEvent = [this, got](const json& j) {
+        if (j.contains("usage_report") && j["usage_report"].is_object())
+            if (usage_.onUsageReport(j["usage_report"].value("rate_limits", json::object()))) *got = true;
+        // Vieux CLI sans /usage : le texte part au modèle, la réponse porte quand même un rate_limit_event.
+        if (j.value("type", "") == "rate_limit_event") {
+            usage_.onRateLimitEvent(j.value("rate_limit_info", json::object()));
+            *got = true;
+        }
     };
-    job->onDone = [this, silent](claude::OneShot& j) {
-        if (!j.ok() && !silent) toast("Actualisation impossible : " + util::truncateUtf8(j.error(), 200), true);
+    job->onDone = [this, silent, got](claude::OneShot& j) {
+        if (*got || silent) return;
+        toast("Actualisation impossible : " + util::truncateUtf8(j.ok() ? "pas de mesure dans la réponse de /usage" : j.error(), 200),
+              true);
     };
-    if (job->start(claudeExe_, "haiku", "Réponds uniquement : ok", util::pathToUtf8(util::homeDir()))) jobs_.push_back(std::move(job));
+    if (job->start(claudeExe_, "haiku", "/usage", util::pathToUtf8(util::homeDir()))) jobs_.push_back(std::move(job));
 }
 
-// Usage tenu à jour sans y penser : au lancement, puis quand la mesure est périmée. Pendant qu'une
-// conversation travaille, chaque réponse apporte déjà un rate_limit_event : inutile d'interroger Haiku.
+// Usage tenu à jour sans y penser : au lancement, puis quand la mesure est périmée ou que la session
+// de 5 h vient de se réinitialiser. `/usage` étant gratuit, on peut se le permettre souvent.
 void App::autoRefreshUsage(bool atLaunch) {
     if (!settings_.autoRefreshUsage || claudeExe_.empty() || !optScreenshot_.empty()) return;
-    if (now_ - lastAutoUsage_ < 600) return;  // au plus une fois toutes les 10 min (même en cas d'échec)
-    for (auto& oc : open_)
-        if (oc->session->state == claude::SessionState::Busy || oc->session->state == claude::SessionState::Starting) return;
+    if (now_ - lastAutoUsage_ < 60) return;  // au plus une fois par minute (même en cas d'échec)
     int64_t t = util::nowUnix();
     int64_t age = usage_.lastUpdate > 0 ? t - usage_.lastUpdate : INT64_MAX;
-    bool stale = age > (atLaunch ? 120 : 15 * 60);
-    if (const claude::RateWindow* w = usage_.find("five_hour"); w && w->resetsAt > 0 && t > w->resetsAt && age > 60)
-        stale = true;  // la fenêtre de 5 h s'est réinitialisée depuis la dernière mesure
+    bool stale = age > (atLaunch ? 60 : 5 * 60);
+    bool resetPassed = false;
+    for (const char* name : {"five_hour", "seven_day"})
+        if (const claude::RateWindow* w = usage_.find(name); w && w->resetsAt > 0 && t > w->resetsAt + 5 && usage_.lastUpdate < w->resetsAt + 5)
+            resetPassed = true;
+    if (resetPassed) stale = true;  // une fenêtre s'est réinitialisée depuis la dernière mesure : nouvelle date à lire
+    // Pendant qu'une conversation travaille, ses réponses apportent déjà des rate_limit_event.
+    if (!resetPassed)
+        for (auto& oc : open_)
+            if (oc->session->state == claude::SessionState::Busy || oc->session->state == claude::SessionState::Starting) return;
     if (!stale) return;
-    if (!atLaunch && !windowFocused_ && !dash_) return;  // personne ne regarde : on attend
+    // Personne ne regarde : on attend (sauf réinitialisation, utile à l'orchestrateur en pause sur la limite).
+    if (!atLaunch && !resetPassed && !windowFocused_ && !dash_) return;
     lastAutoUsage_ = now_;
     refreshUsage(true);
 }
@@ -1267,7 +1509,9 @@ void App::handleGlobalShortcuts() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_PageDown, g) && !open_.empty()) selectTab_ = (active_ + 1) % (int)open_.size();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_PageUp, g) && !open_.empty())
         selectTab_ = (active_ + (int)open_.size() - 1) % (int)open_.size();
-    if (ImGui::Shortcut(ImGuiKey_Escape, g) && oc && oc->session->state == claude::SessionState::Busy) oc->session->interrupt();
+    // Échap quitte d'abord le mode « Sélectionner » (géré par drawConversation) ; sinon il interrompt Claude.
+    if (ImGui::Shortcut(ImGuiKey_Escape, g) && oc && !oc->hasTextSelection() && oc->session->state == claude::SessionState::Busy)
+        oc->session->interrupt();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_F, g) && oc) oc->focusSearch = oc->showSearch = !oc->showSearch;
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_L, g) && oc) oc->focusEditor = true;
     if (ImGui::Shortcut(ImGuiKey_F1, g)) showShortcuts_ = !showShortcuts_;
@@ -1280,6 +1524,7 @@ void App::handleGlobalShortcuts() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_3, g)) {
         page_ = page_ == 2 ? 0 : 2;
     }
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_4, g)) page_ = page_ == 3 ? 0 : 3;
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_D, g)) {
         if (dash_) closeDashboardWindow();
         else openDashboardWindow();

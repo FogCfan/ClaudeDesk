@@ -71,6 +71,7 @@ add_library(desk_core STATIC
     src/claude/UsageTracker.cpp
     src/claude/History.cpp
     src/claude/Orchestrator.cpp
+    src/claude/Designer.cpp
     src/workspace/Workspace.cpp
     src/app/Settings.cpp)
 # Processus enfant : Win32 ou POSIX (macOS, Linux).
@@ -98,6 +99,7 @@ add_executable(ClaudeDesk
     src/ui/PermissionPanel.cpp
     src/ui/Dashboard.cpp
     src/ui/OrchestratorPanel.cpp
+    src/ui/DesignerPanel.cpp
     src/ui/Tutorial.cpp
     src/ui/Anim.cpp)
 target_link_libraries(ClaudeDesk PRIVATE desk_core imgui_lib SDL3::SDL3)
@@ -129,7 +131,8 @@ if(CLAUDEDESK_BUILD_TESTS)
         tests/test_strings.cpp
         tests/test_protocol.cpp
         tests/test_workspace.cpp
-        tests/test_orchestrator.cpp)
+        tests/test_orchestrator.cpp
+        tests/test_designer.cpp)
     target_include_directories(desk_tests PRIVATE ${doctest_SOURCE_DIR})
     target_link_libraries(desk_tests PRIVATE desk_core)
     desk_warnings(desk_tests)

@@ -267,13 +267,26 @@ void App::drawConversation(OpenConversation& oc) {
     auto& s = *oc.session;
     const auto& pal = ui::palette();
 
+    // Échap : retour au rendu normal des messages passés en mode « Sélectionner ». IsKeyPressed ignore le
+    // propriétaire de la touche : ça marche aussi quand la zone de texte sélectionnable a le focus.
+    if (oc.hasTextSelection() && ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
+        ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+        oc.clearTextSelection();
+
     // --- En-tête ---
     {
         ws::Folder* f = folderOf(oc);
         float startX = ImGui::GetCursorPosX();
         float avail = ImGui::GetContentRegionAvail().x;
-        float bw = ImGui::CalcTextSize("Récap").x + ImGui::CalcTextSize("Rechercher").x + ImGui::CalcTextSize("Exporter").x +
-                   ImGui::GetStyle().FramePadding.x * 6 + ImGui::GetStyle().ItemSpacing.x * 3;
+        bool recapRunning = false;
+        for (auto& j : jobs_)
+            if (j->target == s.localId && !j->finished()) recapRunning = true;
+        bool restarting = restartPending(s.localId);
+        const char* recapLabel = recapRunning ? "Récap…###recap" : "Récap###recap";
+        const char* restartLabel = restarting ? "↻ Repart…###restart" : "↻ Repartir du récap###restart";
+        auto labelW = [](const char* l) { return ImGui::CalcTextSize(l, nullptr, true).x; };
+        float bw = labelW(recapLabel) + labelW(restartLabel) + ImGui::CalcTextSize("Rechercher").x +
+                   ImGui::CalcTextSize("Exporter").x + ImGui::GetStyle().FramePadding.x * 8 + ImGui::GetStyle().ItemSpacing.x * 4;
         ImGui::AlignTextToFramePadding();
         std::string where = f ? f->displayPath() : "Non classée";
         ImGui::TextColored(pal.dim, "%s", where.c_str());
@@ -285,10 +298,26 @@ void App::drawConversation(OpenConversation& oc) {
         ImGui::SameLine(startX + std::max(0.0f, avail - bw));
         if (ImGui::SmallButton("Rechercher")) oc.focusSearch = oc.showSearch = !oc.showSearch;
         ImGui::SameLine();
-        if (ImGui::SmallButton("Récap")) requestRecap(s.localId);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Génère un récapitulatif de cette conversation (utilisé pour reprendre le travail et\n"
-                              "injecté dans les nouvelles conversations du même dossier). Ctrl+Maj+R");
+        ImGui::BeginDisabled(recapRunning);
+        if (ImGui::SmallButton(recapLabel)) requestRecap(s.localId);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (recapRunning) ImGui::SetTooltip("Récap en cours de génération…");
+            else
+                ImGui::SetTooltip("Génère un récapitulatif de cette conversation, gardé en mémoire et injecté dans les\n"
+                                  "NOUVELLES conversations du même dossier. Celle-ci continue telle quelle. Ctrl+Maj+R%s",
+                                  oc.meta.recapTime > 0 ? ("\nDernier récap : " + util::humanDate(oc.meta.recapTime)).c_str() : "");
+        }
+        ImGui::SameLine();
+        bool busy = s.state == claude::SessionState::Busy || s.state == claude::SessionState::Starting;
+        ImGui::BeginDisabled(restarting || busy);
+        if (ImGui::SmallButton(restartLabel)) restartFromRecap(s.localId);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Remet le contexte à zéro : génère le récap (s'il manque ou date), ouvre une conversation\n"
+                              "neuve dans le même dossier qui le reçoit en contexte (avec les notes du projet), et range\n"
+                              "celle-ci en « terminée ». Mêmes modèle, effort et mode.%s",
+                              busy ? "\n\nDisponible à la fin du tour en cours." : "");
         ImGui::SameLine();
         if (ImGui::SmallButton("Exporter")) exportMarkdown(oc);
     }
@@ -425,16 +454,26 @@ void App::drawConversation(OpenConversation& oc) {
         c.width = width;
         if (e.kind == EntryKind::User || e.kind == EntryKind::Assistant) {
             ImVec2 gMin = ImGui::GetItemRectMin(), gMax = ImGui::GetItemRectMax();
-            bool hov = ImGui::IsMouseHoveringRect(gMin, gMax) && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            bool sel = oc.selectable.count(i) > 0;
+            const char* selLbl = sel ? "Rendu (Échap)" : "Sélectionner";
+            float bw2 = ImGui::CalcTextSize("Copier").x + ImGui::CalcTextSize(selLbl).x +
+                        ImGui::GetStyle().FramePadding.x * 4 + ImGui::GetStyle().ItemSpacing.x + 10;
+            // Bord droit réel : le groupe d'une carte « Vous » ne mesure que la largeur de son texte.
+            float right = std::max(gMax.x, gMin.x + width - slide);
+            gMax.x = right;
+            // Réponse de Claude : boutons juste AU-DESSUS du message, pour ne pas masquer sa première ligne.
+            // Carte « Vous » : dans le coin droit de sa ligne d'en-tête (« Vous hh:mm »), qui est vide.
+            // La zone de survol inclut la bande des boutons, sinon ils disparaîtraient quand on va cliquer dessus.
+            float btnH = ImGui::GetFontSize();  // SmallButton : pas de marge verticale
+            bool above = e.kind != EntryKind::User;
+            ImVec2 bMin = above ? ImVec2(right - bw2, gMin.y - btnH - 1) : ImVec2(right - bw2 - 6, gMin.y + 6);
+            ImVec2 bMax(bMin.x + bw2, bMin.y + btnH + 1);
+            bool hov = (ImGui::IsMouseHoveringRect(gMin, gMax) || ImGui::IsMouseHoveringRect(bMin, bMax)) &&
+                       ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
             if (hov) hoveredNow = i;
-            if (hov || oc.selectable.count(i)) {
-                // Boutons en surimpression en haut à droite du message
+            if (hov || sel) {
                 ImVec2 saved = ImGui::GetCursorScreenPos();
-                bool sel = oc.selectable.count(i) > 0;
-                const char* selLbl = sel ? "Rendu" : "Sélectionner";
-                float bw2 = ImGui::CalcTextSize("Copier").x + ImGui::CalcTextSize(selLbl).x +
-                            ImGui::GetStyle().FramePadding.x * 4 + ImGui::GetStyle().ItemSpacing.x + 10;
-                ImGui::SetCursorScreenPos(ImVec2(gMax.x - bw2, gMin.y + 4));
+                ImGui::SetCursorScreenPos(bMin);
                 ImGui::SetNextItemAllowOverlap();
                 if (ImGui::SmallButton("Copier")) {
                     ImGui::SetClipboardText(e.text.c_str());
@@ -446,7 +485,10 @@ void App::drawConversation(OpenConversation& oc) {
                     if (sel) oc.selectable.erase(i);
                     else oc.selectable.insert(i);
                 }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Texte sélectionnable à la souris (Ctrl+A, Ctrl+C…)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(sel ? "Revenir au rendu normal du message (Échap)"
+                                          : "Affiche le texte brut du message, sélectionnable à la souris\n"
+                                            "(Ctrl+A, Ctrl+C…). Échap pour revenir au rendu normal.");
                 ImGui::SetCursorScreenPos(saved);
             }
             // Clic droit n'importe où sur le message
@@ -784,11 +826,39 @@ bool App::drawBrainEntry(OpenConversation& oc, int i, float width) {
             ImGui::PopFont();
             if (pending && i + 1 >= (int)s.entries.size() - 1) {
                 ImGui::SameLine();
-                ImGui::TextDisabled("— répondez dans la carte en haut de la page");
+                ImGui::TextDisabled("— répondez ci-dessous ou dans la carte en haut de la page");
             }
             {
                 RightMargin rm(card.pad);
                 ui::renderMarkdown(cache.segBlocks[k], md, expandKey + 40 + (int)k);
+            }
+            // Options cliquables dans le fil, pour la DERNIÈRE question seulement (rien de dit depuis).
+            bool latest = true;
+            for (int j = i + 1; j < (int)s.entries.size() && latest; ++j)
+                if (s.entries[j].kind == EntryKind::User || s.entries[j].kind == EntryKind::Assistant) latest = false;
+            claude::Directives qd;
+            if (latest) qd = claude::parseDirectives("@@HUMAIN\n" + sg.body + "\n@@FIN");
+            // Plusieurs questions : la carte en haut de la page permet de répondre à chacune.
+            bool waitingMany = pending && orch_->questions.size() > 1;
+            if (latest && !waitingMany && qd.questions.size() == 1 && !qd.questions[0].options.empty()) {
+                const claude::HumanQuestion& q = qd.questions[0];
+                bool busy = s.state == claude::SessionState::Busy || s.state == claude::SessionState::Starting;
+                ImGui::Dummy(ImVec2(0, 2));
+                ImGui::TextDisabled("Répondre :");
+                ImGui::BeginDisabled(busy || !orchQuickAnswer_.empty());
+                for (size_t o = 0; o < q.options.size(); ++o) {
+                    std::string label = util::truncateUtf8(q.options[o], 70) + "##qopt" + std::to_string(o);
+                    ui::sameLineIfFits(ui::buttonWidth(label.c_str()));
+                    if (ImGui::Button(label.c_str())) {
+                        // Envoyé hors du rendu : l'envoi ajoute des entrées à la conversation qu'on parcourt.
+                        std::string title = q.title.empty() ? util::firstLine(q.text, 140) : q.title;
+                        orchQuickAnswer_ = pending ? "**" + title + "**\n" + q.options[o] : q.options[o];
+                        orchQuickAnswerConv_ = s.localId;
+                    }
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && q.options[o].size() > 70)
+                        ImGui::SetTooltip("%s", q.options[o].c_str());
+                }
+                ImGui::EndDisabled();
             }
             card.end();
         } else if (sg.kind == claude::TextSegment::Pause) {
@@ -802,6 +872,47 @@ bool App::drawBrainEntry(OpenConversation& oc, int i, float width) {
             {
                 RightMargin rm(card.pad);
                 ui::renderMarkdown(cache.segBlocks[k], md, expandKey + 60 + (int)k);
+            }
+            card.end();
+        } else if (sg.kind == claude::TextSegment::NewAgent) {
+            // Proposition de nouvel agent : jamais créé sans l'accord de l'humain (question dans la carte du haut).
+            claude::Directives nd = claude::parseDirectives("@@NOUVEL_AGENT " + sg.header + "\n@@FIN");
+            std::string name = nd.newAgents.empty() ? sg.header : nd.newAgents[0].name;
+            bool waiting = false;
+            if (pending)
+                for (auto& a : orch_->pendingAgents) waiting = waiting || a.name == name;
+            ImGui::Dummy(ImVec2(0, 2));
+            Card card(width - 8, ImVec4(pal.accent.x, pal.accent.y, pal.accent.z, 0.07f), true, pal.accent);
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextColored(pal.accent, "+ Nouvel agent proposé :");
+            ImGui::SameLine();
+            ImGui::TextUnformatted(name.c_str());
+            ImGui::PopFont();
+            if (waiting) {
+                ImGui::SameLine();
+                ui::badge("en attente de votre accord", pal.warn);
+            }
+            {
+                RightMargin rm(card.pad);
+                ui::renderMarkdown(cache.segBlocks[k], md, expandKey + 64 + (int)k);
+            }
+            // Réponse rapide quand c'est la seule question en attente ; sinon, la carte du haut de la page.
+            if (waiting && orch_->questions.size() == 1) {
+                bool busy = s.state == claude::SessionState::Busy || s.state == claude::SessionState::Starting;
+                std::string title = orch_->questions[0].title;
+                ImGui::BeginDisabled(busy || !orchQuickAnswer_.empty());
+                for (const std::string& label :
+                     {claude::Orchestrator::agentAcceptLabel(name), claude::Orchestrator::agentRefuseLabel(name)}) {
+                    ui::sameLineIfFits(ui::buttonWidth(label.c_str()));
+                    if (ImGui::Button(label.c_str())) {
+                        orchQuickAnswer_ = "**" + title + "**\n" + label;
+                        orchQuickAnswerConv_ = s.localId;
+                    }
+                }
+                ImGui::EndDisabled();
+                ImGui::TextDisabled("Pour préciser ce que vous attendez de cet agent : « Autre » dans la carte en haut de la page.");
+            } else if (waiting) {
+                ImGui::TextDisabled("Répondez dans la carte en haut de la page.");
             }
             card.end();
         } else if (sg.kind == claude::TextSegment::Wait) {

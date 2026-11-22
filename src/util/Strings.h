@@ -34,6 +34,8 @@ int64_t nowUnix();
 std::string isoFromUnix(int64_t t);
 int64_t unixFromIso(std::string_view iso);  // 0 si invalide
 std::string humanDate(int64_t t);            // "04/11 10:12"
+std::string humanWhen(int64_t t);            // "aujourd'hui 02:10", "demain 07:00", "hier 23:10", "ven. 28/11 07:00"
+int localMinuteOfDay(int64_t t);             // heure locale en minutes depuis minuit (0..1439)
 std::string humanDuration(int64_t seconds);  // "2 h 05", "12 min", "45 s"
 std::string humanTokens(int64_t n);          // "12,3 k", "1,20 M"
 std::string formatUsd(double usd);           // "0,0123 $"

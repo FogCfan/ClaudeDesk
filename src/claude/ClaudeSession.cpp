@@ -477,6 +477,10 @@ void ClaudeSession::handleAssistant(const json& msg, const std::string& parent) 
         int64_t ctx = jint(u, "input_tokens") + jint(u, "cache_creation_input_tokens") + jint(u, "cache_read_input_tokens") +
                       jint(u, "output_tokens");
         if (ctx > 0) stats.contextTokens = ctx;
+        if (!mid.empty() && mid != lastUsageMsgId_) {
+            lastUsageMsgId_ = mid;
+            stats.apiCalls++;
+        }
         std::string model = jstr(msg, "model");
         if (!model.empty()) stats.lastModel = model;
     }
