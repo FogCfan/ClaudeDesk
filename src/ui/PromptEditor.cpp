@@ -8,6 +8,7 @@
 #include <imgui_stdlib.h>
 
 #include "app/App.h"
+#include "ui/Icons.h"
 #include "ui/Theme.h"
 #include "util/Strings.h"
 
@@ -61,97 +62,100 @@ std::vector<SlashItem> slashCandidates(const claude::ClaudeSession& s, const std
 
 }  // namespace
 
+// Barre sous le fil : modèle, effort, mode, joindre, mémoire (puces plates qui passent à la ligne au besoin),
+// contexte à droite. Sa hauteur est mesurée (oc.quickBarHeight) pour réserver la bonne place sous le fil.
 void App::drawQuickBar(OpenConversation& oc) {
     auto& s = *oc.session;
     const auto& pal = ui::palette();
-    float comboW = ImGui::GetFontSize() * 8.5f;
+    const float y0 = ImGui::GetCursorPosY();
+    bool first = true;
+    auto next = [&](const char* label) {
+        if (!first) ui::sameLineIfFits(ui::buttonWidth(label));
+        first = false;
+    };
 
     // Modèle (changé à chaud)
     {
-        std::string current = s.config.model.empty() ? "Modèle par défaut" : s.config.model;
-        for (auto& m : s.models)
-            if (m.value == s.config.model) current = m.displayName;
-        for (auto& c : claude::modelChoices())
-            if (s.models.empty() && c.value == s.config.model) current = c.label;
-        ImGui::SetNextItemWidth(comboW);
-        if (ImGui::BeginCombo("##model", current.c_str())) {
-            if (!s.models.empty()) {
-                for (auto& m : s.models) {
-                    std::string v = m.value == "default" ? "" : m.value;
-                    if (ImGui::Selectable(m.displayName.c_str(), v == s.config.model)) s.setModel(v);
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", m.description.c_str());
-                }
-            } else {
-                for (auto& c : claude::modelChoices()) {
-                    if (ImGui::Selectable(c.label, c.value == s.config.model)) s.setModel(c.value);
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", c.help);
-                }
-            }
-            ImGui::EndCombo();
+        std::string label = (s.config.model.empty() ? std::string("Modèle par défaut") : claude::modelDisplayName(s.config.model)) +
+                            "  ▾###qmodel";
+        bool ok = modelUsable(s.config.model);
+        next(label.c_str());
+        if (ui::chip(label.c_str(), ok ? nullptr : &pal.warn)) ImGui::OpenPopup("##qmodelpop");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(ok ? "Modèle (changé immédiatement)" : "Ce modèle n'est pas inclus dans votre abonnement");
+        if (ImGui::BeginPopup("##qmodelpop")) {
+            std::string chosen;
+            if (drawModelPickerItems(&s, s.config.model, chosen)) s.setModel(chosen);
+            ImGui::EndPopup();
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Modèle (appliqué immédiatement)");
     }
-    ImGui::SameLine();
-    // Effort (redémarrage transparent avec --resume)
+    // Effort (relance transparente avec --resume)
     {
-        std::string current = "Effort : défaut";
+        std::string cur = "auto";
         for (auto& c : claude::effortChoices())
-            if (c.value == s.config.effort && !s.config.effort.empty()) current = std::string("Effort : ") + c.label;
-        ImGui::SetNextItemWidth(comboW);
-        if (ImGui::BeginCombo("##effort", current.c_str())) {
+            if (c.value == s.config.effort && !s.config.effort.empty()) cur = util::toLower(c.label);
+        std::string label = "Effort " + cur + "  ▾###qeffort";
+        next(label.c_str());
+        if (ui::chip(label.c_str(), &pal.dim)) ImGui::OpenPopup("##qeffortpop");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Effort de réflexion. Le changer relance la session en arrière-plan (historique conservé).");
+        if (ImGui::BeginPopup("##qeffortpop")) {
             for (auto& c : claude::effortChoices()) {
                 if (ImGui::Selectable(c.label, c.value == s.config.effort)) {
                     claude::SessionConfig cfg = s.config;
                     cfg.effort = c.value;
                     s.applyConfig(cfg);
                 }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", c.help);
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", c.help);
             }
-            ImGui::EndCombo();
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Effort de réflexion. Le changer relance la session en arrière-plan\n"
-                              "(l'historique est conservé grâce à --resume).");
-    }
-    ImGui::SameLine();
-    // Mode de permission (changé à chaud)
-    {
-        std::string current = s.config.permissionMode;
-        for (auto& c : claude::permissionModeChoices())
-            if (c.value == s.config.permissionMode) current = c.label;
-        bool danger = s.config.permissionMode == "bypassPermissions";
-        if (danger) ImGui::PushStyleColor(ImGuiCol_FrameBg, ui::palette().err);
-        ImGui::SetNextItemWidth(comboW);
-        static std::string pendingBypass;
-        if (ImGui::BeginCombo("##mode", ("Mode : " + current).c_str())) {
-            for (auto& c : claude::permissionModeChoices()) {
-                if (ImGui::Selectable(c.label, c.value == s.config.permissionMode)) {
-                    if (std::string(c.value) == "bypassPermissions" && settings_.confirmBypass) pendingBypass = s.localId;
-                    else s.setPermissionMode(c.value);
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", c.help);
-            }
-            ImGui::EndCombo();
-        }
-        if (danger) ImGui::PopStyleColor();
-        if (pendingBypass == s.localId) {
-            ImGui::OpenPopup("Confirmer le mode sans permissions");
-            pendingBypass.clear();
-        }
-        if (ImGui::BeginPopupModal("Confirmer le mode sans permissions", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextColored(pal.err, "Claude pourra exécuter n'importe quelle commande et modifier n'importe quel fichier");
-            ImGui::TextColored(pal.err, "sans vous demander. À réserver aux environnements jetables.");
-            if (ImGui::Button("Activer quand même")) {
-                s.setPermissionMode("bypassPermissions");
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Annuler")) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Joindre…")) {
+    // Mode de permission (changé à chaud)
+    static std::string pendingBypass;
+    {
+        std::string cur = s.config.permissionMode;
+        for (auto& c : claude::permissionModeChoices())
+            if (c.value == s.config.permissionMode) cur = c.label;
+        bool danger = s.config.permissionMode == "bypassPermissions";
+        std::string label = "Mode " + util::toLower(cur) + "  ▾###qmode";
+        next(label.c_str());
+        if (ui::chip(label.c_str(), danger ? &pal.err : &pal.dim)) ImGui::OpenPopup("##qmodepop");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ce que Claude peut faire sans vous demander (changé immédiatement)");
+        if (ImGui::BeginPopup("##qmodepop")) {
+            for (auto& c : claude::permissionModeChoices()) {
+                bool bad = std::string(c.value) == "bypassPermissions";
+                if (bad) ImGui::PushStyleColor(ImGuiCol_Text, pal.err);
+                if (ImGui::Selectable(c.label, c.value == s.config.permissionMode)) {
+                    if (bad && settings_.confirmBypass) pendingBypass = s.localId;
+                    else s.setPermissionMode(c.value);
+                }
+                if (bad) ImGui::PopStyleColor();
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", c.help);
+            }
+            ImGui::EndPopup();
+        }
+    }
+    if (pendingBypass == s.localId) {
+        ImGui::OpenPopup("Confirmer le mode sans permissions");
+        pendingBypass.clear();
+    }
+    if (ImGui::BeginPopupModal("Confirmer le mode sans permissions", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(pal.err, "Claude pourra exécuter n'importe quelle commande et modifier n'importe quel fichier");
+        ImGui::TextColored(pal.err, "sans vous demander. À réserver aux environnements jetables.");
+        if (ImGui::Button("Activer quand même")) {
+            s.setPermissionMode("bypassPermissions");
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Annuler")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    // Joindre
+    next("+ Joindre");
+    if (ui::chip("+ Joindre", &pal.dim)) {
         std::string id = s.localId;
         openFileDialog([this, id](const std::vector<std::string>& files) {
             for (auto& o : open_)
@@ -159,25 +163,37 @@ void App::drawQuickBar(OpenConversation& oc) {
                     for (auto& f : files) attachFile(*o, f);
         });
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Joindre des images ou référencer des fichiers (glisser-déposer marche aussi)");
-    ImGui::SameLine();
-    ImGui::Checkbox("Mémoire du projet", &oc.injectContext);
-    if (ImGui::IsItemHovered()) {
-        ImGui::BeginTooltip();
-        ImGui::TextUnformatted("Injecte dans le prompt système les notes du projet, les synthèses et les récaps\n"
-                               "des conversations précédentes du dossier (au démarrage de la session).");
-        if (s.processRunning() || !s.claudeSessionId.empty())
-            ImGui::TextColored(pal.warn, "Session déjà démarrée : s'appliquera à une nouvelle session.");
-        ImGui::EndTooltip();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Joindre des images ou des fichiers (glisser-déposer marche aussi)");
+    // Mémoire du projet : bascule
+    {
+        const char* label = oc.injectContext ? "✓ Mémoire###qmem" : "Mémoire###qmem";
+        next(label);
+        if (ui::chip(label, oc.injectContext ? &pal.accent : &pal.dim)) oc.injectContext = !oc.injectContext;
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted("Mémoire du projet : notes, synthèses et récaps du dossier donnés à Claude au début\n"
+                                   "de la conversation. Clic : activer / désactiver.");
+            if (s.processRunning() || !s.claudeSessionId.empty())
+                ImGui::TextColored(pal.warn, "Session déjà démarrée : s'appliquera à une nouvelle session.");
+            ImGui::EndTooltip();
+        }
     }
-
-    // État compact à droite : contexte utilisé
+    // Contexte, à droite (sur la ligne si la place le permet, sinon dessous — jamais par-dessus le reste)
     if (s.stats.contextWindow > 0) {
         float f = (float)s.stats.contextTokens / (float)s.stats.contextWindow;
-        std::string txt = "Contexte " + std::to_string((int)(f * 100)) + " %";
-        float w = ImGui::GetFontSize() * 7;
-        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetContentRegionMax().x - w));
-        ui::usageBar(f, txt.c_str(), ImGui::GetFrameHeight(), -1, "##ctxbar");
+        char txt[32];
+        std::snprintf(txt, sizeof txt, "contexte %d %%", (int)(f * 100 + 0.5f));
+        const float lh = ImGui::GetTextLineHeight();
+        const float w = lh + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(txt).x + ImGui::GetStyle().FramePadding.x;
+        ImGui::SameLine();
+        if (ImGui::GetContentRegionAvail().x < w + ImGui::GetFontSize()) ImGui::NewLine();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - w));
+        ImGui::AlignTextToFramePadding();
+        ImGui::BeginGroup();
+        ui::miniRing(f, lh * 0.85f, "##ctxring");
+        ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextColored(f > 0.7f ? pal.warn : pal.dim, "%s", txt);
+        ImGui::EndGroup();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s / %s jetons dans la fenêtre de contexte.\nTapez /compact pour la résumer.",
                               util::humanTokens(s.stats.contextTokens).c_str(), util::humanTokens(s.stats.contextWindow).c_str());
@@ -187,18 +203,18 @@ void App::drawQuickBar(OpenConversation& oc) {
     if (!oc.attachments.empty()) {
         for (size_t i = 0; i < oc.attachments.size(); ++i) {
             ImGui::PushID((int)i);
+            if (i > 0) ui::sameLineIfFits(ImGui::CalcTextSize(oc.attachments[i].name.c_str()).x + ImGui::GetFontSize() * 2);
             ui::badge(oc.attachments[i].name.c_str(), pal.link);
             ImGui::SameLine(0, 2);
-            if (ImGui::SmallButton("x")) {
+            if (ImGui::SmallButton("×")) {
                 oc.attachments.erase(oc.attachments.begin() + i);
                 ImGui::PopID();
                 break;
             }
-            ImGui::SameLine();
             ImGui::PopID();
         }
-        ImGui::NewLine();
     }
+    oc.quickBarHeight = ImGui::GetCursorPosY() - y0;
 }
 
 void App::drawSlashPopup(OpenConversation& oc, const std::string& prefix) {
@@ -274,9 +290,11 @@ void App::drawPromptEditor(OpenConversation& oc) {
         }
     }
 
-    float sendW = ImGui::GetFontSize() * 6.5f;
-    ImVec2 size(ImGui::GetContentRegionAvail().x - sendW - ImGui::GetStyle().ItemSpacing.x,
+    // Boutons Envoyer / Arrêter compacts (icônes) à droite de l'éditeur
+    const float btn = ImGui::GetFrameHeight() * 1.45f;
+    ImVec2 size(ImGui::GetContentRegionAvail().x - btn - ImGui::GetStyle().ItemSpacing.x,
                 std::max(ImGui::GetFrameHeight() * 2, ImGui::GetContentRegionAvail().y - 4));
+    const float editorTop = ImGui::GetCursorPosY();
     if (oc.focusEditor) {
         ImGui::SetKeyboardFocusHere();
         oc.focusEditor = false;
@@ -301,6 +319,8 @@ void App::drawPromptEditor(OpenConversation& oc) {
         std::string hint = settings_.enterSends
                                ? "Écrivez à Claude…   Entrée : envoyer · Maj+Entrée : nouvelle ligne · / : commandes"
                                : "Écrivez à Claude…   Ctrl+Entrée : envoyer · / : commandes";
+        // Étroit : seulement l'invitation (les raccourcis sont dans l'infobulle des boutons et l'aide F1)
+        if (ImGui::CalcTextSize(hint.c_str()).x > ImGui::GetItemRectSize().x - st.FramePadding.x * 2) hint = "Écrivez à Claude…";
         ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + st.FramePadding.x, p.y + st.FramePadding.y), ui::col(pal.dim), hint.c_str());
     }
     if (submitted && !slash) sendDraft(oc);
@@ -308,18 +328,37 @@ void App::drawPromptEditor(OpenConversation& oc) {
 
     ImGui::SameLine();
     ImGui::BeginGroup();
-    bool busy = s.state == claude::SessionState::Busy;
-    float bh = (size.y - ImGui::GetStyle().ItemSpacing.y) * (busy ? 0.5f : 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button, pal.accent);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(pal.accent.x * 1.1f, pal.accent.y * 1.1f, pal.accent.z * 1.1f, 1));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
-    ImGui::BeginDisabled(oc.draft.empty() && oc.attachments.empty());
-    if (ImGui::Button(busy ? "Envoyer\n(en file)" : "Envoyer", ImVec2(sendW, bh))) sendDraft(oc);
-    ImGui::EndDisabled();
-    ImGui::PopStyleColor(3);
-    if (busy) {
-        if (ImGui::Button("Stop", ImVec2(sendW, bh))) s.interrupt();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Interrompre le tour en cours (Échap)");
+    {
+        bool busy = s.state == claude::SessionState::Busy;
+        bool canSend = !(oc.draft.empty() && oc.attachments.empty());
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        // Bouton carré à icône : fond orange s'il est actif, discret sinon
+        auto iconButton = [&](const char* id, ui::Icon icon, bool primary, bool enabled) -> bool {
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::BeginDisabled(!enabled);
+            bool clicked = ImGui::InvisibleButton(id, ImVec2(btn, btn));
+            bool hov = ImGui::IsItemHovered();
+            ImGui::EndDisabled();
+            ImVec4 bg = primary && enabled ? pal.accent : ImGui::GetStyleColorVec4(ImGuiCol_FrameBg);
+            if (hov && enabled) bg = primary ? ImVec4(std::min(1.0f, bg.x * 1.12f), std::min(1.0f, bg.y * 1.12f), std::min(1.0f, bg.z * 1.12f), 1)
+                                             : ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered);
+            dl->AddRectFilled(p, ImVec2(p.x + btn, p.y + btn), ui::col(bg), ImGui::GetStyle().FrameRounding + 2);
+            float is = btn * 0.46f;
+            ImU32 ic = primary && enabled ? ui::col(ImVec4(1, 1, 1, 1)) : ui::col(enabled ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : pal.dim);
+            ui::drawIcon(dl, icon, ImVec2(p.x + (btn - is) * 0.5f, p.y + (btn - is) * 0.5f), is, ic);
+            return clicked && enabled;
+        };
+        // Alignés en bas de l'éditeur : Arrêter (pendant un tour) au-dessus d'Envoyer
+        float yBottom = editorTop + size.y - btn;
+        if (busy) {
+            ImGui::SetCursorPosY(std::max(editorTop, yBottom - btn - ImGui::GetStyle().ItemSpacing.y));
+            if (iconButton("##stop", ui::Icon::Stop, false, true)) s.interrupt();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Interrompre le tour en cours (Échap)");
+        }
+        ImGui::SetCursorPosY(yBottom);
+        if (iconButton("##send", ui::Icon::Send, true, canSend)) sendDraft(oc);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(busy ? "Envoyer (le message attendra la fin du tour)" : "Envoyer");
     }
     ImGui::EndGroup();
     ImVec2 zoneMax = ImGui::GetItemRectMax();

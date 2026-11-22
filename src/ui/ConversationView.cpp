@@ -282,18 +282,29 @@ void App::drawWelcome() {
     if (ImGui::Button("Projet exemple", ImVec2(third, 0))) createExampleProject();
     ImGui::Dummy(ImVec2(0, 12));
 
-    // Conversations récentes, tous projets confondus.
-    std::vector<std::pair<ws::Folder*, ws::ConversationMeta*>> recent;
+    // Discussions récentes, tous projets confondus : la session actuelle de chacune (les sessions résumées et
+    // poursuivies ailleurs n'y figurent pas).
+    struct Recent {
+        ws::Folder* f;
+        ws::ConversationMeta* m;
+        int sessions;
+    };
+    std::vector<Recent> recent;
     std::function<void(ws::Folder*)> collect = [&](ws::Folder* f) {
-        for (auto& c : f->conversations) recent.push_back({f, &c});
+        for (const auto& c : ws::conversationChains(*f)) recent.push_back({f, c.latest(), c.size()});
         for (auto& ch : f->children) collect(ch.get());
     };
     for (auto& p : workspace_.projects()) collect(p.get());
-    std::sort(recent.begin(), recent.end(), [](auto& a, auto& b) { return a.second->updated > b.second->updated; });
+    std::sort(recent.begin(), recent.end(), [](auto& a, auto& b) { return a.m->updated > b.m->updated; });
     if (!recent.empty()) {
         ImGui::SeparatorText("Reprendre");
         for (size_t i = 0; i < recent.size() && i < 10; ++i) {
-            auto [f, m] = recent[i];
+            auto [f, m, sessions] = recent[i];
+            // Titres génériques de l'orchestrateur : on nomme plutôt l'agent ou le projet
+            std::string title = m->title;
+            if (title == "Tâches de l'orchestrateur" && isAgentFolder(f)) title = "Agent « " + f->name + " »";
+            else if (isBrainConversation(f, *m)) title = "Orchestrateur de « " + f->name + " »";
+            if (sessions > 1) title += "  ·  session " + std::to_string(sessions);
             ImGui::PushID((int)i);
             if (ImGui::Selectable(("##r" + m->id).c_str(), false, 0, ImVec2(colW, ImGui::GetTextLineHeight() * 2.1f))) {
                 openConversation(m->id);
@@ -302,7 +313,7 @@ void App::drawWelcome() {
             }
             ImGui::SameLine(ImGui::GetStyle().ItemSpacing.x);
             ImGui::BeginGroup();
-            ImGui::TextUnformatted(m->title.c_str());
+            ImGui::TextUnformatted(title.c_str());
             ImGui::TextDisabled("%s  ·  %s  ·  %d messages", f->displayPath().c_str(), util::humanDate(m->updated).c_str(),
                                 m->messages);
             ImGui::EndGroup();
@@ -324,8 +335,9 @@ void App::drawConversation(OpenConversation& oc) {
         ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
         oc.clearTextSelection();
 
-    // --- En-tête ---
+    // --- En-tête : fil d'Ariane (projet › thème · dossier) à gauche, actions en puces plates à droite ---
     {
+        const auto& pal2 = ui::palette();
         ws::Folder* f = folderOf(oc);
         float startX = ImGui::GetCursorPosX();
         float avail = ImGui::GetContentRegionAvail().x;
@@ -333,44 +345,57 @@ void App::drawConversation(OpenConversation& oc) {
         for (auto& j : jobs_)
             if (j->target == s.localId && !j->finished()) recapRunning = true;
         bool restarting = restartPending(s.localId);
+        bool busy = s.state == claude::SessionState::Busy || s.state == claude::SessionState::Starting;
+        const char* searchLabel = oc.showSearch ? "Rechercher ×###search" : "Rechercher###search";
         const char* recapLabel = recapRunning ? "Récap…###recap" : "Récap###recap";
-        const char* restartLabel = restarting ? "↻ Repart…###restart" : "↻ Repartir du récap###restart";
-        auto labelW = [](const char* l) { return ImGui::CalcTextSize(l, nullptr, true).x; };
-        float bw = labelW(recapLabel) + labelW(restartLabel) + ImGui::CalcTextSize("Rechercher").x +
-                   ImGui::CalcTextSize("Exporter").x + ImGui::GetStyle().FramePadding.x * 8 + ImGui::GetStyle().ItemSpacing.x * 4;
-        ImGui::AlignTextToFramePadding();
+        const char* restartLabel = restarting ? "↻ Repart…###restart" : "↻ Repartir###restart";
+        const char* exportLabel = "Exporter###export";
+        float sp = ImGui::GetStyle().ItemSpacing.x * 0.5f;
+        float bw = ui::buttonWidth(searchLabel) + ui::buttonWidth(recapLabel) + ui::buttonWidth(restartLabel) +
+                   ui::buttonWidth(exportLabel) + sp * 3;
+        // Le fil d'Ariane prend ce qui reste, raccourci par la gauche
+        float room = avail - bw - ImGui::GetFontSize();
         std::string where = f ? f->displayPath() : "Non classée";
-        ImGui::TextColored(pal.dim, "%s", where.c_str());
-        ImGui::SameLine();
-        float room = avail - bw - ImGui::CalcTextSize(where.c_str()).x - 30;
-        ImGui::TextDisabled("·  %s", ellipsizeLeft(s.cwd, room).c_str());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nDossier de travail de Claude (clic : ouvrir dans l'Explorateur)", s.cwd.c_str());
-        if (ImGui::IsItemClicked()) util::openInShell(s.cwd);
-        ImGui::SameLine(startX + std::max(0.0f, avail - bw));
-        if (ImGui::SmallButton("Rechercher")) oc.focusSearch = oc.showSearch = !oc.showSearch;
+        std::string crumb = where + "  ·  " + s.cwd;
+        ImGui::AlignTextToFramePadding();
+        if (room > ImGui::GetFontSize() * 3) {
+            std::string shown = ImGui::CalcTextSize(crumb.c_str()).x <= room ? crumb
+                                : ImGui::CalcTextSize(where.c_str()).x <= room ? where
+                                                                                 : ellipsizeLeft(where, room);
+            ImGui::TextColored(pal2.dim, "%s", shown.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s\n%s\nClic : ouvrir le dossier de travail", where.c_str(), s.cwd.c_str());
+            if (ImGui::IsItemClicked()) util::openInShell(s.cwd);
+            ImGui::SameLine(startX + std::max(0.0f, avail - bw));
+        } else {
+            ImGui::SetCursorPosX(startX + std::max(0.0f, avail - bw));
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(sp, ImGui::GetStyle().ItemSpacing.y));
+        if (ui::chip(searchLabel, &pal2.dim)) oc.focusSearch = oc.showSearch = !oc.showSearch;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Filtrer les messages de la conversation");
         ImGui::SameLine();
         ImGui::BeginDisabled(recapRunning);
-        if (ImGui::SmallButton(recapLabel)) requestRecap(s.localId);
+        if (ui::chip(recapLabel, &pal2.dim)) requestRecap(s.localId);
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             if (recapRunning) ImGui::SetTooltip("Récap en cours de génération…");
             else
-                ImGui::SetTooltip("Génère un récapitulatif de cette conversation, gardé en mémoire et injecté dans les\n"
-                                  "NOUVELLES conversations du même dossier. Celle-ci continue telle quelle. Ctrl+Maj+R%s",
+                ImGui::SetTooltip("Résume cette conversation : le récap est gardé et donné aux NOUVELLES conversations du\n"
+                                  "même dossier. Celle-ci continue telle quelle. Ctrl+Maj+R%s",
                                   oc.meta.recapTime > 0 ? ("\nDernier récap : " + util::humanDate(oc.meta.recapTime)).c_str() : "");
         }
         ImGui::SameLine();
-        bool busy = s.state == claude::SessionState::Busy || s.state == claude::SessionState::Starting;
         ImGui::BeginDisabled(restarting || busy);
-        if (ImGui::SmallButton(restartLabel)) restartFromRecap(s.localId);
+        if (ui::chip(restartLabel, &pal2.dim)) restartFromRecap(s.localId);
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Remet le contexte à zéro : génère le récap (s'il manque ou date), ouvre une conversation\n"
-                              "neuve dans le même dossier qui le reçoit en contexte (avec les notes du projet), et range\n"
-                              "celle-ci en « terminée ». Mêmes modèle, effort et mode.%s",
+            ImGui::SetTooltip("Repartir du récap : remet le contexte à zéro. Une conversation neuve reçoit le récap de\n"
+                              "celle-ci (mêmes modèle, effort et mode) ; celle-ci devient une session précédente.%s",
                               busy ? "\n\nDisponible à la fin du tour en cours." : "");
         ImGui::SameLine();
-        if (ImGui::SmallButton("Exporter")) exportMarkdown(oc);
+        if (ui::chip(exportLabel, &pal2.dim)) exportMarkdown(oc);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Exporter la conversation en Markdown");
+        ImGui::PopStyleVar();
     }
     if (oc.showSearch) {
         ImGui::SetNextItemWidth(-1);
@@ -385,13 +410,12 @@ void App::drawConversation(OpenConversation& oc) {
 
     // --- Hauteur réservée en bas : permissions + barre rapide + éditeur ---
     float lineH = ImGui::GetFrameHeightWithSpacing();
-    float bottom = oc.editorHeight + lineH * 1.4f + 10;
+    float bottom = oc.editorHeight + (oc.quickBarHeight > 0 ? oc.quickBarHeight : lineH * 1.4f) + 10;
     if (!s.permissions.empty())
         bottom += oc.permPanelHeight > 0 ? oc.permPanelHeight
                                          : std::min(ImGui::GetContentRegionAvail().y * 0.55f, ImGui::GetFontSize() * 20);
     else
         oc.permPanelHeight = 0;
-    if (!oc.attachments.empty()) bottom += lineH;
 
     // Défilement fluide : la molette fixe une cible, la vue y glisse en douceur.
     bool smoothScroll = settings_.smoothScroll && settings_.animations;
@@ -748,6 +772,10 @@ void App::drawEntry(OpenConversation& oc, int i, float width) {
                 drawAuthErrorCard(oc, i, width);
                 break;
             }
+            if (e.kind == EntryKind::Error && claude::isModelRefusalText(e.text)) {
+                drawModelRefusedCard(oc, i, width);
+                break;
+            }
             ImGui::PushStyleColor(ImGuiCol_Text, e.kind == EntryKind::Error ? pal.err : pal.dim);
             ImGui::PushTextWrapPos(0.0f);
             ImGui::TextUnformatted(((e.kind == EntryKind::Error ? "⚠ " : "• ") + e.text).c_str());
@@ -825,6 +853,62 @@ void App::drawAuthErrorCard(OpenConversation& oc, int i, float width) {
             ImGui::TreePop();
         }
         ImGui::PopStyleColor();
+    }
+    card.end();
+    ImGui::Dummy(ImVec2(0, 2));
+}
+
+// Message refusé à cause du modèle (Fable hors abonnement Pro…) : l'explication, et un bouton par modèle utilisable
+// qui change de modèle et renvoie le message.
+void App::drawModelRefusedCard(OpenConversation& oc, int i, float width) {
+    auto& s = *oc.session;
+    const Entry& e = s.entries[i];
+    const auto& pal = ui::palette();
+    bool latest = true;
+    for (size_t j = (size_t)i + 1; j < s.entries.size(); ++j)
+        if (s.entries[j].kind == EntryKind::User || s.entries[j].kind == EntryKind::Assistant) latest = false;
+    bool busy = s.state == claude::SessionState::Busy || s.state == claude::SessionState::Starting;
+    bool credits = e.text.find("crédits d'usage") != std::string::npos;
+
+    ImGui::Dummy(ImVec2(0, 2));
+    Card card(width, pal.cardBg, true, latest ? pal.warn : pal.dim);
+    {
+        RightMargin rm(card.pad);
+        ImGui::PushFont(fontBold, 0.0f);
+        ImGui::TextColored(latest ? pal.warn : pal.dim, "%s",
+                           credits ? "Message non traité : modèle hors abonnement" : "Message non traité : modèle indisponible");
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", clockTime(e.time).c_str());
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(e.text.c_str());
+        ImGui::PopTextWrapPos();
+        if (latest && orchManages(s.localId)) {
+            ImGui::TextDisabled("L'orchestrateur renvoie la tâche avec un modèle de votre abonnement.");
+        } else if (latest) {
+            ImGui::Spacing();
+            ImGui::BeginDisabled(busy);
+            bool first = true;
+            for (auto it = claude::modelFamilies().rbegin(); it != claude::modelFamilies().rend(); ++it) {
+                const claude::ModelFamily& f = *it;
+                if (!modelUsable(f.alias) || claude::findModelFamily(s.modelRefusedName) == &f) continue;
+                std::string label = "↻ " + std::string(f.name) + " " + f.version + "##refused" + f.alias + std::to_string(i);
+                if (!first) ui::sameLineIfFits(ui::buttonWidth(label.c_str()));
+                if (first) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, pal.accent);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+                }
+                bool go = ImGui::Button(label.c_str());
+                if (first) ImGui::PopStyleColor(2);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Passer à %s %s (%s) et renvoyer le message.", f.name, f.version, f.tagline);
+                if (go) {
+                    s.setModel(f.alias);
+                    s.resendLast();
+                }
+                first = false;
+            }
+            ImGui::EndDisabled();
+        }
     }
     card.end();
     ImGui::Dummy(ImVec2(0, 2));

@@ -203,68 +203,85 @@ void App::drawDashboard(bool detached) {
     float titleH = ImGui::GetItemRectSize().y;
     ImGui::PopFont();
     float midY = rowY + (titleH - ImGui::GetTextLineHeight()) * 0.5f;
-    ImGui::SameLine(0, fs);
-    ImGui::SetCursorPosY(midY);
-    ui::badge((std::to_string(nWorking) + " en cours").c_str(), pal.accent);
-    ImGui::SameLine();
-    ImGui::SetCursorPosY(midY);
-    ui::badge((std::to_string(nAttention) + " attendent votre décision").c_str(), nAttention ? pal.warn : pal.dim);
-    ImGui::SameLine();
-    ImGui::SetCursorPosY(midY);
-    ui::badge((std::to_string(nReady) + " prêtes").c_str(), pal.ok);
+    // Compteurs : seulement ceux qui valent quelque chose (« 0 en cours » n'apprend rien)
+    bool firstBadge = true;
+    auto counter = [&](int n, const char* what, const ImVec4& c) {
+        if (n <= 0) return;
+        ImGui::SameLine(0, firstBadge ? fs : -1.0f);
+        ImGui::SetCursorPosY(midY);
+        ui::badge((std::to_string(n) + " " + what).c_str(), c);
+        firstBadge = false;
+    };
+    counter(nWorking, "en cours", pal.accent);
+    counter(nAttention, nAttention > 1 ? "attendent votre décision" : "attend votre décision", pal.warn);
+    counter(nReady, nReady > 1 ? "prêtes" : "prête", pal.ok);
+    if (firstBadge) {
+        ImGui::SameLine(0, fs);
+        ImGui::SetCursorPosY(midY);
+        ImGui::TextDisabled("rien en cours");
+    }
 
     // Usage compact à droite
     {
-        float barW = fs * 7.5f;
-        float totalW = 0;
+        // Mini-anneaux « 5 h 47 % · semaine 54 % », comme dans la barre de menu
         std::vector<const claude::RateWindow*> ws;
+        std::vector<std::string> texts;
+        float totalW = 0;
+        const float lh = ImGui::GetTextLineHeight();
         for (auto& w : usage_.windows)
-            if (w.name == "five_hour" || w.name == "seven_day") ws.push_back(&w), totalW += barW + fs;
-        if (!ws.empty()) {
-            ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - totalW));
-            for (auto* w : ws) {
+            if (w.name == "five_hour" || w.name == "seven_day") {
                 char buf[48];
-                std::snprintf(buf, sizeof buf, "%s : %d %%", w->name == "five_hour" ? "5 h" : "7 jours",
-                              (int)(w->current(util::nowUnix()) * 100 + 0.5));
+                std::snprintf(buf, sizeof buf, "%s %d %%", w.name == "five_hour" ? "5 h" : "semaine",
+                              (int)(w.current(util::nowUnix()) * 100 + 0.5));
+                ws.push_back(&w);
+                texts.push_back(buf);
+                totalW += lh + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(buf).x + fs;
+            }
+        if (!ws.empty()) {
+            ImGui::SameLine(std::max(ImGui::GetCursorPosX() + fs, ImGui::GetWindowContentRegionMax().x - totalW));
+            for (size_t i = 0; i < ws.size(); ++i) {
                 ImGui::SetCursorPosY(midY);
-                ui::usageBar((float)w->current(util::nowUnix()), buf, ImGui::GetTextLineHeight(), barW, w->name.c_str());
-                if (ImGui::IsItemHovered() && w->resetsAt)
-                    ImGui::SetTooltip("%s — réinitialisation dans %s", claude::windowLabel(w->name).c_str(),
-                                      util::humanDuration(w->resetsAt - util::nowUnix()).c_str());
-                ImGui::SameLine();
+                ImGui::BeginGroup();
+                ui::miniRing((float)ws[i]->current(util::nowUnix()), lh * 0.85f, ws[i]->name.c_str());
+                ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
+                ImGui::TextUnformatted(texts[i].c_str());
+                ImGui::EndGroup();
+                if (ImGui::IsItemHovered() && ws[i]->resetsAt)
+                    ImGui::SetTooltip("%s — repart à 0 dans %s", claude::windowLabel(ws[i]->name).c_str(),
+                                      util::humanDuration(ws[i]->resetsAt - util::nowUnix()).c_str());
+                if (ImGui::IsItemClicked()) showUsage_ = true;
+                ImGui::SameLine(0, fs);
             }
             ImGui::NewLine();
         }
     }
 
     // --- Barre d'outils ---
-    if (ImGui::Button("+ Nouvelle conversation")) {
+    // Barre d'outils : nouvelle conversation, filtre, puis actions secondaires en puces
+    if (ui::chip("+ Nouvelle conversation", &pal.link)) {
         OpenConversation* oc = newConversation(nullptr);
         oc->focusDashDraft = true;
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Créée dans le dossier sélectionné du panneau Projets (ou « Divers »)");
-    ImGui::SameLine();
-    ImGui::TextDisabled("Afficher :");
-    ImGui::SameLine();
-    ImGui::RadioButton("toutes", &dashFilter_, 0);
-    ImGui::SameLine();
-    ImGui::RadioButton("actives", &dashFilter_, 1);
-    ImGui::SameLine();
-    ImGui::RadioButton("à traiter", &dashFilter_, 2);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Conversations qui attendent une autorisation ou une réponse de votre part");
-    ImGui::SameLine();
-    ImGui::BeginDisabled(nWorking == 0);
-    if (ImGui::Button("Tout interrompre"))
-        for (auto& oc : open_)
-            if (oc->session->state == SessionState::Busy) oc->session->interrupt();
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (detached) {
-        if (ImGui::Button("Rattacher à la fenêtre principale")) dash_->closeRequested = true;
-    } else {
-        if (ImGui::Button("Ouvrir dans une fenêtre séparée")) openDashboardWindow();
-        ImGui::SameLine();
-        if (ImGui::Button("Retour au cockpit")) page_ = 0;
+    {
+        const char* filters[] = {"Toutes", "Actives", "À traiter"};
+        ui::sameLineIfFits(fs * 14);
+        ui::segmented("##dashfilter", &dashFilter_, filters, 3);
+    }
+    if (nWorking > 0) {
+        ui::sameLineIfFits(ui::buttonWidth("Tout interrompre"));
+        if (ui::chip("Tout interrompre", &pal.err))
+            for (auto& oc : open_)
+                if (oc->session->state == SessionState::Busy) oc->session->interrupt();
+    }
+    {
+        const char* winLabel = detached ? "Rattacher à la fenêtre principale" : "⧉ Fenêtre séparée";
+        ui::sameLineIfFits(ui::buttonWidth(winLabel));
+        if (ui::chip(winLabel, &pal.dim)) {
+            if (detached) dash_->closeRequested = true;
+            else openDashboardWindow();
+        }
+        if (!detached && ImGui::IsItemHovered()) ImGui::SetTooltip("Ouvrir le tableau de bord dans sa propre fenêtre (deuxième écran)");
     }
     ImGui::Separator();
 
@@ -349,10 +366,10 @@ void App::drawOrchestrationHero(bool detached) {
     if (glow > 0) ui::anim::markBusy();
     ImVec4 border = sc;
     border.w = 0.6f + 0.4f * glow;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(sc.x, sc.y, sc.z, 0.06f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(sc.x, sc.y, sc.z, 0.04f));
     ImGui::PushStyleColor(ImGuiCol_Border, border);
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, ImGui::GetStyle().FrameRounding + 3);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
     ImGui::BeginChild("##hero", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(2);
@@ -386,7 +403,7 @@ void App::drawOrchestrationHero(bool detached) {
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reprend l'orchestration là où elle s'était arrêtée.");
             ImGui::SameLine();
         }
-        if (ImGui::SmallButton("Ouvrir l'orchestrateur")) goPage(false);
+        if (ui::chip("Ouvrir l'orchestrateur", &pal.link)) goPage(false);
     }
 
     // Ligne 2 : budget + dernière décision
@@ -418,7 +435,6 @@ void App::drawOrchestrationHero(bool detached) {
             std::string ev = o.log.back().text;
             float room = ImGui::GetContentRegionAvail().x - 8;
             while (ev.size() > 8 && ImGui::CalcTextSize(ev.c_str()).x > room) ev = util::truncateUtf8(ev, ev.size() - 6);
-            if (ev != o.log.back().text) ev += "…";
             ImGui::TextUnformatted(ev.c_str());
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", o.log.back().text.c_str());
         }
@@ -437,8 +453,11 @@ void App::drawOrchestrationHero(bool detached) {
         if (ImGui::SmallButton("Répondre")) goPage(false);
         ImGui::PopStyleColor(2);
     }
-    if (o.state == claude::OrchState::Finished && !o.finalSummary.empty())
-        ImGui::TextColored(pal.ok, "✓ %s", util::firstLine(o.finalSummary, 160).c_str());
+    if (o.state == claude::OrchState::Finished && !o.finalSummary.empty()) {
+        std::string sum = util::firstLine(o.finalSummary, 160);
+        util::replaceAll(sum, "**", "");  // marques de gras du Markdown
+        ImGui::TextColored(pal.ok, "✓ %s", sum.c_str());
+    }
 
     // L'équipe
     ImGui::Spacing();
@@ -493,7 +512,8 @@ void App::drawDashboardCard(OpenConversation& oc, int index, float width, float 
     ImGui::PopStyleColor(2);
 
     // --- Ligne 1 : état + titre + actions ---
-    float btnW = ImGui::CalcTextSize("Ouvrir").x + ImGui::CalcTextSize("Stop").x + ImGui::GetStyle().FramePadding.x * 4 + 16;
+    const bool busyCard = s.state == SessionState::Busy;
+    float btnW = ui::buttonWidth("Ouvrir") + (busyCard ? ui::buttonWidth("Arrêter") + ImGui::GetStyle().ItemSpacing.x : 0.0f) + 8;
     ImGui::TextColored(sc, "●");
     ImGui::SameLine();
     ImGui::PushFont(fontBold, 0.0f);
@@ -505,12 +525,12 @@ void App::drawDashboardCard(OpenConversation& oc, int index, float width, float 
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n(double-clic : ouvrir dans le cockpit)", s.title.c_str());
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) focusConversation(index);
     ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - btnW + 8));
-    if (ImGui::SmallButton("Ouvrir")) focusConversation(index);
+    if (ui::chip("Ouvrir", &pal.link)) focusConversation(index);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Afficher dans le cockpit (fenêtre principale)");
-    ImGui::SameLine();
-    ImGui::BeginDisabled(s.state != SessionState::Busy);
-    if (ImGui::SmallButton("Stop")) s.interrupt();
-    ImGui::EndDisabled();
+    if (busyCard) {  // seulement pendant un tour : rien à arrêter sinon
+        ImGui::SameLine();
+        if (ui::chip("Arrêter", &pal.err)) s.interrupt();
+    }
 
     // --- Ligne 2 : état détaillé ---
     std::string stLine = stateText(st);
@@ -678,10 +698,16 @@ void App::drawActivityFeed() {
     ImGui::PopFont();
     ImGui::SameLine();
     static bool onlyImportant = false;
-    ImGui::Checkbox("important", &onlyImportant);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Masquer les appels d'outils");
+    // Puces à droite : filtre « important » (bascule) et Effacer
+    float bw = ui::buttonWidth("✓ Important") + ui::buttonWidth("Effacer") + ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - bw));
+    if (ui::chip(onlyImportant ? "✓ Important###imp" : "Important###imp", onlyImportant ? &pal.accent : &pal.dim))
+        onlyImportant = !onlyImportant;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Masquer les appels d'outils, ne garder que l'essentiel");
     ImGui::SameLine();
-    if (ImGui::SmallButton("Effacer")) activity_.clear();
+    ImGui::BeginDisabled(activity_.empty());
+    if (ui::chip("Effacer", &pal.dim)) activity_.clear();
+    ImGui::EndDisabled();
     ImGui::Separator();
     // Ordre chronologique, le plus récent en bas. Comportement « hybride » : tant que le fil est tout en bas
     // (ou à l'ouverture), il suit les nouvelles entrées ; si l'utilisateur remonte pour lire une entrée, il

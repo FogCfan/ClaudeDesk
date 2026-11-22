@@ -24,6 +24,9 @@ enum class Icon {
     FileImage,     // image
     FilePdf,       // PDF / document
     Trash,
+    History,       // sessions précédentes d'une discussion (horloge + flèche de retour)
+    Send,          // envoyer (avion en papier)
+    Stop,          // arrêter (carré)
     // Types de projets (Designer, accueil, création de projet)
     KindAuto,      // étincelle : Claude choisit
     KindSoftware,  // fenêtre de code

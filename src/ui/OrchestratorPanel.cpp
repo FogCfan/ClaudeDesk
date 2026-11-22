@@ -389,6 +389,7 @@ void App::tickOrchestrator() {
         return;
     }
     AppOrchHost h(*this);
+    orch_->blockedModels = settings_.modelAccess.blocked(accountPlan());  // ex. Fable hors abonnement Pro
     // Option cliquée dans le fil : réponse à la question en attente, sinon simple message au cerveau (orchestration
     // en pause ou arrêtée : ses directives seront appliquées à la reprise).
     if (!orchQuickAnswer_.empty()) {
@@ -835,7 +836,7 @@ void App::drawOrchestratorStatus() {
     float cardH = ImGui::GetTextLineHeightWithSpacing() * 9.6f;
     auto beginCard = [&](const char* id, float w) {
         ImGui::PushStyleColor(ImGuiCol_ChildBg, pal.cardBg);
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, ImGui::GetStyle().FrameRounding + 3);
         ImGui::BeginChild(id, ImVec2(w, wide ? cardH : 0),
                           ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | (wide ? 0 : ImGuiChildFlags_AutoResizeY));
         ImGui::PopStyleVar();
@@ -885,11 +886,13 @@ void App::drawOrchestratorStatus() {
         ImGui::TextDisabled("Équipe : %s", team.c_str());
         if (!o.log.empty()) {
             std::string ev = o.log.back().text;
-            float room = ImGui::GetContentRegionAvail().x - fs * 6;
+            // Place réelle après l'étiquette : le texte ne déborde plus de la carte
+            float room = ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Dernier événement :").x -
+                         ImGui::GetStyle().ItemSpacing.x - ImGui::CalcTextSize("…").x;
             while (ev.size() > 8 && ImGui::CalcTextSize(ev.c_str()).x > room) ev = util::truncateUtf8(ev, ev.size() - 6);
             ImGui::TextDisabled("Dernier événement :");
             ImGui::SameLine();
-            ImGui::TextUnformatted((ev + (ev != o.log.back().text ? "…" : "")).c_str());
+            ImGui::TextUnformatted(ev.c_str());  // truncateUtf8 ajoute déjà « … »
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", o.log.back().text.c_str());
         }
         if (!o.pauseReason.empty() && (o.state == claude::OrchState::Paused || o.state == claude::OrchState::UsagePause)) {
@@ -1443,11 +1446,19 @@ void App::drawOrchestratorSettings() {
                 auto& al = o.settings.allowedModels;
                 bool on = std::find(al.begin(), al.end(), m.value) != al.end();
                 ImGui::SameLine();
+                bool usable = modelUsable(m.value);
+                if (!usable) ImGui::PushStyleColor(ImGuiCol_Text, ui::palette().dim);
                 if (ImGui::Checkbox(m.label, &on)) {
                     if (on) al.push_back(m.value);
                     else if (al.size() > 1) al.erase(std::remove(al.begin(), al.end(), std::string(m.value)), al.end());
                     o.changed = true;
                 }
+                if (!usable) ImGui::PopStyleColor();
+                if (!usable && ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s n'est pas utilisable avec votre abonnement (%s) : l'orchestrateur ne le choisira\n"
+                                      "pas, même coché. Il prend à la place le meilleur modèle inclus.",
+                                      m.label,
+                                      claude::modelAccessLabel(settings_.modelAccess.access(m.value, accountPlan())));
             }
             auto effortCombo = [&](const char* label, std::string& v, const char* emptyLabel) {
                 ImGui::SetNextItemWidth(w);
@@ -1752,9 +1763,15 @@ void App::drawOrchestratorTeam(bool compact) {
     float cw = (avail - gap * (cols - 1)) / cols;
     float lh = ImGui::GetTextLineHeightWithSpacing();
     float ch = lh * (compact ? 4.6f : 6.2f) + ImGui::GetStyle().WindowPadding.y * 2;
+    // Les agents sans tâche ce cycle (au repos) ne prennent pas une carte chacun : une ligne de puces suffit.
+    std::vector<ws::Folder*> idle;
     int k = 0;
     for (auto& chf : proj->children) {
         AgentView v = agentView(chf->name);
+        if (!v.task && !v.working && !v.attention) {
+            idle.push_back(chf.get());
+            continue;
+        }
         if (k % cols) ImGui::SameLine(0, gap);
         ImGui::PushID(k++);
         float glow = (v.attention || v.working) && settings_.animations ? ui::anim::pulse(v.attention ? 1.1f : 0.6f, (float)k) : 0.0f;
@@ -1763,8 +1780,8 @@ void App::drawOrchestratorTeam(bool compact) {
         border.w = v.attention || v.working ? 0.55f + 0.45f * glow : 0.35f;
         ImGui::PushStyleColor(ImGuiCol_ChildBg, pal.cardBg);
         ImGui::PushStyleColor(ImGuiCol_Border, border);
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, v.attention || v.working ? 2.0f : 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, ImGui::GetStyle().FrameRounding + 2);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, v.attention || v.working ? 1.5f : 1.0f);
         ImGui::BeginChild("##agent", ImVec2(cw, ch), ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(2);
@@ -1862,6 +1879,31 @@ void App::drawOrchestratorTeam(bool compact) {
         ImGui::EndChild();
         ImGui::PopID();
     }
+    if (!idle.empty()) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("Au repos (%d)", (int)idle.size());
+        for (ws::Folder* f : idle) {
+            ImGui::PushID(f->name.c_str());
+            ui::sameLineIfFits(ui::buttonWidth(f->name.c_str()));
+            if (ui::chip(f->name.c_str(), &pal.dim)) {
+                AgentView v = agentView(f->name);
+                std::string id = v.convId.empty() ? host.openAgent(f->name, {}) : v.convId;
+                if (host.ensureOpen(id)) focusConversation(indexOfConversation(id));
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted("Pas de tâche dans ce cycle. Clic : ouvrir sa conversation.");
+                if (!f->notes.empty()) {
+                    ImGui::Separator();
+                    ImGui::PushTextWrapPos(fs * 28);
+                    ImGui::TextUnformatted(agentBrief(f->notes).c_str());
+                    ImGui::PopTextWrapPos();
+                }
+                ImGui::EndTooltip();
+            }
+            ImGui::PopID();
+        }
+    }
     (void)o;
 }
 
@@ -1925,15 +1967,6 @@ void App::drawOrchestratorPage() {
                    "de son équipe ; il examine le dépôt, confie des tâches aux agents (plusieurs en parallèle, avec le\n"
                    "modèle adapté), lit leurs comptes rendus, vérifie, et recommence jusqu'à atteindre l'objectif.\n"
                    "Il s'arrête sur une question pour vous, le budget, le nombre de cycles ou les limites d'usage.");
-    {
-        const char* back = "Tableau de bord";
-        float bw = ImGui::CalcTextSize(back).x + ImGui::CalcTextSize("Cockpit").x + ImGui::GetStyle().FramePadding.x * 4 +
-                   ImGui::GetStyle().ItemSpacing.x;
-        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - bw));
-        if (ImGui::Button(back)) page_ = dash_ ? 0 : 1;
-        ImGui::SameLine();
-        if (ImGui::Button("Cockpit")) page_ = 0;
-    }
 
     if (!orch_ || !proj) {
         ImGui::Spacing();

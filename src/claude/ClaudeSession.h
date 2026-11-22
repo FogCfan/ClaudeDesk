@@ -10,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "claude/Models.h"
 #include "claude/Process.h"
 #include "claude/SessionConfig.h"
 #include "claude/Transcript.h"
@@ -87,11 +88,18 @@ public:
     bool restartPending = false;  // config modifiée : redémarrage au prochain tour
     // Le dernier message n'a pas été traité faute de connexion valide (cf. claude/Auth.h) ; effacé au prochain tour réussi.
     bool authFailed = false;
+    // Le dernier tour a été refusé à cause du modèle (hors abonnement, inexistant) : carte « changer de modèle ».
+    // Effacé au prochain tour réussi.
+    ModelAccess modelRefused = ModelAccess::Unknown;
+    std::string modelRefusedName;  // modèle demandé
 
     // Callbacks (optionnels)
     std::function<void(const nlohmann::json&)> onRateLimit;
     std::function<void(ClaudeSession&)> onTurnFinished;
     std::function<void(ClaudeSession&)> onAuthError;  // tour refusé : pas (ou plus) connecté
+    std::function<void(ClaudeSession&)> onModelRefused;  // tour refusé à cause du modèle (voir modelRefused)
+    // Un vrai modèle a répondu (identifiant résolu, ex. claude-opus-5-5) : l'accès est confirmé.
+    std::function<void(ClaudeSession&, const std::string&)> onModelAnswered;
 
     // --- Actions ---
     void send(const std::string& text, const std::vector<ImageAttachment>& images = {});
@@ -148,6 +156,7 @@ private:
     int streamingEntry_ = -1;      // index de l'entrée en cours de streaming
     double lastNow_ = 0;
     bool freshPrompt_ = false;     // prompt système modifié : ne pas réutiliser l'instantané
+    ModelAccess modelErrorPending_ = ModelAccess::Unknown;  // message assistant « modèle refusé », résultat à venir
     bool authErrorPending_ = false;  // message assistant « authentication_failed » reçu, résultat à venir
 };
 

@@ -6,6 +6,7 @@
 #include <imgui_internal.h>
 
 #include "app/App.h"
+#include "claude/Models.h"
 #include "ui/Anim.h"
 #include "ui/Theme.h"
 #include "util/Paths.h"
@@ -75,8 +76,8 @@ void App::drawMenuBar() {
     if (ImGui::BeginMenu("Configuration")) {
         if (s) {
             if (ImGui::BeginMenu("Modèle")) {
-                for (auto& c : claude::modelChoices())
-                    if (ImGui::MenuItem(c.label, nullptr, s->config.model == c.value)) s->setModel(c.value);
+                std::string chosen;
+                if (drawModelPickerItems(s, s->config.model, chosen)) s->setModel(chosen);
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Effort")) {
@@ -95,9 +96,9 @@ void App::drawMenuBar() {
             }
             ImGui::Separator();
         }
-        const char* tabs[] = {"Modèle et effort…", "Mode…", "Outils…", "Prompt système…", "Avancé…", "Application…",
-                              "Graphismes et fluidité…"};
-        for (int i = 0; i < 7; ++i)
+        const char* tabs[] = {"Modèle et effort…", "Mode…", "Outils…", "Instructions…", "Avancé…", "Général…",
+                              "Performances et énergie…", "Apparence…"};
+        for (int i = 0; i < 8; ++i)
             if (ImGui::MenuItem(tabs[i], i == 0 ? "Ctrl+," : nullptr)) {
                 showConfig_ = true;
                 configTab_ = i;
@@ -187,12 +188,22 @@ void App::drawMenuBar() {
     // À droite : rappel de l'usage 5 h
     if (auto* w = usage_.find("five_hour")) {
         const double used = w->current(util::nowUnix());
-        char buf[64];
-        std::snprintf(buf, sizeof buf, "5 h : %d %%", (int)(used * 100 + 0.5));
-        float width = ImGui::GetFontSize() * 6;
-        ImGui::SameLine(ImGui::GetWindowWidth() - width - 12);
-        ui::usageBar((float)used, buf, ImGui::GetTextLineHeight(), -1, "##mb5h");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Usage de la fenêtre de 5 h (détails dans le panneau Usage)");
+        // Mini anneau + pourcentage, à la manière d'un indicateur de barre d'état (clic : panneau Usage)
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%d %%", (int)(used * 100 + 0.5));
+        float lh = ImGui::GetTextLineHeight();
+        float width = lh + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(buf).x;
+        ImGui::SameLine(ImGui::GetWindowWidth() - width - ImGui::GetStyle().WindowPadding.x - 6);
+        ImGui::BeginGroup();
+        ui::miniRing((float)used, lh * 0.9f, "##mb5h");
+        ImGui::SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
+        ImGui::TextUnformatted(buf);
+        ImGui::EndGroup();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Session de 5 h : %s utilisés%s\nClic : panneau Usage", buf,
+                              w->resetsAt > util::nowUnix()
+                                  ? (" · repart à 0 dans " + util::humanDuration(w->resetsAt - util::nowUnix())).c_str()
+                                  : "");
         if (ImGui::IsItemClicked()) showUsage_ = true;
     }
     ImGui::EndMainMenuBar();
@@ -220,10 +231,13 @@ void App::drawStatusBar() {
                     if (!s.statusText.empty()) ImGui::TextDisabled("%s", util::truncateUtf8(s.statusText, 50).c_str());
                 }
                 ImGui::Separator();
-                std::string model = !s.activeModel.empty() ? s.activeModel : s.config.model.empty() ? "modèle par défaut" : s.config.model;
+                // En clair et en français : « Sonnet 5.5 · effort moyen · mode auto »
+                std::string model = claude::modelDisplayName(!s.activeModel.empty() ? s.activeModel : s.config.model);
                 ImGui::TextUnformatted(model.c_str());
-                if (!s.config.effort.empty()) ImGui::TextDisabled("effort %s", s.config.effort.c_str());
-                ImGui::TextDisabled("mode %s", s.config.permissionMode.c_str());
+                for (auto& c : claude::effortChoices())
+                    if (!s.config.effort.empty() && c.value == s.config.effort) ImGui::TextDisabled("effort %s", util::toLower(c.label).c_str());
+                for (auto& c : claude::permissionModeChoices())
+                    if (c.value == s.config.permissionMode) ImGui::TextDisabled("mode %s", util::toLower(c.label).c_str());
                 ImGui::Separator();
                 if (s.stats.contextWindow > 0)
                     ImGui::TextDisabled("contexte %d %%", (int)(100.0 * s.stats.contextTokens / s.stats.contextWindow));

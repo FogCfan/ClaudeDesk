@@ -38,7 +38,7 @@ const Opt kDesignerModels[] = {{"opus", "Opus — conception la plus fine (conse
                                {"fable", "Fable"},
                                {"haiku", "Haiku — esquisse rapide et économique"}};
 const Opt kAgentModels[] = {{"haiku", "Haiku"}, {"sonnet", "Sonnet"}, {"opus", "Opus"}, {"fable", "Fable"}};
-const Opt kAgentEfforts[] = {{"low", "low"}, {"medium", "medium"}, {"high", "high"}};
+const Opt kAgentEfforts[] = {{"low", "Faible"}, {"medium", "Moyen"}, {"high", "Élevé"}};
 const Opt kBudgets[] = {{"low", "Bas"}, {"medium", "Moyen"}, {"high", "Élevé"}, {"max", "Max"}};
 
 // Zone de texte multiligne avec retour à la ligne et texte indicatif quand elle est vide.
@@ -435,11 +435,10 @@ void App::drawDesignerPage() {
     ImGui::TextDisabled("Décrivez un projet : Claude conçoit l'équipe d'agents et règle l'orchestrateur.");
     {
         const char* reset = designerConfirmReset_ ? "Effacer ce design ?" : "Nouveau design";
-        float bw = ui::buttonWidth(reset) + ui::buttonWidth("Cockpit") + ImGui::GetStyle().ItemSpacing.x;
+        float bw = ui::buttonWidth(reset);
         ImGui::SameLine(std::max(ImGui::GetCursorPosX() + fs, ImGui::GetWindowContentRegionMax().x - bw));
         ImGui::BeginDisabled(busy);
-        if (designerConfirmReset_) ImGui::PushStyleColor(ImGuiCol_Text, pal.warn);
-        if (ImGui::Button(reset)) {
+        if (ui::chip(reset, designerConfirmReset_ ? &pal.warn : &pal.dim)) {
             if (designerConfirmReset_ || (d.design.empty() && util::trim(d.req.description).empty())) {
                 designerReset();
                 designerConfirmReset_ = false;
@@ -448,12 +447,9 @@ void App::drawDesignerPage() {
                 designerConfirmAt_ = now_;
             }
         }
-        if (designerConfirmReset_) ImGui::PopStyleColor();
         ImGui::EndDisabled();
         if (designerConfirmReset_ && now_ - designerConfirmAt_ > 4) designerConfirmReset_ = false;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Repartir d'une page blanche (les réglages du designer sont gardés).");
-        ImGui::SameLine();
-        if (ImGui::Button("Cockpit")) page_ = 0;
     }
 
     // --- Étapes ---
@@ -623,7 +619,8 @@ void App::drawDesignerPage() {
         }
 
         ImGui::Spacing();
-        if (ImGui::CollapsingHeader("Préférences (facultatif)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool prefsOpen = ImGui::TreeNodeEx("Préférences (facultatif)", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth);
+        if (prefsOpen) {
             ImGui::TextUnformatted(code ? "Technologies imposées" : "Outils ou formats souhaités");
             ImGui::SetNextItemWidth(-1);
             dirtyIf(ImGui::InputTextWithHint("##tech",
@@ -635,26 +632,26 @@ void App::drawDesignerPage() {
                               code ? "Ex. : doit tourner hors ligne ; aucune dépendance payante ; Windows et macOS"
                                    : "Ex. : pour la direction, 10 pages au plus ; ton neutre ; à rendre avant fin juin"));
             ImGui::TextUnformatted("Taille de l'équipe");
-            for (int i = 0; i < 4; ++i) {
-                if (i) ui::sameLineIfFits(ImGui::CalcTextSize(kTeamSizes[i]).x + ImGui::GetFrameHeight() * 1.5f);
-                if (ImGui::RadioButton(kTeamSizes[i], d.req.teamSize == i)) d.req.teamSize = i, designerDirty_ = true;
-            }
+            if (ui::segmented("##teamsize", &d.req.teamSize, kTeamSizes, 4)) designerDirty_ = true;
             ImGui::TextUnformatted("Budget de l'orchestration");
             ImGui::SameLine();
             ui::helpMarker("Le niveau de budget de l'orchestrateur (modèles autorisés, part du quota, agents en\n"
                            "parallèle). Le designer en tient compte pour dimensionner l'équipe ; modifiable ensuite.");
-            for (size_t i = 0; i < 4; ++i) {
-                claude::BudgetPreset p = claude::budgetPresetFromName(kBudgets[i].value);
-                const char* lbl = claude::budgetPresetLabel(p, subNow);
-                if (i) ui::sameLineIfFits(ImGui::CalcTextSize(lbl).x + ImGui::GetFrameHeight() * 1.5f);
-                if (ImGui::RadioButton(lbl, d.req.budget == kBudgets[i].value)) d.req.budget = kBudgets[i].value, designerDirty_ = true;
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", claude::budgetPresetSummary(p, subNow).c_str());
+            {
+                const char* lbls[4];
+                int cur = 1;
+                for (int i = 0; i < 4; ++i) {
+                    lbls[i] = claude::budgetPresetLabel(claude::budgetPresetFromName(kBudgets[i].value), subNow);
+                    if (d.req.budget == kBudgets[i].value) cur = i;
+                }
+                if (ui::segmented("##reqbudget", &cur, lbls, 4)) d.req.budget = kBudgets[cur].value, designerDirty_ = true;
+                dimWrapped(claude::budgetPresetSummary(claude::budgetPresetFromName(d.req.budget), subNow));
             }
-            dirtyIf(ImGui::Checkbox("Claude peut d'abord poser des questions", &d.req.allowQuestions));
-            ImGui::SameLine();
-            ui::helpMarker("S'il manque une information qui change vraiment la conception (plateforme, langage,\n"
-                           "périmètre), Claude pose jusqu'à 4 questions avec des réponses à cliquer. Sinon, il fait\n"
-                           "des choix raisonnables et les signale dans le résumé.");
+            dirtyIf(ui::checkboxWrapped("Claude peut d'abord poser des questions", &d.req.allowQuestions,
+                                        "S'il manque une information qui change vraiment la conception (plateforme, langage,\n"
+                                        "périmètre), Claude pose jusqu'à 4 questions avec des réponses à cliquer. Sinon, il fait\n"
+                                        "des choix raisonnables et les signale dans le résumé."));
+            ImGui::TreePop();
         }
         std::string effortLbl = d.effort.empty() ? "effort par défaut" : "effort " + d.effort;
         std::string head = "Réglages du designer — " + d.model + " · mode " + d.permissionMode + " · " + effortLbl + "###dsgsettings";
@@ -939,14 +936,17 @@ void App::drawDesignerPage() {
         if (ImGui::SmallButton("+ Jalon")) ds.milestones.emplace_back(), designerDirty_ = true;
         ImGui::Spacing();
         ImGui::TextUnformatted("Budget");
-        for (size_t i = 0; i < 4; ++i) {
-            claude::BudgetPreset p = claude::budgetPresetFromName(kBudgets[i].value);
-            const char* lbl = claude::budgetPresetLabel(p, subNow);
-            if (i) ui::sameLineIfFits(ImGui::CalcTextSize(lbl).x + ImGui::GetFrameHeight() * 1.5f);
-            if (ImGui::RadioButton(lbl, ds.budget == kBudgets[i].value)) ds.budget = kBudgets[i].value, designerDirty_ = true;
+        {
+            const char* lbls[4];
+            int cur = 1;
+            for (int i = 0; i < 4; ++i) {
+                lbls[i] = claude::budgetPresetLabel(claude::budgetPresetFromName(kBudgets[i].value), subNow);
+                if (ds.budget == kBudgets[i].value) cur = i;
+            }
+            if (ui::segmented("##dsbudget", &cur, lbls, 4)) ds.budget = kBudgets[cur].value, designerDirty_ = true;
         }
         dimWrapped(claude::budgetPresetSummary(claude::budgetPresetFromName(ds.budget), subNow));
-        dirtyIf(ImGui::Checkbox("Vérification visuelle (captures d'écran)", &ds.visualChecks));
+        dirtyIf(ui::checkboxWrapped("Vérification visuelle (captures d'écran)", &ds.visualChecks));
         ImGui::EndChild();
         ImGui::Spacing();
 

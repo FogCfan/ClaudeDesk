@@ -22,12 +22,17 @@ Code, commentaires et textes d'interface en **français**.
   ClaudeDesk n'est PAS réservé aux développeurs. Le type règle le Designer, le prompt de l'orchestrateur (« Nature du
   projet »), les consignes et le « Vérifié » des tâches d'agents, la mémoire injectée et les libellés. Enregistré dans
   `_dossier.json` (`projectKind`) et `OrchestratorSettings::projectKind` ; défaut « software » pour l'existant),
+  `Models` (familles haiku/sonnet/opus/fable, accès selon l'abonnement : la CLI liste Fable pour tous, mais avec Pro
+  il demande des crédits d'usage — refus « out of usage credits », vérifié ; refus et réponses retenus dans
+  `Settings::modelAccess`, modèles bloqués jamais confiés par l'orchestrateur : `usableModels`, `blockedModels`),
   `Orchestrator` (moteur de l'orchestrateur, sans UI : directives `@@DELEGUER/@@HUMAIN/@@ATTENDRE/@@TERMINE/@@NOUVEL_AGENT`, comptes rendus au fil de l'eau, garde-fous ;
   un nouvel agent n'est JAMAIS créé sans l'accord de l'humain : `pendingAgents` → question → `OrchestratorHost::createAgent`)
 - `src/ui` — panneaux ImGui : `ConversationView`, `PromptEditor`, `ConfigPanel`,
   `WorkspacePanel` (panneau « Projets » — l'ancien « Espace de travail » / « mode cowork », renommé : ne plus écrire
   « cowork » dans l'interface ; arbre à icônes, explorateur du dossier de travail, fichiers de référence
-  `Folder::files`, dépôt de fichiers `dropOnProjects`), `Icons` (icônes vectorielles dessinées à la main : les emoji
+  `Folder::files`, dépôt de fichiers `dropOnProjects` ; projet orchestré : nœud « Orchestrateur » › agents › discussions ;
+  une discussion = suite de sessions reliées par `ConversationMeta::continues` (rotation de contexte, « Repartir du
+  récap »), regroupées par `ws::conversationChains` — liens déduits des dates pour les anciennes conversations), `Icons` (icônes vectorielles dessinées à la main : les emoji
   ne s'affichent pas dans les libellés ; `ui::iconTreeNode`, `ui::icon`, `ui::fileIcon`), `Dashboard`, `UsagePanel`, `PermissionPanel`, `Markdown`, `Theme`, `Anim`, `Tutorial`,
   `OrchestratorPanel` (page 2 « Orchestrateur », Ctrl+3, + `AppOrchHost`, l'adaptateur moteur ↔ conversations ; état dans
   `<projet>/_orchestrateur.json`). La discussion du cerveau est exclue des onglets (`isOrchBrain`) et rendue en cartes
@@ -39,7 +44,11 @@ Code, commentaires et textes d'interface en **français**.
   `DesignerPanel` (page 3 « Designer », Ctrl+4 : Décrire → Clarifier → Ajuster → Créer ; brouillon `designer.json`).
 - `src/workspace` — `Workspace` : vrais dossiers + `_dossier.json` + `*.conv.json`, corbeille, `buildContext`
 - `src/util` — chemins, chaînes, fichiers
-- `tests/` — doctest (`desk_tests`) : protocole, workspace, chaînes
+- `tests/` — doctest (`desk_tests`) : protocole, workspace, chaînes, modèles
+- `assets/fonts` — polices fournies (IBM Plex Sans par défaut, Noto Sans, Inter, JetBrains Mono ; licence SIL OFL), copiées
+  dans `fonts/` à côté de l'exe ; `Settings::uiFont` ("plex"/"noto"/"inter"/"system"), `monoFont`, `fontWeight`
+  (RasterizerMultiply, 1,3). Rendu par défaut : `fontRenderer` 3 = hinting de la police. Le rendu « sans grille » (1)
+  rend le texte FLOU (traits à cheval sur deux pixels) : l'utilisateur l'a rejeté. Migrations : `fontsVersion`
 - `cmake/CopyRuntimeDeps.cmake` — copie des DLL à côté des exécutables
 
 ## Compiler et tester
@@ -71,7 +80,8 @@ build\debug\ClaudeDesk.exe --data-dir <tmp>\data --workspace <tmp>\ws ^
 ```
 `--size` réduit la fenêtre pour vérifier les panneaux étroits (helpers `ui::sameLineIfFits`, `ui::fitItemWidth`,
 `ui::sideNote` dans `Theme.h` : les boutons passent à la ligne au lieu de sortir du panneau).
-Projets : `--panel projets:legende|projets:fichiers` (légende des icônes, explorateur du dossier de travail déplié).
+Projets : `--panel projets:legende|projets:fichiers|projets:sessions` (légende des icônes, explorateur du dossier de travail déplié, agents à plusieurs sessions dépliés).
+Polices : `--panel police:systeme` (bascule à chaud vers les polices du système). Modèles : `--panel config:0`.
 Connexion : `--panel login|login:attente|login:ok|login:conv` (fenêtre ou carte de conversation, sans rien lancer).
 Designer : `--panel designer[:questions|:demo|:doc|:type-<id>|:creer|:creer!]` (`doc` = conception d'audit ; `type-data`… =
 étape 1, type présélectionné ; `creer!` crée le projet d'exemple dans `<ws>/../depot-test`),
@@ -88,6 +98,21 @@ La capture ne contient que la fenêtre ; la lire ensuite pour vérifier. Pour te
 `set_model`, `set_permission_mode`, `interrupt` ; permissions via `control_request can_use_tool`.
 **`set_effort` n'existe pas** → changer l'effort = relancer avec `--resume`.
 `--append-system-prompt-file` fonctionne.
+
+## Style de l'interface (épuré, à la VS Code)
+- Peu de texte à l'écran, le détail dans les infobulles ou replié (`TreeNode` « Détails »). Pas de compteur à 0.
+- Survols neutres ; l'orange (`pal.accent`) est réservé à la sélection et à l'action principale.
+- Composants communs (`ui/Theme.h`) : `usageBar` (barre fine, valeur À CÔTÉ — jamais par-dessus le remplissage),
+  `ringGauge`, `miniRing`, `meterRow`, `levelColor`, `chip` (bouton plat, cadre au survol : actions secondaires),
+  `segmented` (choix exclusifs en boutons, à la place des boutons radio), `checkboxWrapped` (libellé qui passe à la
+  ligne au lieu d'être coupé), `shortPath`, `helpMarker` (petit « ? » cerclé) ; cartes de choix
+  `SelectCard`/`drawSelectCard` (ConfigPanel.cpp, modèles et modes). Densité « compacte » : `Settings::compactUi`.
+- Rien ne doit déborder d'un panneau étroit : mesurer la place (`ui::sameLineIfFits`, `fitItemWidth`), raccourcir
+  (`truncateUtf8` ajoute déjà « … »), ou passer à la ligne. Hauteurs variables mesurées (ex. `oc.quickBarHeight`).
+- Configuration : sections (`configTab_`) 0 Modèle · 1 Mode · 2 Outils · 3 Instructions · 4 Avancé · 5 Général ·
+  6 Performances · 7 Apparence ; liste à gauche si le panneau est large, sélecteur déroulant sinon. Les préférences
+  s'enregistrent seules (`App::autosaveSettings`, comparaison de `Settings::dump()` toutes les 3 s).
+- Panneaux : un seul × (sur l'onglet) — drapeaux `NoWindowMenuButton | NoCloseButton` sur le dockspace.
 
 ## Pièges connus
 - ImGui : une fenêtre `NoBringToFrontOnFocus` passe derrière l'hôte du dockspace.

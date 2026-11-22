@@ -96,7 +96,7 @@ const std::vector<Choice>& modelChoices() {
         {"claude-opus-5-5", "Opus 5.5", "Identifiant complet, figé."},
         {"claude-sonnet-5-5", "Sonnet 5.5", "Identifiant complet, figé."},
         {"claude-haiku-5-5", "Haiku 5.5", "Identifiant complet, figé."},
-        {"claude-fable-5-1", "Fable 5.1", "Identifiant complet, figé."},
+        {"claude-fable-5-2", "Fable 5.2", "Identifiant complet, figé."},
     };
     return v;
 }
