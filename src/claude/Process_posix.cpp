@@ -227,7 +227,7 @@ std::string shellQuote(const std::string& s) {
 std::string appleScriptString(const std::string& s) {
     std::string r = "\"";
     for (char c : s) {
-        if (c == '"' || c == '\') r += '\';
+        if (c == '"' || c == '\\') r += '\\';
         r += c;
     }
     return r + "\"";

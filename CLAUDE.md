@@ -92,7 +92,10 @@ La capture ne contient que la fenêtre ; la lire ensuite pour vérifier. Pour te
 ## Pièges connus
 - ImGui : une fenêtre `NoBringToFrontOnFocus` passe derrière l'hôte du dockspace.
 - Écrire les scripts (Python, etc.) avec l'outil Write, pas en heredoc bash : les `"\n"` cassent
-  les chaînes C++ générées.
+  les chaînes C++ générées. Dans un script Python qui génère du C++, doubler les antislashs (`'\\\\'`) ou utiliser
+  une chaîne brute `r'''…'''`.
+- `Process_posix.cpp` et les branches `#else` de `_WIN32` ne sont PAS compilés sous Windows : une erreur n'y apparaît
+  qu'au build macOS de la CI. Les relire avec soin après modification.
 
 ## Git
 Dépôt public `FogCfan/ClaudeDesk`, branche `main`. `gh.exe` : `"/c/Program Files/GitHub CLI/gh.exe"`
