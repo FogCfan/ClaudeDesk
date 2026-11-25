@@ -122,20 +122,23 @@ void App::drawPageSwitch() {
         else if (oc->session->state == SessionState::Busy) ++working;
     }
     ImGui::Dummy(ImVec2(ImGui::GetFontSize(), 0));
-    auto pageButton = [&](const char* label, bool selected) {
-        ImGui::PushStyleColor(ImGuiCol_Button, selected ? pal.accentSoft : ImVec4(0, 0, 0, 0));
+    auto pageButton = [&](const char* label, bool selected, const char* flashKey) {
+        ImVec4 bg = selected ? pal.accentSoft : ImVec4(0, 0, 0, 0);
+        if (!selected)  // signal d'attention : la page a changé d'état sans qu'on la regarde
+            if (ImVec4 f = flashColor(flashKey); f.w > 0) bg = f;
+        ImGui::PushStyleColor(ImGuiCol_Button, bg);
         ImGui::PushStyleColor(ImGuiCol_Text, selected ? pal.accent : ImGui::GetStyleColorVec4(ImGuiCol_Text));
         bool r = ImGui::SmallButton(label);
         ImGui::PopStyleColor(2);
         return r;
     };
-    if (pageButton("Cockpit", page_ == 0 && !dash_)) page_ = 0;
+    if (pageButton("Cockpit", page_ == 0 && !dash_, "page0")) page_ = 0;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Page principale : conversations, projets, usage, configuration (Ctrl+1)");
     std::string lbl = "Tableau de bord";
     if (working) lbl += "  ● " + std::to_string(working);
     if (attention) lbl += "  ⚠ " + std::to_string(attention);
     lbl += "###dashpage";
-    if (pageButton(lbl.c_str(), page_ == 1 || dash_ != nullptr)) {
+    if (pageButton(lbl.c_str(), page_ == 1 || dash_ != nullptr, "page1")) {
         if (dash_) SDL_RaiseWindow(dash_->window);
         else page_ = 1;
     }
@@ -148,13 +151,8 @@ void App::drawPageSwitch() {
         else if (orch_ && orch_->running()) ol += "  ●";
         ol += "###orchpage";
         bool question = orch_ && orch_->state == claude::OrchState::WaitingHuman;
-        if (question) {
-            ImVec4 c = pal.warn;
-            c.w = 0.55f + 0.45f * ui::anim::pulse(1.2f);
-            ui::anim::markBusy();
-            ImGui::PushStyleColor(ImGuiCol_Text, c);
-        }
-        if (pageButton(ol.c_str(), page_ == 2)) page_ = 2;
+        if (question) ImGui::PushStyleColor(ImGuiCol_Text, pal.warn);  // le fond clignote (signal « page2 »)
+        if (pageButton(ol.c_str(), page_ == 2, "page2")) page_ = 2;
         if (question) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Le chef de projet automatique et son équipe d'agents (Ctrl+3)\n"
@@ -164,12 +162,12 @@ void App::drawPageSwitch() {
         std::string dl = "Designer";
         if (designerBusy()) dl += "  ●";
         dl += "###designpage";
-        if (pageButton(dl.c_str(), page_ == 3)) page_ = 3;
+        if (pageButton(dl.c_str(), page_ == 3, "page3")) page_ = 3;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Concevoir un projet et son équipe d'agents à partir d'une description (Ctrl+4)\n"
                               "● = Claude est en train de concevoir");
     }
-    if (pageButton(dash_ ? "⧉ Rattacher" : "⧉", false)) {
+    if (pageButton(dash_ ? "⧉ Rattacher" : "⧉", false, "")) {
         if (dash_) closeDashboardWindow();
         else openDashboardWindow();
     }

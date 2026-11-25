@@ -49,8 +49,22 @@ ModelAccess expectedModelAccess(const std::string& familyAlias, const std::strin
     return ModelAccess::Unknown;
 }
 
+bool isUsageLimitText(const std::string& text) {
+    std::string t = util::toLower(text);
+    // « You've hit your 5-hour limit · resets 8:30am (Europe/Paris) · out of usage credits » (vérifié le 25/11/2026)
+    return t.find("hit your") != std::string::npos || t.find("usage limit") != std::string::npos ||
+           t.find("limit reached") != std::string::npos || t.find("limit · resets") != std::string::npos;
+}
+
+std::string usageLimitWindow(const std::string& text) {
+    std::string t = util::toLower(text);
+    return t.find("week") != std::string::npos ? "seven_day" : "five_hour";
+}
+
 ModelAccess modelAccessFromError(const std::string& error, const std::string& text) {
     std::string t = util::toLower(text);
+    // La limite de la session (5 h, semaine) dit aussi « out of usage credits » : ce n'est pas le modèle qui est refusé.
+    if (isUsageLimitText(text)) return ModelAccess::Unknown;
     if (error == "model_not_found" || t.find("issue with the selected model") != std::string::npos)
         return ModelAccess::Unavailable;
     if (t.find("out of usage credits") != std::string::npos || t.find("usage credits") != std::string::npos)
@@ -104,6 +118,8 @@ bool ModelAccessBook::usable(const std::string& model, const std::string& plan) 
 
 void ModelAccessBook::record(const std::string& familyAlias, const std::string& plan, ModelAccess a, int64_t now) {
     if (familyAlias.empty() || a == ModelAccess::Unknown) return;
+    // Un modèle inclus dans l'abonnement ne « demande » pas de crédits : c'est la limite d'usage qui parle.
+    if (a == ModelAccess::NeedsCredits && expectedModelAccess(familyAlias, plan) == ModelAccess::Included) return;
     seen[familyAlias] = {a, plan, now};
 }
 
@@ -136,7 +152,11 @@ void ModelAccessBook::fromJson(const json& j) {
         if (!v.is_object()) continue;
         int a = v.value("access", 0);
         if (a < 0 || a > 3) continue;
-        seen[k] = {(ModelAccess)a, v.value("plan", ""), v.value("when", (int64_t)0)};
+        ModelAccessInfo info{(ModelAccess)a, v.value("plan", ""), v.value("when", (int64_t)0)};
+        // Observation erronée des versions précédentes : la limite de 5 h (« … out of usage credits ») était prise
+        // pour un refus du modèle, et bloquait Opus/Sonnet/Haiku pourtant inclus dans l'abonnement.
+        if (info.access == ModelAccess::NeedsCredits && expectedModelAccess(k, info.plan) == ModelAccess::Included) continue;
+        seen[k] = info;
     }
 }
 

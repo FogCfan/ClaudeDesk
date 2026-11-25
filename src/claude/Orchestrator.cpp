@@ -1013,9 +1013,12 @@ marge pour les imprévus et les vérifications.
 Indique-les pour CHAQUE délégation (« | modele=… effort=… ») et choisis le plus économique qui suffit — la majorité des
 tâches d'un projet ne demandent pas le modèle le plus puissant :
 - haiku, effort low/medium : tâches mécaniques (renommage, documentation, mise en forme, vérification simple) ;
-- sonnet, effort medium/high : travail courant (développement, rédaction, analyse, tests) ;
+- sonnet, effort medium : travail courant (développement, rédaction, analyse, tests, scripts d'installation) ;
+  effort high seulement pour un raisonnement difficile (algorithme délicat, bogue retors) — pas pour écrire beaucoup ;
 - opus, effort high : conception, architecture, raisonnement délicat, débogage difficile, sujets mal connus ;
 - fable ou effort xhigh/max : seulement si une tentative plus économique a échoué.
+L'effort se paie surtout en réflexion (jetons de sortie, les plus chers) : il ne rend pas la rédaction meilleure. Une
+tâche qui écrit de longs documents ou beaucoup de fichiers simples coûte déjà cher en sortie : effort medium.
 Les modèles autorisés et le budget rappelés par ClaudeDesk sont des limites, pas des consignes d'utilisation ; plus la
 fin du budget approche, plus tu économises.
 
@@ -1557,12 +1560,30 @@ void Orchestrator::pause(const std::string& reason) {
     addLog(nullptr, "Pause : " + reason, true);
 }
 
+void Orchestrator::limitReached(OrchestratorHost& h, const std::string& win) {
+    if (!running() && state != OrchState::Paused) return;
+    const int64_t now = h.now();
+    if (state == OrchState::UsagePause && usageWindow_ == win && limitUntil_ > now) return;  // déjà en pause pour ça
+    int64_t r = h.resetsAt(win);
+    limitUntil_ = r > now ? r + 30 : now + 600;  // réinitialisation inconnue : nouvel essai dans 10 min
+    if (state == OrchState::Paused) return;      // pause manuelle : elle reste manuelle
+    if (state != OrchState::UsagePause) resumeState_ = state;
+    state = OrchState::UsagePause;
+    usageWindow_ = win;
+    std::string w = win == "seven_day" ? "quota hebdomadaire" : "session de 5 h";
+    pauseReason = "limite du compte atteinte (" + w + ") : reprise automatique " +
+                  (r > now ? "dans " + util::humanDuration(limitUntil_ - now) : std::string("dans 10 min"));
+    changed = true;
+    addLog(&h, "Pause : " + pauseReason, true);
+}
+
 void Orchestrator::stop() {
     if (state == OrchState::Idle) return;
     state = OrchState::Idle;
     pauseReason.clear();
     pauseNote.clear();
     pauseUntil = 0;
+    limitUntil_ = 0;
     questions.clear();
     pendingAgents.clear();
     addLog(nullptr, "Orchestration arrêtée.", true);
@@ -1571,6 +1592,7 @@ void Orchestrator::stop() {
 void Orchestrator::resume(OrchestratorHost& h) {
     if (state != OrchState::Paused && state != OrchState::UsagePause) return;
     OrchState to = resumeState_;
+    limitUntil_ = 0;  // reprise (automatique ou à la main) : la limite sera de nouveau signalée si elle tient
     if (to != OrchState::Working && to != OrchState::WaitingHuman) to = OrchState::Thinking;
     pauseReason.clear();
     if (!exhausted()) finalRequested_ = false;  // budget relevé : on repart normalement
@@ -1757,6 +1779,14 @@ void Orchestrator::tick(OrchestratorHost& h) {
                 break;
             }
             std::string win = usageWindow_.empty() ? "five_hour" : usageWindow_;
+            if (limitUntil_ > 0) {  // refus « limite atteinte » reçu : la mesure peut être périmée, on attend la date
+                if (h.now() < limitUntil_) break;
+                limitUntil_ = 0;
+                state = OrchState::Paused;
+                addLog(&h, "Limite du compte réinitialisée : l'orchestration reprend.");
+                resume(h);
+                break;
+            }
             double limit = win == "seven_day" ? settings.weeklyPause : settings.usagePause;
             double u = h.utilization(win);
             int64_t r = h.resetsAt(win);
@@ -2018,7 +2048,14 @@ void Orchestrator::dispatch(OrchestratorHost& h) {
         t.writeAtSend = st.cacheWriteTokens;
         t.outAtSend = st.outputTokens;
         const bool browser = isBrowserAgent(t.agent);
-        if (!h.send(id, taskMessage(t, settings.visualChecks, browser, projectKindFromId(settings.projectKind)),
+        std::string msg = taskMessage(t, settings.visualChecks, browser, projectKindFromId(settings.projectKind));
+        // Tâche déjà envoyée une fois (limite d'usage atteinte en plein travail, processus arrêté…) : l'agent
+        // reprend là où il en était au lieu de tout refaire.
+        if (t.sentAt > 0)
+            msg = "_(Reprise après interruption : cette tâche a déjà été commencée. Vérifie ce qui est fait dans le " +
+                  std::string(projectKindFromId(settings.projectKind) == ProjectKind::Software ? "dépôt" : "dossier") +
+                  " et poursuis sans refaire.)_\n\n" + msg;
+        if (!h.send(id, msg,
                     SendOptions{settings.workerMode, model, effort, settings.leanAgents, browser})) {
             t.done = t.failed = true;
             t.report = "Envoi impossible (Claude Code introuvable ?).";

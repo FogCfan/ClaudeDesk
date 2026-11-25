@@ -77,6 +77,8 @@ std::string requestSection(const DesignRequest& r) {
         std::string a = q.answer();
         m += "- " + q.question + " → " + (a.empty() ? "au choix du designer" : a) + "\n";
     }
+    if (!util::trim(r.clarifications).empty())
+        m += "\n## Précisions supplémentaires de l'humain\n" + util::trim(r.clarifications) + "\n";
     return m;
 }
 
@@ -122,6 +124,9 @@ const char* kTeamRules = R"RULES(## Règles de conception de l'équipe
   savoir que c'est fini.
 - budget : garde celui demandé sauf raison forte.)RULES";
 
+// Le résumé de la réflexion est affiché en direct dans le Designer (OneShot::thinkingDisplay).
+const char* kThinkInFrench = "- Réfléchis en français : l'humain suit ta réflexion en direct.\n";
+
 }  // namespace
 
 std::string DesignQuestion::answer() const {
@@ -139,6 +144,7 @@ std::string designPrompt(const DesignRequest& r) {
     p += requestSection(r) + "\n";
     p += designerKindGuidance(projectKindFromId(r.kind)) + "\n\n";
     p += "## Ce que tu dois faire\n";
+    p += kThinkInFrench;
     if (r.analyzeFolder && !util::trim(r.folder).empty())
         p += "- Examine d'abord le dossier de travail avec Read, Glob et Grep — lectures ciblées (structure, README, "
              "documents, fichiers de données ou de build, code principal), une quinzaine au plus — et bâtis la conception "
@@ -170,8 +176,9 @@ std::string refinePrompt(const DesignRequest& r, const ProjectDesign& current, c
     p += "## Conception actuelle (modifications de l'humain comprises)\n```json\n" +
          json{{"design", toJson(current)}}.dump(1) + "\n```\n\n";
     p += "## Changements demandés\n" + util::trim(feedback) + "\n\n";
-    p += "## Ce que tu dois faire\n"
-         "- Applique les changements demandés, et seulement eux : garde le reste tel quel, y compris les modifications "
+    p += "## Ce que tu dois faire\n";
+    p += kThinkInFrench;
+    p += "- Applique les changements demandés, et seulement eux : garde le reste tel quel, y compris les modifications "
          "de l'humain. Si un changement en implique d'autres (un agent supprimé dont les fichiers passent à un autre), "
          "fais-les aussi.\n";
     if (r.analyzeFolder && !util::trim(r.folder).empty())
@@ -181,6 +188,56 @@ std::string refinePrompt(const DesignRequest& r, const ProjectDesign& current, c
     p += "\n\n";
     p += kTeamRules;
     return p;
+}
+
+std::string thinkingHeadline(const std::string& thinking, int* paragraph, size_t maxLen) {
+    if (paragraph) *paragraph = -1;
+    // Paragraphes séparés par une ligne vide.
+    std::vector<std::string> paras;
+    {
+        size_t start = 0;
+        while (start <= thinking.size()) {
+            size_t end = thinking.find("\n\n", start);
+            std::string p = util::trim(thinking.substr(start, end == std::string::npos ? std::string::npos : end - start));
+            paras.push_back(p);
+            if (end == std::string::npos) break;
+            start = end + 2;
+        }
+    }
+    auto sentenceEnd = [](const std::string& p) {
+        for (size_t i = 0; i < p.size(); ++i)
+            if ((p[i] == '.' || p[i] == '!' || p[i] == '?' || p[i] == ':') && (i + 1 == p.size() || p[i + 1] == ' ' || p[i + 1] == '\n'))
+                return i;
+        return std::string::npos;
+    };
+    for (int i = (int)paras.size() - 1; i >= 0; --i) {
+        const std::string& p = paras[(size_t)i];
+        if (p.empty()) continue;
+        std::string line;
+        if (p.rfind("**", 0) == 0) {  // titre en gras
+            size_t close = p.find("**", 2);
+            if (close == std::string::npos) continue;  // titre pas encore fini
+            line = p.substr(2, close - 2);
+        } else {
+            size_t e = sentenceEnd(p);
+            size_t nl = p.find('\n');
+            if (e == std::string::npos && nl == std::string::npos && p.size() < 25) continue;  // trop tôt pour en dire quelque chose
+            size_t cut = std::min(e == std::string::npos ? p.size() : e + 1, nl == std::string::npos ? p.size() : nl);
+            line = p.substr(0, cut);
+        }
+        // Sans Markdown ni ponctuation finale « : ».
+        std::string clean;
+        for (size_t k = 0; k < line.size(); ++k) {
+            if (line[k] == '*' || line[k] == '`' || line[k] == '#') continue;
+            clean += line[k];
+        }
+        clean = util::trim(clean);
+        while (!clean.empty() && clean.back() == ':') clean.pop_back();
+        if (clean.empty()) continue;
+        if (paragraph) *paragraph = i;
+        return clean.size() > maxLen ? util::truncateUtf8(clean, maxLen) : clean;
+    }
+    return {};
 }
 
 // Le JSON de la réponse : le dernier bloc ```json, sinon du premier « { » au dernier « } ».
@@ -457,7 +514,7 @@ json DesignerDraft::toJson() const {
             {"request",
              {{"kind", req.kind}, {"description", req.description}, {"folder", req.folder}, {"analyzeFolder", req.analyzeFolder},
               {"tech", req.tech}, {"constraints", req.constraints}, {"teamSize", req.teamSize}, {"budget", req.budget},
-              {"allowQuestions", req.allowQuestions}, {"answered", ans}}},
+              {"allowQuestions", req.allowQuestions}, {"answered", ans}, {"clarifications", req.clarifications}}},
             {"questions", qs},
             {"design", claude::toJson(design)},
             {"history", hist},
@@ -491,6 +548,7 @@ void DesignerDraft::fromJson(const json& j) {
         req.allowQuestions = r.value("allowQuestions", true);
         req.answered.clear();
         for (auto& q : r.value("answered", json::array())) req.answered.push_back(questionFromJson(q));
+        req.clarifications = r.value("clarifications", "");
     }
     questions.clear();
     for (auto& q : j.value("questions", json::array())) questions.push_back(questionFromJson(q));

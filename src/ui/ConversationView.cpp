@@ -143,7 +143,7 @@ void App::drawConversationArea() {
     ImGui::PopStyleVar();
     int visible = 0;
     for (auto& oc : open_)
-        if (!isOrchBrain(oc->session->localId)) ++visible;
+        if (!isOrchBrain(oc->session->localId) && !oc->hiddenTab) ++visible;
     if (visible == 0) {
         drawWelcome();
         ImGui::End();
@@ -158,6 +158,7 @@ void App::drawConversationArea() {
             auto& oc = *open_[i];
             auto& s = *oc.session;
             if (isOrchBrain(s.localId)) continue;  // affichée dans la page « Orchestrateur »
+            if (oc.hiddenTab) continue;            // onglet fermé, l'agent travaille encore (closeConversation)
             std::string label = util::truncateUtf8(s.title.empty() ? "Sans titre" : s.title, 32);
             if (s.state == claude::SessionState::Busy) label += "  ●";
             if (!s.permissions.empty()) label += "  ⚠";
@@ -165,7 +166,18 @@ void App::drawConversationArea() {
             bool openFlag = true;
             ImGuiTabItemFlags flags = 0;
             if (selectTab_ == i) flags |= ImGuiTabItemFlags_SetSelected;
+            // Signal d'attention (Attention.cpp) : onglet teinté qui clignote — nouvelle conversation ouverte par
+            // l'orchestrateur, décision attendue, réponse arrivée.
+            int flashPushed = 0;
+            if (ImVec4 f = flashColor("tab:" + s.localId); f.w > 0)
+                for (ImGuiCol c : {ImGuiCol_Tab, ImGuiCol_TabDimmed}) {
+                    ImVec4 base = ImGui::GetStyleColorVec4(c);
+                    ImGui::PushStyleColor(c, ImVec4(base.x + (f.x - base.x) * f.w, base.y + (f.y - base.y) * f.w,
+                                                    base.z + (f.z - base.z) * f.w, 1.0f));
+                    ++flashPushed;
+                }
             bool selected = ImGui::BeginTabItem(label.c_str(), &openFlag, flags);
+            ImGui::PopStyleColor(flashPushed);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(s.title.c_str());
@@ -193,8 +205,9 @@ void App::drawConversationArea() {
             if (closeOthers) {
                 std::string keep = s.localId;
                 for (int k = (int)open_.size() - 1; k >= 0; --k)
-                    if (open_[k]->session->localId != keep) closeConversation(k);
-                active_ = 0;
+                    if (open_[k]->session->localId != keep && !open_[k]->hiddenTab) closeConversation(k);
+                for (int k = 0; k < (int)open_.size(); ++k)
+                    if (open_[k]->session->localId == keep) active_ = k;
                 break;
             }
             if (!openFlag) closeIndex = i;

@@ -79,6 +79,9 @@ struct OpenConversation {
     std::string folderPath;            // dossier de l'espace de travail (UTF-8)
     ws::ConversationMeta meta;         // récap, statut, épingle…
     bool injectContext = true;
+    // Onglet fermé alors qu'un agent de l'orchestrateur y travaille : la conversation continue sans onglet
+    // (l'orchestrateur la suit toujours) ; elle revient si on la rouvre, et se libère une fois inutile.
+    bool hiddenTab = false;
 
     // Éditeur
     std::string draft;
@@ -261,6 +264,31 @@ private:
     OpenConversation* openConversation(const std::string& id, bool focus = true);
     OpenConversation* openImported(const claude::HistorySession& hs, ws::Folder* folder);
     void closeConversation(int index);
+    bool orchKeepsAlive(const OpenConversation& oc) const;  // agent suivi par l'orchestrateur : jamais coupé
+    int firstVisibleTab() const;
+    void releaseHiddenTabs();
+    double lastHiddenCheck_ = 0;
+
+    // Signaux d'attention (Attention.cpp) : bouton de page ou onglet qui clignote quand sa section change d'état
+    // hors de la vue. Clés : "page0".."page3", "tab:<id>".
+    struct Flash {
+        double start = 0;
+        ImVec4 color;
+        bool sticky = false;  // reste teinté jusqu'à ce qu'on regarde
+    };
+    struct AttnConv {
+        size_t perms = 0;
+        bool busy = false;
+    };
+    std::map<std::string, Flash> flashes_;
+    std::map<std::string, AttnConv> attnConvs_;
+    bool attnInit_ = false;
+    int prevOrchState_ = -1;
+    bool prevDesignerBusy_ = false;
+    void flash(const std::string& key, const ImVec4& color, bool sticky);
+    void clearFlash(const std::string& key);
+    ImVec4 flashColor(const std::string& key);  // w = intensité (0 : aucun signal)
+    void tickAttention();
     void saveConversation(OpenConversation& oc);
     void saveAll();
     void sendDraft(OpenConversation& oc);
@@ -355,6 +383,8 @@ private:
     // familles utilisables. Voir claude/Models.h.
     std::string accountPlan() const;
     void onModelRefused(claude::ClaudeSession& s);
+    void onUsageLimit(claude::ClaudeSession& s);
+    void orchestratorLimitReached(const std::string& win);  // OrchestratorPanel.cpp
     bool modelUsable(const std::string& model) const { return settings_.modelAccess.usable(model, accountPlan()); }
     void drawModelRefusedCard(OpenConversation& oc, int index, float width);  // ConversationView.cpp
     void drawModelCards(std::string& model, claude::ClaudeSession* s);         // ConfigPanel.cpp
@@ -420,8 +450,20 @@ private:
     double designerSaved_ = 0;
     double designerStarted_ = 0;
     bool designerRefining_ = false;
-    std::vector<std::string> designerActivity_;  // ce que fait Claude pendant la conception
+    std::vector<std::string> designerActivity_;  // ce que fait Claude pendant la conception (une ligne par étape)
     std::string designerError_, designerRaw_, designerPlanText_;
+    // Échange complet de la dernière conception (fenêtre « Échange avec Claude ») : demande, réflexion, réponse.
+    struct DesignerBlock {
+        int kind = 0;  // 0 réflexion, 1 réponse, 2 outil
+        std::string text;
+    };
+    std::string designerPrompt_;
+    std::vector<DesignerBlock> designerExchange_;
+    int designerHeadPara_ = -1;     // paragraphe de réflexion affiché sur la dernière ligne d'activité
+    bool designerLineTransient_ = false;  // la dernière ligne d'activité sera remplacée (« Réflexion… », compteur)
+    void designerSay(const std::string& line, bool transient);
+    bool designerShowExchange_ = false;
+    void drawDesignerExchange();
     bool designerConfirmReset_ = false;
     double designerConfirmAt_ = 0;
     int designerOpenRole_ = -1;     // fiche de rôle à déplier (agent ajouté)

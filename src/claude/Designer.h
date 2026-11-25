@@ -62,6 +62,7 @@ struct DesignRequest {
     std::string budget = "medium";
     bool allowQuestions = true;
     std::vector<DesignQuestion> answered;  // questions de clarification déjà répondues
+    std::string clarifications;            // « Précisions » libres ajoutées à l'étape Clarifier
 };
 
 // Ce que Claude a renvoyé : des questions, ou une conception.
@@ -76,6 +77,11 @@ struct DesignResponse {
 std::string designPrompt(const DesignRequest& req);
 std::string refinePrompt(const DesignRequest& req, const ProjectDesign& current, const std::string& feedback);
 DesignResponse parseDesignResponse(const std::string& text);
+
+// Ligne d'activité tirée du résumé de réflexion reçu en direct : le titre en gras (« **Titre** ») ou la première
+// phrase du dernier paragraphe assez avancé (≥ 25 caractères ou phrase finie), sans Markdown, coupée à `maxLen`.
+// `paragraph` reçoit l'indice du paragraphe retenu (-1 si rien d'exploitable) : même indice = même ligne à mettre à jour.
+std::string thinkingHeadline(const std::string& thinking, int* paragraph = nullptr, size_t maxLen = 150);
 
 // Problèmes de la conception : `errors` bloquent la création, `warnings` sont des conseils.
 struct DesignCheck {
