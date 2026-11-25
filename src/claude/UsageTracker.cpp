@@ -72,7 +72,10 @@ void UsageTracker::recordSample() {
     UsageSample s{lastUpdate};
     if (auto* w = find("five_hour")) s.fiveHour = w->utilization;
     if (auto* w = find("seven_day")) s.sevenDay = w->utilization;
-    history.push_back(s);
+    // Mesure identique à la précédente il y a moins d'une minute (plusieurs agents, refus en série) : rien de neuf.
+    const bool same = !history.empty() && history.back().fiveHour == s.fiveHour &&
+                      history.back().sevenDay == s.sevenDay && s.time - history.back().time < 60;
+    if (!same) history.push_back(s);
     while (!history.empty() && history.front().time < lastUpdate - 8 * 86400) history.erase(history.begin());
     dirty = true;
 }

@@ -22,6 +22,10 @@ public:
     bool defaultTools = false;   // outils par défaut du CLI (sinon aucun outil : --tools "")
     std::string permissionMode;  // --permission-mode (plan, default…) ; vide = celui du CLI
     std::string effort;          // --effort ; vide = celui du CLI
+    bool partialMessages = false;  // mode flux : --include-partial-messages (stream_event, texte au fil de l'eau)
+    // --thinking-display (option cachée de la CLI, vérifiée en 2.1.332) : « summarized » = résumé de la réflexion
+    // envoyé en direct (thinking_delta) ; sans elle, les blocs de réflexion arrivent vides.
+    std::string thinkingDisplay;
 
     void cancel();  // arrête le processus ; onDone est appelé avec l'erreur « Annulé »
 

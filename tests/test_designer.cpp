@@ -125,3 +125,36 @@ TEST_CASE("designer : brouillon sauvegardé") {
     d.fromJson(c.toJson());
     CHECK(d.step == 0);
 }
+
+TEST_CASE("designer : ligne d'activité tirée de la réflexion") {
+    int para = 0;
+    CHECK(thinkingHeadline("", &para).empty());
+    CHECK(para == -1);
+    // Début trop court : rien à dire encore.
+    CHECK(thinkingHeadline("I'm", &para).empty());
+    // Première phrase du paragraphe.
+    CHECK(thinkingHeadline("I'm weighing the agents. Then the rest", &para) == "I'm weighing the agents.");
+    CHECK(para == 0);
+    // Titre en gras, et le dernier paragraphe l'emporte.
+    CHECK(thinkingHeadline("First idea here.\n\n**Planning the team**\nDetails", &para) == "Planning the team");
+    CHECK(para == 1);
+    // Dernier paragraphe encore trop court : on garde le précédent.
+    CHECK(thinkingHeadline("Je compare les moteurs de calcul.\n\nJe", &para) == "Je compare les moteurs de calcul.");
+    CHECK(para == 0);
+    // Coupé à la longueur demandée.
+    std::string longLine(400, 'a');
+    CHECK(thinkingHeadline(longLine, nullptr, 50).size() <= 53);
+}
+
+TEST_CASE("designer : précisions dans le prompt et le brouillon") {
+    DesignRequest r;
+    r.description = "Un playground d'IA";
+    r.clarifications = "Pas de service en ligne.";
+    CHECK(designPrompt(r).find("Précisions supplémentaires de l'humain\nPas de service en ligne.") != std::string::npos);
+    CHECK(designPrompt(r).find("Réfléchis en français") != std::string::npos);
+    DesignerDraft d;
+    d.req = r;
+    DesignerDraft e;
+    e.fromJson(d.toJson());
+    CHECK(e.req.clarifications == "Pas de service en ligne.");
+}

@@ -1796,3 +1796,30 @@ TEST_CASE("orchestrateur : la reprise après une pause ne perd pas l'usage conso
     CHECK(o.windowSpent == doctest::Approx(0.0));
     CHECK(o.sessionAllowance() == doctest::Approx(0.5 * (0.90 - 0.30)));
 }
+
+TEST_CASE("orchestrateur : limite du compte atteinte en pleine tâche") {
+    FakeHost h;
+    Orchestrator o;
+    o.settings.objective = "x";
+    REQUIRE(o.start(h));
+    h.answer("brain", "@@DELEGUER 01 Modèle\nfaire a\n@@FIN");
+    o.tick(h);
+    REQUIRE(h.convs["conv:01 Modèle"].received.size() == 1);
+    // Le tour de l'agent est refusé (limite de 5 h) : il ne compte pas, la conversation est libre.
+    h.convs["conv:01 Modèle"].st.busy = false;
+    o.limitReached(h, "five_hour");
+    CHECK(o.state == OrchState::UsagePause);
+    CHECK(o.pauseReason.find("limite du compte") != std::string::npos);
+    h.usage = 0.5;  // mesure périmée sous le plafond : on attend quand même la réinitialisation
+    h.t = 3000;
+    o.tick(h);
+    o.tick(h);
+    CHECK(o.state == OrchState::UsagePause);
+    CHECK(h.convs["conv:01 Modèle"].received.size() == 1);  // aucun renvoi en boucle
+    h.t = 5100;  // après la réinitialisation (5000)
+    o.tick(h);
+    o.tick(h);
+    CHECK(o.state == OrchState::Working);
+    REQUIRE(h.convs["conv:01 Modèle"].received.size() == 2);
+    CHECK(h.convs["conv:01 Modèle"].received[1].rfind("_(Reprise après interruption", 0) == 0);
+}

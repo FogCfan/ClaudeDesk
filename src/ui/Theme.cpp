@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "ui/Anim.h"
+#include "imgui_internal.h"
 
 namespace ui {
 
@@ -322,9 +323,12 @@ void miniRing(float f, float size, const char* animId) {
     float lh = ImGui::GetTextLineHeight();
     float d = size > 0 ? size : lh * 0.85f;
     ImVec2 p = ImGui::GetCursorScreenPos();
+    // Centré sur la ligne de texte : dans une barre de menu (ou après un bouton), le texte est décalé vers le bas
+    // de CurrLineTextBaseOffset — sans ça, l'anneau monte au-dessus du chiffre qui le suit et déborde en haut.
+    const float baseOff = ImGui::GetCurrentWindow()->DC.CurrLineTextBaseOffset;
     ImGui::Dummy(ImVec2(d, lh));
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 c(p.x + d * 0.5f, p.y + lh * 0.5f);
+    ImVec2 c(std::floor(p.x + d * 0.5f) + 0.5f, std::floor(p.y + baseOff + lh * 0.5f) + 0.5f);
     float th = std::max(2.0f, d * 0.2f);
     float r = d * 0.5f - th * 0.5f;
     dl->AddCircle(c, r, col(ImGui::GetStyleColorVec4(ImGuiCol_FrameBg)), 32, th);

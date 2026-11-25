@@ -373,6 +373,9 @@ public:
     bool start(OrchestratorHost& h);
     void pause(const std::string& reason);
     void resume(OrchestratorHost& h);
+    // Un participant a été refusé : limite d'usage du compte atteinte (win = "five_hour" / "seven_day"). Pause
+    // automatique jusqu'à la réinitialisation (ou 10 min si elle est inconnue) ; les tours refusés repartent ensuite.
+    void limitReached(OrchestratorHost& h, const std::string& win);
     void stop();  // arrêt définitif (les tours en cours continuent dans leurs conversations)
     void tick(OrchestratorHost& h);
     // Réponse de l'utilisateur à une question @@HUMAIN (envoyée au cerveau).
@@ -473,6 +476,7 @@ private:
     double costBaseline_ = 0;        // API : dépense déjà comptée avant la dernière relance
     bool teamActive(OrchestratorHost& h);
     std::string usageWindow_;  // fenêtre responsable de la pause d'usage
+    int64_t limitUntil_ = 0;   // limite d'usage atteinte (refus reçu) : pas de reprise avant cette date
     // Dernier état connu du quota (pour informer le cerveau)
     double quota5h_ = -1, quota7d_ = -1;
     int64_t reset5h_ = 0, snapNow_ = 0;

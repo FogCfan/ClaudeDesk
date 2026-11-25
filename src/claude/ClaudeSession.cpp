@@ -1,6 +1,8 @@
 #include "claude/ClaudeSession.h"
 
 #include <algorithm>
+#include <mutex>
+#include <thread>
 
 #include "claude/Auth.h"
 #include "util/Paths.h"
@@ -209,8 +211,29 @@ void ClaudeSession::respondPermission(const std::string& requestId, bool allow, 
     statusText = allow ? "Exécution…" : "Refusé";
 }
 
-void ClaudeSession::stop() {
-    if (process_) {
+namespace {
+std::mutex g_stopMu;
+std::vector<std::thread> g_stops;  // arrêts en arrière-plan (stop(false))
+}  // namespace
+
+void ClaudeSession::joinBackgroundStops() {
+    std::vector<std::thread> v;
+    {
+        std::lock_guard<std::mutex> lk(g_stopMu);
+        v.swap(g_stops);
+    }
+    for (auto& t : v)
+        if (t.joinable()) t.join();
+}
+
+void ClaudeSession::stop(bool wait) {
+    if (process_ && !wait) {
+        std::lock_guard<std::mutex> lk(g_stopMu);
+        g_stops.emplace_back([p = std::move(process_)]() mutable {
+            p->shutdown(1500);
+            p.reset();
+        });
+    } else if (process_) {
         process_->shutdown(1500);
         for (auto& l : process_->poll())
             if (l.isStderr) stderrLog.push_back(l.text);
@@ -324,6 +347,11 @@ void ClaudeSession::handleLine(const std::string& line, double now) {
             std::string text;
             for (auto& c : j.value("message", json::object()).value("content", json::array()))
                 if (jstr(c, "type") == "text") text += jstr(c, "text");
+            if (isUsageLimitText(text)) {  // limite de 5 h / de la semaine : aucun modèle n'est en cause
+                limitPending_ = usageLimitWindow(text);
+                limitText_ = text;
+                return;
+            }
             if (ModelAccess a = modelAccessFromError(err, text); a != ModelAccess::Unknown) {
                 modelErrorPending_ = a;
                 return;
@@ -578,6 +606,16 @@ void ClaudeSession::handleResult(const json& j, double now) {
     ModelAccess refusedAs = isError && !authError ? modelErrorPending_ : ModelAccess::Unknown;
     if (isError && !authError && refusedAs == ModelAccess::Unknown) refusedAs = modelAccessFromError("", jstr(j, "result"));
     modelErrorPending_ = ModelAccess::Unknown;
+    std::string limitWin = isError && !authError ? limitPending_ : std::string();
+    std::string limitText = limitText_;
+    if (isError && !authError && limitWin.empty() && isUsageLimitText(jstr(j, "result"))) {
+        limitText = jstr(j, "result");
+        limitWin = usageLimitWindow(limitText);
+    }
+    limitPending_.clear();
+    limitText_.clear();
+    const bool limited = !limitWin.empty();
+    if (limited) refusedAs = ModelAccess::Unknown;
     const bool refused = refusedAs != ModelAccess::Unknown;
 
     stats.costUsd += ts.costUsd;
@@ -585,7 +623,7 @@ void ClaudeSession::handleResult(const json& j, double now) {
     stats.apiSeconds += jint(j, "duration_api_ms") / 1000.0;
     // Un tour refusé faute de connexion n'est pas une réponse : il ne compte pas (l'orchestrateur renverra le
     // message après la reconnexion au lieu de prendre l'erreur pour le travail de l'agent).
-    if (!authError && !refused) {
+    if (!authError && !refused && !limited) {
         stats.turns++;
         stats.turnHistory.push_back(ts);
         if (stats.turnHistory.size() > 400) stats.turnHistory.erase(stats.turnHistory.begin());
@@ -594,6 +632,17 @@ void ClaudeSession::handleResult(const json& j, double now) {
         std::string msg = jstr(j, "result");
         addSystemNote(msg.empty() ? "Échec d'authentification (authentication_failed)." : msg, true);
         authFailed = true;
+    } else if (limited) {
+        usageLimited = limitWin;
+        std::string when;  // « resets 8:30am (Europe/Paris) » → « réinitialisation : 8:30am (Europe/Paris) »
+        if (size_t p = util::toLower(limitText).find("resets "); p != std::string::npos) {
+            when = limitText.substr(p + 7);
+            if (size_t e = when.find(" ·"); e != std::string::npos) when = when.substr(0, e);
+        }
+        addSystemNote(std::string("Message non traité : limite ") +
+                          (limitWin == "seven_day" ? "hebdomadaire" : "de la session de 5 h") + " atteinte" +
+                          (when.empty() ? "." : " (réinitialisation : " + util::trim(when) + ")."),
+                      true);
     } else if (refused) {
         modelRefused = refusedAs;
         modelRefusedName = !config.model.empty() ? config.model : activeModel;
@@ -620,13 +669,15 @@ void ClaudeSession::handleResult(const json& j, double now) {
     if (!isError) {
         authFailed = false;
         modelRefused = ModelAccess::Unknown;
+        usageLimited.clear();
     }
     if (authError && onAuthError) onAuthError(*this);
+    if (limited && onUsageLimit) onUsageLimit(*this);
     if (refused && onModelRefused) onModelRefused(*this);
     if (onTurnFinished) onTurnFinished(*this);
 }
 
-bool ClaudeSession::resendLast() {
+bool ClaudeSession::resendLast(const std::string& note) {
     if (state == SessionState::Busy || state == SessionState::Starting) return false;
     std::string text = lastUserText_;
     std::vector<ImageAttachment> images = lastUserImages_;
@@ -640,7 +691,8 @@ bool ClaudeSession::resendLast() {
     // Nouveau processus : celui en place garde l'ancienne connexion en mémoire.
     stop();
     authFailed = false;
-    addSystemNote("Message renvoyé après la reconnexion.");
+    usageLimited.clear();
+    if (!note.empty()) addSystemNote(note);
     lastUserText_ = text;
     lastUserImages_ = images;
     if (!startProcess()) return false;

@@ -106,7 +106,7 @@ void App::onLoggedIn() {
     // Les processus déjà lancés peuvent garder l'ancienne connexion en mémoire : ils repartiront (--resume)
     // au prochain message.
     for (auto& oc : open_)
-        if (oc->session->state == claude::SessionState::Idle) oc->session->stop();
+        if (oc->session->state == claude::SessionState::Idle) oc->session->stop(false);
     if (orchPausedForAuth_ && orch_ && orch_->state == claude::OrchState::Paused) {
         orchestratorResume();
         toast("L'orchestrateur reprend son travail.");

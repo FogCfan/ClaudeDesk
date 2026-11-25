@@ -92,12 +92,16 @@ public:
     // Effacé au prochain tour réussi.
     ModelAccess modelRefused = ModelAccess::Unknown;
     std::string modelRefusedName;  // modèle demandé
+    // Le dernier tour a été refusé : limite d'usage du compte atteinte ("five_hour" / "seven_day" ; vide sinon).
+    // Le tour ne compte pas (l'orchestrateur le renverra après la réinitialisation). Effacé au prochain tour réussi.
+    std::string usageLimited;
 
     // Callbacks (optionnels)
     std::function<void(const nlohmann::json&)> onRateLimit;
     std::function<void(ClaudeSession&)> onTurnFinished;
     std::function<void(ClaudeSession&)> onAuthError;  // tour refusé : pas (ou plus) connecté
     std::function<void(ClaudeSession&)> onModelRefused;  // tour refusé à cause du modèle (voir modelRefused)
+    std::function<void(ClaudeSession&)> onUsageLimit;    // tour refusé : limite d'usage atteinte (voir usageLimited)
     // Un vrai modèle a répondu (identifiant résolu, ex. claude-opus-5-5) : l'accès est confirmé.
     std::function<void(ClaudeSession&, const std::string&)> onModelAnswered;
 
@@ -110,10 +114,13 @@ public:
     void applyConfig(const SessionConfig& cfg);
     void respondPermission(const std::string& requestId, bool allow, const std::string& denyMessage = {},
                            const nlohmann::json& updatedInput = nullptr, bool alwaysAllow = false);
-    void stop();
+    // Arrêt du processus. wait=false : l'arrêt (jusqu'à quelques secondes si le CLI traîne) se fait dans un fil
+    // d'arrière-plan — l'interface n'attend pas ; joinBackgroundStops() les attend tous (fermeture de l'appli).
+    void stop(bool wait = true);
+    static void joinBackgroundStops();
     void restart();               // arrêt + reprise (--resume) au prochain envoi
     // Renvoie le dernier message (après une reconnexion) dans un processus neuf, sans le répéter dans le fil.
-    bool resendLast();
+    bool resendLast(const std::string& note = "Message renvoyé après la reconnexion.");
     void addSystemNote(const std::string& text, bool error = false);
 
     // À appeler à chaque image : lit les sorties du processus et met à jour l'état.
@@ -158,6 +165,8 @@ private:
     bool freshPrompt_ = false;     // prompt système modifié : ne pas réutiliser l'instantané
     ModelAccess modelErrorPending_ = ModelAccess::Unknown;  // message assistant « modèle refusé », résultat à venir
     bool authErrorPending_ = false;  // message assistant « authentication_failed » reçu, résultat à venir
+    std::string limitPending_;       // message assistant « limite d'usage atteinte » reçu (fenêtre), résultat à venir
+    std::string limitText_;          // son texte (« resets 8:30am… »)
 };
 
 const char* stateLabel(SessionState s);

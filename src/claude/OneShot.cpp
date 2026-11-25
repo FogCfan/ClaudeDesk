@@ -15,6 +15,8 @@ bool OneShot::start(const std::string& exe, const std::string& model, const std:
     if (!permissionMode.empty()) args.insert(args.end(), {"--permission-mode", permissionMode});
     if (!effort.empty()) args.insert(args.end(), {"--effort", effort});
     if (streamJson) args.push_back("--verbose");
+    if (streamJson && partialMessages) args.push_back("--include-partial-messages");
+    if (!thinkingDisplay.empty()) args.insert(args.end(), {"--thinking-display", thinkingDisplay});
     if (!model.empty()) args.insert(args.end(), {"--model", model});
     if (!process_->start(exe, args, cwd)) {
         finished_ = true;

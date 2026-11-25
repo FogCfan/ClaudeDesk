@@ -363,7 +363,7 @@ bool App::drawConversationItem(ws::Folder* f, ws::ConversationMeta& m, int sessi
             std::string id = m.id;
             for (int i = (int)open_.size() - 1; i >= 0; --i)
                 if (open_[i]->session->localId == id) {
-                    open_[i]->session->stop();
+                    open_[i]->session->stop(false);
                     open_.erase(open_.begin() + i);
                     if (active_ >= (int)open_.size()) active_ = (int)open_.size() - 1;
                 }

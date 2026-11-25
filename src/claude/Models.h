@@ -38,6 +38,10 @@ ModelAccess expectedModelAccess(const std::string& familyAlias, const std::strin
 // Refus lié au modèle dans une réponse : champ « error » du message synthétique de la CLI + son texte.
 // Unknown si l'erreur n'a rien à voir avec le modèle.
 ModelAccess modelAccessFromError(const std::string& error, const std::string& text);
+// Limite d'usage du compte atteinte (« You've hit your 5-hour limit · resets … · out of usage credits ») : le texte
+// parle aussi de crédits, mais aucun modèle n'est en cause — tous sont refusés jusqu'à la réinitialisation.
+bool isUsageLimitText(const std::string& text);
+std::string usageLimitWindow(const std::string& text);  // "five_hour" ou "seven_day"
 // Explication en français d'un refus, pour la conversation.
 std::string modelRefusalText(const std::string& model, ModelAccess a);
 bool isModelRefusalText(const std::string& text);  // note produite par modelRefusalText

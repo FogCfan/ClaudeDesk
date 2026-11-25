@@ -169,36 +169,76 @@ void App::designerRun(bool refine) {
         job->defaultTools = true;
         cwd = util::trim(d.req.folder);
     }
+    // Réflexion résumée et texte reçus en direct : une ligne d'activité qui dit ce que fait Claude, et l'échange
+    // complet consultable (« Voir l'échange »).
+    job->partialMessages = true;
+    job->thinkingDisplay = "summarized";
     designerActivity_.clear();
+    designerExchange_.clear();
+    designerPrompt_ = prompt;
+    designerHeadPara_ = -1;
+    designerLineTransient_ = false;
     designerError_.clear();
     designerRaw_.clear();
     designerPlanText_.clear();
     designerStarted_ = now_;
     designerRefining_ = refine;
+    designerSay("Lancement de Claude Code…", true);
     job->onEvent = [this](const json& j) {
-        if (j.value("type", "") != "assistant" || !j.contains("message")) return;
-        for (auto& c : j["message"].value("content", json::array())) {
-            std::string t = c.value("type", "");
-            std::string line;
-            if (t == "tool_use") {
-                line = describeTool(c);
+        const std::string type = j.value("type", "");
+        if (type == "system" && j.value("subtype", "") == "init") {
+            designerSay("Demande envoyée à " + designer_.model + ", en attente de sa réponse…", true);
+        } else if (type == "stream_event" && j.contains("event")) {
+            const json& e = j["event"];
+            const std::string et = e.value("type", "");
+            if (et == "message_start") {
+                designerSay("Claude lit la demande…", true);
+            } else if (et == "content_block_start") {
+                std::string bt = e.value("content_block", json::object()).value("type", "");
+                if (bt == "thinking" || bt == "redacted_thinking") {
+                    designerExchange_.push_back({0, ""});
+                    designerHeadPara_ = -1;
+                    designerSay("Réflexion…", true);
+                } else if (bt == "text") {
+                    designerExchange_.push_back({1, ""});
+                    designerSay("Rédaction de la réponse…", true);
+                }
+            } else if (et == "content_block_delta" && !designerExchange_.empty()) {
+                const json& d = e.value("delta", json::object());
+                const std::string dt = d.value("type", "");
+                auto& blk = designerExchange_.back();
+                if (dt == "thinking_delta" && blk.kind == 0) {
+                    blk.text += d.value("thinking", "");
+                    int para = -1;
+                    std::string head = claude::thinkingHeadline(blk.text, &para);
+                    if (!head.empty()) {
+                        // Même paragraphe : la ligne s'affine en place ; nouveau paragraphe : nouvelle ligne.
+                        if (para == designerHeadPara_ && !designerActivity_.empty()) designerActivity_.back() = head;
+                        else designerSay(head, false);
+                        designerHeadPara_ = para;
+                    }
+                } else if (dt == "text_delta" && blk.kind == 1) {
+                    blk.text += d.value("text", "");
+                    designerSay("Rédaction de la réponse… (" + std::to_string(blk.text.size()) + " caractères)", true);
+                }
+            }
+        } else if (type == "assistant" && j.contains("message")) {
+            // Messages complets : seuls les appels d'outils servent (le texte et la réflexion arrivent en flux).
+            for (auto& c : j["message"].value("content", json::array())) {
+                if (c.value("type", "") != "tool_use") continue;
+                std::string line = describeTool(c);
                 // Mode plan : la conception peut arriver dans le plan rendu plutôt que dans la réponse finale.
                 if (c.value("name", "") == "ExitPlanMode" && c.contains("input"))
                     designerPlanText_ = c["input"].value("plan", "");
-            } else if (t == "text") {
-                line = "Rédaction de la conception…";
-            } else if (t == "thinking") {
-                line = "Réflexion…";
+                designerExchange_.push_back({2, line});
+                designerSay(line, false);
             }
-            if (line.empty() || (!designerActivity_.empty() && designerActivity_.back() == line)) continue;
-            designerActivity_.push_back(line);
-            if (designerActivity_.size() > 60) designerActivity_.erase(designerActivity_.begin());
         }
     };
     job->onDone = [this, refine](claude::OneShot& j) {
         designer_.lastCostUsd = j.costUsd();
         if (j.error() == "Annulé") {
-            designerActivity_.push_back("Annulé.");
+            designerSay("Annulé.", false);
             return;
         }
         claude::DesignResponse r = claude::parseDesignResponse(j.result());
@@ -232,6 +272,17 @@ void App::designerRun(bool refine) {
         saveDesigner();
     };
     if (job->start(claudeExe_, d.model, prompt, cwd)) jobs_.push_back(std::move(job));
+}
+
+// Ligne d'activité : une ligne « transitoire » (attente, compteur) est remplacée par la suivante au lieu de s'empiler.
+void App::designerSay(const std::string& line, bool transient) {
+    if (line.empty()) return;
+    if (!designerActivity_.empty() && (designerLineTransient_ || designerActivity_.back() == line))
+        designerActivity_.back() = line;
+    else
+        designerActivity_.push_back(line);
+    designerLineTransient_ = transient;
+    if (designerActivity_.size() > 60) designerActivity_.erase(designerActivity_.begin());
 }
 
 void App::designerCancel() {
@@ -435,8 +486,15 @@ void App::drawDesignerPage() {
     ImGui::TextDisabled("Décrivez un projet : Claude conçoit l'équipe d'agents et règle l'orchestrateur.");
     {
         const char* reset = designerConfirmReset_ ? "Effacer ce design ?" : "Nouveau design";
-        float bw = ui::buttonWidth(reset);
+        const char* seeLbl = "Échange avec Claude";
+        const bool canSee = !busy && !designerPrompt_.empty();  // pendant la conception : bouton dans la carte
+        float bw = ui::buttonWidth(reset) + (canSee ? ui::buttonWidth(seeLbl) + ImGui::GetStyle().ItemSpacing.x : 0);
         ImGui::SameLine(std::max(ImGui::GetCursorPosX() + fs, ImGui::GetWindowContentRegionMax().x - bw));
+        if (canSee) {
+            if (ui::chip(seeLbl, &pal.dim)) designerShowExchange_ = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Revoir la dernière demande envoyée, la réflexion de Claude et sa réponse.");
+            ImGui::SameLine();
+        }
         ImGui::BeginDisabled(busy);
         if (ui::chip(reset, designerConfirmReset_ ? &pal.warn : &pal.dim)) {
             if (designerConfirmReset_ || (d.design.empty() && util::trim(d.req.description).empty())) {
@@ -489,16 +547,24 @@ void App::drawDesignerPage() {
         ImGui::Text("%s… %d:%02d", designerRefining_ ? "Claude affine la conception" : "Claude conçoit le projet", el / 60, el % 60);
         ImGui::SameLine();
         ImGui::TextDisabled("· %s · mode %s", d.model.c_str(), d.permissionMode.c_str());
-        float cw = ui::buttonWidth("Annuler");
+        const char* seeLbl = "Voir l'échange";
+        float cw = ui::buttonWidth("Annuler") + ui::buttonWidth(seeLbl) + ImGui::GetStyle().ItemSpacing.x;
         ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetContentRegionMax().x - cw));
+        if (ui::chip(seeLbl)) designerShowExchange_ = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("La demande envoyée, la réflexion de Claude et sa réponse, en direct.");
+        ImGui::SameLine();
         if (ImGui::Button("Annuler")) designerCancel();
+        // Les étapes précédentes en gris, la ligne en cours en clair (tirée de la réflexion de Claude).
         size_t from = designerActivity_.size() > 6 ? designerActivity_.size() - 6 : 0;
+        float wrap = ImGui::GetContentRegionAvail().x;
         for (size_t i = from; i < designerActivity_.size(); ++i) {
             bool last = i + 1 == designerActivity_.size();
-            if (last) ImGui::TextUnformatted(("› " + designerActivity_[i]).c_str());
-            else ImGui::TextDisabled("  %s", designerActivity_[i].c_str());
+            std::string line = util::truncateUtf8(designerActivity_[i], 220);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrap);
+            if (last) ImGui::TextWrapped("› %s", line.c_str());
+            else ImGui::TextDisabled("  %s", line.c_str());
+            ImGui::PopTextWrapPos();
         }
-        if (designerActivity_.empty()) ImGui::TextDisabled("  Démarrage de Claude Code…");
         ImGui::EndChild();
         ui::anim::markBusy();
     } else if (!designerError_.empty()) {
@@ -512,6 +578,8 @@ void App::drawDesignerPage() {
         }
         if (ImGui::SmallButton("Réessayer")) designerRun(designerRefining_);
         ImGui::SameLine();
+        if (!designerPrompt_.empty() && ImGui::SmallButton("Voir l'échange")) designerShowExchange_ = true;
+        if (!designerPrompt_.empty()) ImGui::SameLine();
         if (ImGui::SmallButton("Fermer")) designerError_.clear();
         ImGui::EndChild();
     }
@@ -706,6 +774,7 @@ void App::drawDesignerPage() {
         if (canRun && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Enter)) go = true;
         if (go && canRun) {
             d.req.answered.clear();  // nouvelle description : les anciennes réponses ne valent plus
+            d.req.clarifications.clear();
             designerRun(false);
         }
         dimWrapped("Compter 1 à 3 minutes avec Opus (davantage en analysant un gros dossier). La conception consomme du "
@@ -791,6 +860,18 @@ void App::drawDesignerPage() {
             ImGui::PopID();
             ImGui::Spacing();
         }
+        // Précisions libres : ce que les questions n'ont pas couvert.
+        beginCard("##qextra");
+        ImGui::PushFont(fontBold, 0.0f);
+        ImGui::TextUnformatted("Précisions");
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::TextDisabled("(facultatif)");
+        dimWrapped("Ce que vous voulez ajouter : une envie, une contrainte, un exemple, ce que vous ne voulez pas…");
+        dirtyIf(multiline("##clarif", d.req.clarifications, 4,
+                          "Ex. : je veux pouvoir comparer deux entraînements côte à côte ; pas de service en ligne."));
+        ImGui::EndChild();
+        ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Button, pal.accent);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
         bool go = ImGui::Button("✦  Concevoir avec ces réponses", ImVec2(0, fs * 2.2f));
@@ -1175,6 +1256,86 @@ void App::drawDesignerPage() {
     }
     ImGui::EndDisabled();
     ImGui::EndChild();
+}
+
+// ---------------------------------------------------------------------------
+// Fenêtre « Échange avec Claude » : la dernière demande du Designer, la réflexion (résumée) et la réponse, en direct.
+// ---------------------------------------------------------------------------
+
+void App::drawDesignerExchange() {
+    if (!designerShowExchange_) return;
+    const auto& pal = ui::palette();
+    const float fs = ImGui::GetFontSize();
+    const bool busy = designerBusy();
+    ImGui::SetNextWindowSize(ImVec2(fs * 46, fs * 38), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Échange avec Claude — Designer###dsgexchange", &designerShowExchange_, ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+    if (busy) {
+        ui::spinner((float)now_, pal.accent);
+        ImGui::SameLine();
+        int el = (int)(now_ - designerStarted_);
+        ImGui::Text("En cours · %d:%02d", el / 60, el % 60);
+        ui::anim::markBusy();
+    } else {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled(designerPrompt_.empty() ? "Aucune demande envoyée depuis le lancement de ClaudeDesk."
+                                                    : "Dernier échange (terminé)");
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("· %s · mode %s", designer_.model.c_str(), designer_.permissionMode.c_str());
+    // Tout copier (Markdown)
+    {
+        const char* cp = "Copier";
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetContentRegionMax().x - ui::buttonWidth(cp)));
+        if (ui::chip(cp)) {
+            std::string md = "## Demande\n\n" + designerPrompt_ + "\n";
+            for (auto& b : designerExchange_)
+                md += b.kind == 0 ? "\n## Réflexion\n\n" + b.text + "\n" : b.kind == 1 ? "\n## Réponse\n\n" + b.text + "\n" : "\n> " + b.text + "\n";
+            ImGui::SetClipboardText(md.c_str());
+            toast("Échange copié.");
+        }
+    }
+    ImGui::Separator();
+
+    ImGui::BeginChild("##exch", ImVec2(0, 0));
+    if (!designerPrompt_.empty() && ImGui::TreeNode("Demande envoyée à Claude")) {
+        std::string p = designerPrompt_;
+        ImGui::InputTextMultiline("##prompt", &p, ImVec2(-1, fs * 14), ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_WordWrap);
+        ImGui::TreePop();
+    }
+    for (size_t i = 0; i < designerExchange_.size(); ++i) {
+        const auto& b = designerExchange_[i];
+        ImGui::PushID((int)i);
+        ImGui::Spacing();
+        if (b.kind == 2) {
+            ImGui::TextDisabled("›  %s", b.text.c_str());
+        } else if (b.kind == 0) {
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextColored(pal.dim, "Réflexion");
+            ImGui::PopFont();
+            if (b.text.empty()) ImGui::TextDisabled(busy && i + 1 == designerExchange_.size() ? "…" : "(non transmise)");
+            else {
+                ImGui::PushFont(fontItalic ? fontItalic : fontUi, 0.0f);
+                dimWrapped(b.text);
+                ImGui::PopFont();
+            }
+        } else {
+            ImGui::PushFont(fontBold, 0.0f);
+            ImGui::TextUnformatted("Réponse");
+            ImGui::PopFont();
+            ImGui::PushFont(fontMono ? fontMono : fontUi, 0.0f);
+            ImGui::TextWrapped("%s", b.text.c_str());
+            ImGui::PopFont();
+        }
+        ImGui::PopID();
+    }
+    if (designerExchange_.empty() && busy) ImGui::TextDisabled("En attente de la première réponse de Claude…");
+    // Suit le flux tant qu'on est en bas.
+    if (busy && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - fs * 3) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+    ImGui::End();
 }
 
 }  // namespace app

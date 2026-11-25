@@ -109,6 +109,24 @@ int App::run(int argc, char** argv) {
         if (optPanel_.size() > 4) tourStep_ = std::atoi(optPanel_.c_str() + 4);
     }
     if (optPanel_ == "welcome") showWelcomeModal_ = true;
+    if (optPanel_ == "attention") {  // test visuel des signaux d'attention (Attention.cpp)
+        OpenConversation* a = newConversation(nullptr, {}, true);
+        OpenConversation* b = newConversation(nullptr, {}, false);
+        OpenConversation* c = newConversation(nullptr, {}, false);
+        if (a && b && c) {
+            a->session->title = "Conversation affichée";
+            b->session->title = "Tâches de l'orchestrateur";
+            c->session->title = "Décision attendue";
+            attnInit_ = true;
+            attnConvs_[a->session->localId] = {};
+            attnConvs_[b->session->localId] = {};
+            attnConvs_[c->session->localId] = {};
+            flash("tab:" + b->session->localId, ui::palette().accent, true);
+            flash("tab:" + c->session->localId, ui::palette().warn, true);
+        }
+        flash("page2", ui::palette().warn, true);
+        flash("page3", ui::palette().ok, true);
+    }
     // Test : changement de police à chaud (atlas reconstruit après le démarrage)
     if (optPanel_.rfind("police:", 0) == 0 && optPanel_ != "police:systeme")
         settings_.uiFont = optPanel_.substr(7), fontFamilyReloadPending_ = true;
@@ -147,6 +165,14 @@ int App::run(int argc, char** argv) {
             q.choice = 0;
             designer_.questions = {q};
             designer_.step = 1;
+        }
+        // designer:echange = fenêtre « Échange avec Claude » remplie d'un exemple (sans Claude)
+        if (optPanel_ == "designer:echange") {
+            designerPrompt_ = claude::designPrompt(designer_.req);
+            designerExchange_ = {{0, "I'm weighing how many agents the recipe app needs.\n\nThe planning and the shopping list "
+                                     "share the same data, so one agent should own the storage layer."},
+                                 {1, "```json\n{\"design\": {\"name\": \"Recettes\"}}\n```"}};
+            designerShowExchange_ = true;
         }
         if (optPanel_.rfind("designer:creer", 0) == 0) {
             // Test : dépôt dans le dossier de test (à côté de l'espace de travail), jamais chez l'utilisateur.
@@ -598,7 +624,7 @@ void App::shutdown() {
     SDL_RemoveEventWatch(liveResizeWatch, this);
     settings_.openTabs.clear();
     for (auto& oc : open_)
-        if (!oc->session->entries.empty()) settings_.openTabs.push_back(oc->session->localId);
+        if (!oc->session->entries.empty() && !oc->hiddenTab) settings_.openTabs.push_back(oc->session->localId);
     if (auto* oc = active()) settings_.activeTab = oc->session->localId;
     bool detached = dash_ != nullptr;
     closeDashboardWindow();
@@ -606,9 +632,10 @@ void App::shutdown() {
     if (orch_) saveOrchestrator();
     if (designerDirty_) saveDesigner();
     saveAll();
-    // Ferme toutes les entrées d'abord : les processus se terminent en parallèle.
-    for (auto& oc : open_) oc->session->stop();
+    // Les processus se terminent en parallèle (fils d'arrière-plan), puis on les attend tous.
+    for (auto& oc : open_) oc->session->stop(false);
     open_.clear();
+    claude::ClaudeSession::joinBackgroundStops();
     jobs_.clear();
     settings_.save(settingsPath_);
     usage_.save(usagePath_);
@@ -713,6 +740,7 @@ void App::frame() {
     if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
     drawNewProjectPopup();
     drawLoginWindow();
+    drawDesignerExchange();
 
     // Notifications éphémères en bas à droite.
     while (!toasts_.empty() && toasts_.front().until < now_) toasts_.pop_front();
@@ -888,6 +916,7 @@ void App::focusConversation(int index) {
         return;
     }
     page_ = 0;
+    open_[index]->hiddenTab = false;
     selectTab_ = index;
     active_ = index;
     open_[index]->focusEditor = true;
@@ -1014,7 +1043,13 @@ void App::processAsyncResults() {
         if (s.dirty && !s.entries.empty() && now_ - oc->lastSave > std::max(1, settings_.autosaveSeconds)) saveConversation(*oc);
     }
     tickOrchestrator();
+    tickAttention();
     autosaveSettings();
+    // Conversations sans onglet devenues inutiles (vérifié toutes les 2 s)
+    if (now_ - lastHiddenCheck_ > 2.0) {
+        lastHiddenCheck_ = now_;
+        releaseHiddenTabs();
+    }
     for (auto& j : jobs_) j->update();
     pumpFolderSyntheses();
     pumpRestarts();
@@ -1053,6 +1088,7 @@ void App::wireSession(claude::ClaudeSession& s) {
     s.onRateLimit = [this](const json& info) { usage_.onRateLimitEvent(info); };
     s.onAuthError = [this](claude::ClaudeSession& sess) { onAuthError(sess); };
     s.onModelRefused = [this](claude::ClaudeSession& sess) { onModelRefused(sess); };
+    s.onUsageLimit = [this](claude::ClaudeSession& sess) { onUsageLimit(sess); };
     s.onModelAnswered = [this](claude::ClaudeSession&, const std::string& model) {
         std::string plan = accountPlan();
         if (plan.empty()) return;
@@ -1100,12 +1136,37 @@ void App::onModelRefused(claude::ClaudeSession& s) {
         std::vector<std::string> usable = claude::usableModels(orch_->settings.allowedModels, orch_->blockedModels);
         std::string next = claude::clampModel(s.modelRefusedName, usable);
         if (claude::modelTier(next) == claude::modelTier(s.modelRefusedName) || next.empty()) next = "opus";
+        // Jamais de renvoi avec le modèle qui vient d'être refusé (sinon boucle de refus à la chaîne) :
+        // l'orchestrateur s'arrête et l'humain choisit.
+        if (claude::findModelFamily(next) == claude::findModelFamily(s.modelRefusedName)) {
+            orch_->pause("modèle " + name + " refusé et aucun autre modèle autorisé : changez les modèles permis, puis reprenez");
+            saveOrchestrator();
+            toast(name + " est refusé : l'orchestrateur est en pause.", true);
+            return;
+        }
         s.setModel(next);
-        s.resendLast();
+        s.resendLast("Message renvoyé avec " + claude::modelDisplayName(next) + ".");
         toast(name + " n'est pas utilisable avec votre abonnement : la tâche repart avec " + claude::modelDisplayName(next) + ".");
         return;
     }
     toast(name + " n'est pas utilisable avec votre abonnement : choisissez un autre modèle.", true);
+}
+
+// Limite d'usage du compte atteinte (5 h ou semaine) : tous les modèles sont refusés jusqu'à la réinitialisation.
+// L'orchestrateur se met en pause jusque-là (ses tours refusés ne comptent pas : ils repartiront à la reprise) ;
+// une conversation affiche la note, à renvoyer plus tard.
+void App::onUsageLimit(claude::ClaudeSession& s) {
+    const bool week = s.usageLimited == "seven_day";
+    for (auto& oc : open_)
+        if (oc->session.get() == &s) pushActivity(*oc, ActivityKind::Error, week ? "limite hebdomadaire atteinte" : "limite de 5 h atteinte");
+    if (orch_ && orchManages(s.localId)) {
+        bool wasPaused = orch_->state == claude::OrchState::UsagePause;
+        orchestratorLimitReached(s.usageLimited);
+        if (!wasPaused && orch_->state == claude::OrchState::UsagePause)
+            toast("Limite d'usage atteinte : l'orchestrateur reprendra seul à la réinitialisation.", true);
+        return;
+    }
+    toast(week ? "Limite hebdomadaire atteinte : message non traité." : "Limite de 5 h atteinte : message non traité.", true);
 }
 
 ws::Folder* App::folderOf(const OpenConversation& oc) {
@@ -1190,7 +1251,10 @@ OpenConversation* App::openConversation(const std::string& id, bool focus) {
     }
     for (size_t i = 0; i < open_.size(); ++i)
         if (open_[i]->session->localId == id) {
-            if (focus) selectTab_ = (int)i;
+            if (focus) {
+                selectTab_ = (int)i;
+                open_[i]->hiddenTab = false;  // onglet fermé pendant qu'un agent travaillait : il revient
+            }
             return open_[i].get();
         }
     auto [folder, meta] = workspace_.findConversation(id);
@@ -1245,12 +1309,49 @@ OpenConversation* App::openImported(const claude::HistorySession& hs, ws::Folder
 void App::closeConversation(int index) {
     if (index < 0 || index >= (int)open_.size()) return;
     auto& oc = *open_[index];
-    saveConversation(oc);
+    if (oc.session->dirty) saveConversation(oc);
+    // Agent de l'orchestrateur : fermer l'onglet ne doit pas couper sa tâche. La conversation reste ouverte sans
+    // onglet ; releaseHiddenTabs la libère quand l'orchestrateur n'en a plus besoin.
+    if (orchKeepsAlive(oc)) {
+        oc.hiddenTab = true;
+        if (active_ == index) active_ = firstVisibleTab();
+        return;
+    }
     if (settings_.autoRecap && oc.meta.messages >= 2 && oc.meta.recapTime < oc.meta.updated - 60)
         requestRecap(oc.session->localId);
-    oc.session->stop();
+    oc.session->stop(false);  // l'arrêt du processus se fait en arrière-plan : l'onglet disparaît aussitôt
     open_.erase(open_.begin() + index);
     if (active_ >= (int)open_.size()) active_ = (int)open_.size() - 1;
+    if (active_ >= 0 && open_[active_]->hiddenTab) active_ = firstVisibleTab();
+}
+
+bool App::orchKeepsAlive(const OpenConversation& oc) const {
+    if (!orch_ || isOrchBrain(oc.session->localId)) return false;
+    if (!(orch_->running() || orch_->state == claude::OrchState::Paused)) return false;
+    const std::string& id = oc.session->localId;
+    for (auto& t : orch_->tasks)
+        if (t.convId == id) return true;  // tâche en cours, ou agent qui recevra la suivante
+    return false;
+}
+
+int App::firstVisibleTab() const {
+    for (int i = 0; i < (int)open_.size(); ++i)
+        if (!open_[i]->hiddenTab && !isOrchBrain(open_[i]->session->localId)) return i;
+    return open_.empty() ? -1 : 0;
+}
+
+// Conversations sans onglet que plus personne n'utilise (orchestration finie, tâche abandonnée) : on les libère.
+void App::releaseHiddenTabs() {
+    for (int i = (int)open_.size() - 1; i >= 0; --i) {
+        auto& oc = *open_[i];
+        if (!oc.hiddenTab || oc.session->state == claude::SessionState::Busy ||
+            oc.session->state == claude::SessionState::Starting || orchKeepsAlive(oc))
+            continue;
+        if (oc.session->dirty) saveConversation(oc);
+        oc.session->stop(false);
+        open_.erase(open_.begin() + i);
+        if (active_ >= (int)open_.size()) active_ = (int)open_.size() - 1;
+    }
 }
 
 void App::saveConversation(OpenConversation& oc) {
@@ -1731,9 +1832,18 @@ void App::handleGlobalShortcuts() {
         settings_.save(settingsPath_);
         toast("Enregistré.");
     }
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_PageDown, g) && !open_.empty()) selectTab_ = (active_ + 1) % (int)open_.size();
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_PageUp, g) && !open_.empty())
-        selectTab_ = (active_ + (int)open_.size() - 1) % (int)open_.size();
+    // Onglet suivant / précédent (en sautant la discussion de l'orchestrateur et les onglets fermés)
+    for (int dir : {1, -1}) {
+        if (!ImGui::Shortcut(ImGuiMod_Ctrl | (dir > 0 ? ImGuiKey_PageDown : ImGuiKey_PageUp), g) || open_.empty()) continue;
+        const int n = (int)open_.size();
+        for (int k = 1; k <= n; ++k) {
+            int i = ((active_ + dir * k) % n + n) % n;
+            if (!open_[i]->hiddenTab && !isOrchBrain(open_[i]->session->localId)) {
+                selectTab_ = i;
+                break;
+            }
+        }
+    }
     // Échap quitte d'abord le mode « Sélectionner » (géré par drawConversation) ; sinon il interrompt Claude.
     if (ImGui::Shortcut(ImGuiKey_Escape, g) && oc && !oc->hasTextSelection() && oc->session->state == claude::SessionState::Busy)
         oc->session->interrupt();

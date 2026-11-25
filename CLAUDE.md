@@ -24,7 +24,10 @@ Code, commentaires et textes d'interface en **français**.
   `_dossier.json` (`projectKind`) et `OrchestratorSettings::projectKind` ; défaut « software » pour l'existant),
   `Models` (familles haiku/sonnet/opus/fable, accès selon l'abonnement : la CLI liste Fable pour tous, mais avec Pro
   il demande des crédits d'usage — refus « out of usage credits », vérifié ; refus et réponses retenus dans
-  `Settings::modelAccess`, modèles bloqués jamais confiés par l'orchestrateur : `usableModels`, `blockedModels`),
+  `Settings::modelAccess`, modèles bloqués jamais confiés par l'orchestrateur : `usableModels`, `blockedModels`).
+  ⚠ La limite de 5 h dit AUSSI « out of usage credits » (« You've hit your 5-hour limit · resets … · out of usage
+  credits ») : `isUsageLimitText` la distingue → `ClaudeSession::usageLimited` + `onUsageLimit` (tour non compté) →
+  `Orchestrator::limitReached` (pause jusqu'à `resetsAt`, tâche renvoyée avec « Reprise après interruption »),
   `Orchestrator` (moteur de l'orchestrateur, sans UI : directives `@@DELEGUER/@@HUMAIN/@@ATTENDRE/@@TERMINE/@@NOUVEL_AGENT`, comptes rendus au fil de l'eau, garde-fous ;
   un nouvel agent n'est JAMAIS créé sans l'accord de l'humain : `pendingAgents` → question → `OrchestratorHost::createAgent`)
 - `src/ui` — panneaux ImGui : `ConversationView`, `PromptEditor`, `ConfigPanel`,
@@ -41,6 +44,10 @@ Code, commentaires et textes d'interface en **français**.
   `TerminalProcess`, connexion détectée par `auth status` toutes les 2 s, puis renvoi des messages refusés
   (`ClaudeSession::resendLast`) ; l'orchestrateur est mis en pause à l'échec et repris après ; un tour refusé
   faute de connexion ne compte pas dans `stats.turns`). Carte d'erreur : `drawAuthErrorCard`.
+  `Attention` (signaux : bouton de page / onglet qui clignote puis reste teinté quand sa section change d'état hors
+  de la vue — `flash`, `flashColor`, `tickAttention` ; test `--panel attention`).
+  Fermer l'onglet d'un agent suivi par l'orchestrateur ne coupe PAS sa tâche : `OpenConversation::hiddenTab`
+  (`orchKeepsAlive`, libéré par `releaseHiddenTabs`) ; les autres processus s'arrêtent en arrière-plan (`stop(false)`).
   `DesignerPanel` (page 3 « Designer », Ctrl+4 : Décrire → Clarifier → Ajuster → Créer ; brouillon `designer.json`).
 - `src/workspace` — `Workspace` : vrais dossiers + `_dossier.json` + `*.conv.json`, corbeille, `buildContext`
 - `src/util` — chemins, chaînes, fichiers
@@ -83,7 +90,9 @@ build\debug\ClaudeDesk.exe --data-dir <tmp>\data --workspace <tmp>\ws ^
 Projets : `--panel projets:legende|projets:fichiers|projets:sessions` (légende des icônes, explorateur du dossier de travail déplié, agents à plusieurs sessions dépliés).
 Polices : `--panel police:systeme` (bascule à chaud vers les polices du système). Modèles : `--panel config:0`.
 Connexion : `--panel login|login:attente|login:ok|login:conv` (fenêtre ou carte de conversation, sans rien lancer).
-Designer : `--panel designer[:questions|:demo|:doc|:type-<id>|:creer|:creer!]` (`doc` = conception d'audit ; `type-data`… =
+Designer : `--panel designer[:questions|:demo|:doc|:echange|:type-<id>|:creer|:creer!]` (`echange` = fenêtre « Échange avec
+Claude » remplie d'un exemple ; la conception réelle passe `--include-partial-messages --thinking-display summarized` :
+résumé de réflexion en direct → ligne d'activité `thinkingHeadline` ; `doc` = conception d'audit ; `type-data`… =
 étape 1, type présélectionné ; `creer!` crée le projet d'exemple dans `<ws>/../depot-test`),
 `--design "<description>"` lance une vraie conception (mettre `{"model":"haiku","request":{"kind":"data"}}` dans
 `<tmp>\data\designer.json`) — SANS `--nowait`, sinon la capture n'attend pas la fin de la conception.

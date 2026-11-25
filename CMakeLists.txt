@@ -101,6 +101,7 @@ add_executable(ClaudeDesk
     src/ui/WorkspacePanel.cpp
     src/ui/PermissionPanel.cpp
     src/ui/Dashboard.cpp
+    src/ui/Attention.cpp
     src/ui/OrchestratorPanel.cpp
     src/ui/DesignerPanel.cpp
     src/ui/Tutorial.cpp

@@ -367,6 +367,13 @@ void App::orchestratorResume() {
     saveOrchestrator();
 }
 
+void App::orchestratorLimitReached(const std::string& win) {
+    if (!orch_) return;
+    AppOrchHost h(*this);
+    orch_->limitReached(h, win);
+    saveOrchestrator();
+}
+
 void App::orchestratorRefreshBrain() {
     if (!orch_ || orch_->brainConvId.empty()) return;
     AppOrchHost h(*this);

@@ -110,3 +110,38 @@ TEST_CASE("session : modèle inexistant") {
     CHECK(s.modelRefused == ModelAccess::Unavailable);
     CHECK(isModelRefusalText(s.entries[0].text));
 }
+
+TEST_CASE("limite de 5 h : ni refus de modèle ni réponse") {
+    const std::string txt = "You've hit your 5-hour limit · resets 8:30am (Europe/Paris) · out of usage credits";
+    CHECK(isUsageLimitText(txt));
+    CHECK(usageLimitWindow(txt) == "five_hour");
+    CHECK(usageLimitWindow("You've hit your weekly limit · resets Mon 9am") == "seven_day");
+    CHECK_FALSE(isUsageLimitText("You're out of usage credits. Switch to another model"));
+    CHECK(modelAccessFromError("rate_limit", txt) == ModelAccess::Unknown);  // avant : NeedsCredits → Opus bloqué
+
+    ClaudeSession s;
+    s.config.model = "opus";
+    int refused = 0, limited = 0, finished = 0;
+    s.onModelRefused = [&](ClaudeSession&) { ++refused; };
+    s.onUsageLimit = [&](ClaudeSession&) { ++limited; };
+    s.onTurnFinished = [&](ClaudeSession&) { ++finished; };
+    s.handleLine(R"({"type":"assistant","message":{"id":"l1","model":"<synthetic>","role":"assistant","type":"message","content":[{"type":"text","text":"You've hit your 5-hour limit · resets 8:30am (Europe/Paris) · out of usage credits"}]},"session_id":"s","error":"rate_limit"})");
+    s.handleLine(R"({"type":"result","subtype":"success","is_error":true,"total_cost_usd":0,"result":"You've hit your 5-hour limit · resets 8:30am (Europe/Paris) · out of usage credits","session_id":"s"})");
+    CHECK(refused == 0);
+    CHECK(limited == 1);
+    CHECK(finished == 1);
+    CHECK(s.modelRefused == ModelAccess::Unknown);
+    CHECK(s.usageLimited == "five_hour");
+    CHECK(s.stats.turns == 0);  // le tour repartira après la réinitialisation
+    REQUIRE(s.entries.size() == 1);
+    CHECK(s.entries[0].text.find("8:30am") != std::string::npos);
+}
+
+TEST_CASE("accès aux modèles : l'ancienne observation erronée d'Opus est ignorée") {
+    ModelAccessBook book;
+    book.fromJson(nlohmann::json::parse(R"({"opus":{"access":2,"plan":"pro","when":1},"fable":{"access":2,"plan":"pro","when":1}})"));
+    CHECK(book.usable("opus", "pro"));
+    CHECK_FALSE(book.usable("fable", "pro"));
+    book.record("sonnet", "pro", ModelAccess::NeedsCredits, 2);  // jamais vrai pour un modèle inclus
+    CHECK(book.usable("sonnet", "pro"));
+}
